@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         NTR ToolBox
 // @namespace    http://tampermonkey.net/
-// @version      v0.5
+// @version      v0.6
 // @author       TheNano
 // @description  ToolBox for Novel Translate bot website
 // @match        https://books.fishhawk.top/*
 // @match        https://books1.fishhawk.top/*
+// @match        https://n.novelia.cc/*
 // @icon         https://github.com/LittleSurvival/NTR-ToolBox/blob/main/icon.jpg?raw=true
 // @grant        GM_openInTab
 // @license      All Rights Reserved
@@ -21,10 +22,10 @@
     window._NTRToolBoxInstance = true;
 
     const CONFIG_VERSION = 20;
-    const VERSION = 'v0.5';
+    const VERSION = 'v0.6';
     const CONFIG_STORAGE_KEY = 'NTR_ToolBox_Config';
     const IS_MOBILE = /Mobi|Android/i.test(navigator.userAgent);
-    const domainAllowed = (location.hostname === 'books.fishhawk.top' || location.hostname === 'books1.fishhawk.top');
+    const domainAllowed = (location.hostname === 'books.fishhawk.top' || location.hostname === 'books1.fishhawk.top' || location.hostname === 'n.novelia.cc');
 
     // -----------------------------------
     // Module settings
@@ -686,17 +687,6 @@
         }
     };
 
-    const moduleBlockUser = {
-        name: '屏蔽用戶',
-        type: 'keep',
-        whitelist: '',
-        settings: [
-            newStringSetting('apiKey', ''),
-            
-        ]
-
-    }
-
     const moduleSyncStorage = {
         name: '資料同步',
         type: 'onclick',
@@ -806,7 +796,7 @@
             function undone(n) {
                 if (mode === "normal") {
                     const sOrG = (n.sakura ?? n.gpt) || 0;
-                    //Using max to deal with some sakura > total situation
+                    //Using max to deal with some total > sakura situation
                     return Math.max(n.total - sOrG, 0);
                 }
                 return n.total;
