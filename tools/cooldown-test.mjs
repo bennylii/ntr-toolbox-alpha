@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const userscript = path.join(here, '..', 'NTR_ToolBox.user.js');
+const userscript = path.join(here, '..', 'ntr-toolbox-alpha.user.js');
 const extractPath = path.join(here, '.engine-extract.mjs');
 
 const source = fs.readFileSync(userscript, 'utf8');

@@ -1,4 +1,4 @@
-# NTR ToolBox Tampermonkey 调试环境搭建指南
+# NTR Toolbox Alpha Tampermonkey 调试环境搭建指南
 
 ## 方法一：使用 Chrome 开发者工具直接调试
 
@@ -10,7 +10,7 @@
 ### 步骤 2：添加脚本
 1. 点击 Tampermonkey 图标
 2. 选择 "添加新脚本"
-3. 打开 `NTR_ToolBox.user.js` 文件
+3. 打开 `ntr-toolbox-alpha.user.js` 文件
 4. 复制全部内容
 5. 粘贴到编辑器中并保存
 
@@ -47,7 +47,7 @@ python -m http.server 8080
 ### 在开发者工具中手动注入脚本
 1. 打开浏览器开发者工具
 2. 切换到 Console 标签
-3. 复制 `NTR_ToolBox.user.js` 的内容（去掉 UserScript 头部注释）
+3. 复制 `ntr-toolbox-alpha.user.js` 的内容（去掉 UserScript 头部注释）
 4. 粘贴并按回车执行
 
 ---
@@ -108,7 +108,7 @@ A: 确保在 Sources 面板中启用了 "Pause on exceptions"
 # 创建 Tampermonkey 配置脚本
 $configScript = @"
 // ==UserScript==
-// @name         NTR ToolBox Debug
+// @name         NTR Toolbox Alpha Debug
 // @namespace    http://tampermonkey.net/
 // @version      v0.7.1
 // @match        https://n.novelia.cc/*
@@ -119,7 +119,7 @@ $configScript = @"
 // ==/UserScript==
 
 // 注入调试代码
-console.log('[DEBUG] NTR ToolBox 加载中...');
+console.log('[DEBUG] NTR Toolbox Alpha 加载中...');
 "@
 
 Write-Host $configScript

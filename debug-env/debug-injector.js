@@ -1,5 +1,5 @@
 /**
- * NTR ToolBox 调试注入器
+ * NTR Toolbox Alpha 调试注入器
  * 
  * 使用方法：
  * 1. 将此代码复制到浏览器的开发者工具控制台中执行
@@ -11,11 +11,11 @@
 (async function() {
     // 检查是否已注入
     if (window._NTRToolBoxInstance) {
-        console.log('NTR ToolBox 已存在');
+        console.log('NTR Toolbox Alpha 已存在');
         return;
     }
 
-    console.log('正在加载 NTR ToolBox 调试版本...');
+    console.log('正在加载 NTR Toolbox Alpha 调试版本...');
 
     // 模拟 Tampermonkey 环境
     const mockGM = {
@@ -29,7 +29,7 @@
     try {
         // 在控制台运行时，需要手动提供脚本内容
         // 这里提供一个最小化的初始化版本
-        console.log('NTR ToolBox 调试注入器已就绪');
+        console.log('NTR Toolbox Alpha 调试注入器已就绪');
         console.log('请在 Tampermonkey 中添加脚本或手动注入完整代码');
     } catch (e) {
         console.error('加载失败:', e);
@@ -41,7 +41,7 @@ window.NTRDebug = {
     // 打印所有模块信息
     printModules: function() {
         if (window.script && window.script.configuration) {
-            console.log('=== NTR ToolBox 模块列表 ===');
+            console.log('=== NTR Toolbox Alpha 模块列表 ===');
             window.script.configuration.modules.forEach((mod, i) => {
                 console.log(`${i + 1}. ${mod.name} (${mod.type})`);
                 if (mod.settings) {
@@ -72,7 +72,7 @@ window.NTRDebug = {
 
     // 查看 localStorage 数据
     printStorage: function() {
-        console.log('=== NTR ToolBox 存储数据 ===');
+        console.log('=== NTR Toolbox Alpha 存储数据 ===');
         ['workspace-sakura', 'gpt-workspace', 'NTR_ToolBox_Config', 'NTR_KeepState', 'ntr-panel-position'].forEach(key => {
             const data = localStorage.getItem(key);
             if (data) {
@@ -90,7 +90,7 @@ window.NTRDebug = {
         ['workspace-sakura', 'gpt-workspace', 'NTR_ToolBox_Config', 'NTR_KeepState', 'ntr-panel-position'].forEach(key => {
             localStorage.removeItem(key);
         });
-        console.log('已清空所有 NTR ToolBox 数据');
+        console.log('已清空所有 NTR Toolbox Alpha 数据');
     },
 
     // 模拟页面类型
@@ -100,7 +100,7 @@ window.NTRDebug = {
     }
 };
 
-console.log('%c NTR ToolBox 调试工具已加载 ', 'background: #4ade80; color: #000; font-size: 14px; padding: 5px;');
+console.log('%c NTR Toolbox Alpha 调试工具已加载 ', 'background: #4ade80; color: #000; font-size: 14px; padding: 5px;');
 console.log('使用 NTRDebug.printModules() 查看模块');
 console.log('使用 NTRDebug.runModule("模块名称") 执行模块');
 console.log('使用 NTRDebug.printStorage() 查看存储');

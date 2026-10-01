@@ -16,6 +16,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // 清除旧界面
 document.querySelectorAll('#ntr-glossary-overlay, #ntr-glossary-status').forEach((e) => e.remove());
 
+// 「任务方式」默认「加入队列」，现场等不到提取浮窗 —— 临时切成「直接提取」+ 临时端点，结束前还原
+try { await window._NTRGlossaryDev.GlossaryQueue.stop(); } catch (e) { }
+{
+  const db = await new Promise((res, rej) => { const r = indexedDB.open('ntr-glossary', 1); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  const names = ['jobs', 'chunks'].filter((n) => db.objectStoreNames.contains(n));
+  const tx = db.transaction(names, 'readwrite');
+  names.forEach((n) => tx.objectStore(n).clear());
+  await new Promise((res) => { tx.oncomplete = res; tx.onerror = res; });
+  db.close();
+}
+const cfgMod = window._NTRToolBox.configuration.modules.find((m) => m.name === 'AI提取术语表');
+const savedSettings = cfgMod.settings.map((s) => ({ name: s.name, value: s.value }));
+const setSetting = (name, value) => { const s = cfgMod.settings.find((x) => x.name === name); if (s) s.value = value; };
+setSetting('任务方式', '直接提取');
+setSetting('使用临时端点', true);
+setSetting('临时端点', 'http://127.0.0.1:8788/v1');
+setSetting('临时模型', 'mock-glossary-1');
+
 window._NTRToolBox.runModule('AI提取术语表');
 
 // 若出现选择器，点“选择”
@@ -51,4 +69,5 @@ for (let i = 0; i < 120; i++) {
   if (!st && !o && i > 8) break; // 状态窗和 overlay 都没了，说明提前结束
 }
 out.overlay = overlaySeen;
+savedSettings.forEach(({ name, value }) => { const s = cfgMod.settings.find((x) => x.name === name); if (s) s.value = value; }); // 还原设置
 return JSON.stringify(out, null, 2);

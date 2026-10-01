@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NTR ToolBox Debug Hub</title>
+    <title>NTR Toolbox Alpha Debug Hub</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -302,7 +302,7 @@
     <aside>
         <div class="logo">
             <div class="logo-icon">N</div>
-            <div class="logo-text">NTR ToolBox</div>
+            <div class="logo-text">NTR Toolbox Alpha</div>
         </div>
         <nav>
             <div class="nav-item active">
@@ -398,7 +398,7 @@
                     <span>🔌</span>
                     <p>API 模拟器</p>
                 </div>
-                <div class="action-card" onclick="window.open('../NTR_ToolBox.user.js', '_blank')">
+                <div class="action-card" onclick="window.open('../ntr-toolbox-alpha.user.js', '_blank')">
                     <span>🛠️</span>
                     <p>编辑源文件</p>
                 </div>
@@ -407,7 +407,7 @@
 
         <div class="script-info">
             <div class="line"><span class="num">1</span><span class="comment">// ==UserScript==</span></div>
-            <div class="line"><span class="num">2</span><span class="comment">// @name         NTR ToolBox</span></div>
+            <div class="line"><span class="num">2</span><span class="comment">// @name         NTR Toolbox Alpha</span></div>
             <div class="line"><span class="num">3</span><span class="comment">// @namespace    http://tampermonkey.net/</span></div>
             <div class="line"><span class="num">4</span><span class="comment">// @version      v0.7.1</span></div>
             <div class="line"><span class="num">5</span><span class="comment">// ... 正在读取完整脚本头 ...</span></div>
@@ -421,7 +421,7 @@
         }
 
         function clearStorage() {
-            if (confirm('确定要清空本地所有 NTR ToolBox 的调试数据吗？')) {
+            if (confirm('确定要清空本地所有 NTR Toolbox Alpha 的调试数据吗？')) {
                 const keys = ['workspace-sakura', 'gpt-workspace', 'NTR_ToolBox_Config', 'NTR_KeepState', 'ntr-panel-position'];
                 keys.forEach(k => localStorage.removeItem(k));
                 alert('数据已清空');
@@ -429,7 +429,7 @@
         }
 
         // 模拟脚本头部加载
-        fetch('../NTR_ToolBox.user.js')
+        fetch('../ntr-toolbox-alpha.user.js')
             .then(res => res.text())
             .then(text => {
                 const lines = text.split('\n').slice(0, 15);

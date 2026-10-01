@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const source = fs.readFileSync(path.join(here, '..', 'NTR_ToolBox.user.js'), 'utf8');
+const source = fs.readFileSync(path.join(here, '..', 'ntr-toolbox-alpha.user.js'), 'utf8');
 const extractPath = path.join(here, '.engine-extract.mjs');
 fs.writeFileSync(extractPath, source.slice(source.indexOf('// ==GlossaryEngine-START=='), source.indexOf('// ==GlossaryEngine-END==')) + '\nexport { GlossaryEngine };\n');
 const { GlossaryEngine: E } = await import('file://' + extractPath.replace(/\\/g, '/'));

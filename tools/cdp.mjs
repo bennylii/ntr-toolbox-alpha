@@ -3,7 +3,7 @@
 //   node tools/cdp.mjs open <url>          打开/复用标签页并导航，等待加载
 //   node tools/cdp.mjs eval "<expr>"       在当前页执行表达式并打印结果
 //   node tools/cdp.mjs evalf <file>        执行文件内容（async 函数体，可用 await）
-//   node tools/cdp.mjs inject              注入 NTR_ToolBox.user.js（去 UserScript 头）
+//   node tools/cdp.mjs inject              注入 ntr-toolbox-alpha.user.js（去 UserScript 头）
 //   node tools/cdp.mjs shot <out.png>      截图
 //   node tools/cdp.mjs logs [n]            打印最近的 console/日志（默认 30 条）
 //   node tools/cdp.mjs targets             列出页面目标
@@ -149,7 +149,7 @@ const main = async () => {
       break;
     }
     case 'inject': {
-      const src = fs.readFileSync(path.join(here, '..', 'NTR_ToolBox.user.js'), 'utf8')
+      const src = fs.readFileSync(path.join(here, '..', 'ntr-toolbox-alpha.user.js'), 'utf8')
         .replace(/\/\/ ==UserScript==[\s\S]*?\/\/ ==\/UserScript==/, '');
       const expr = `(() => {
         try {

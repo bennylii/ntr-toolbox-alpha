@@ -1,18 +1,20 @@
 // 生成可安装的 dev 版（装测试 profile 的篡改猴用）：
-//   @name 加 (dev 术语增强)、@version 改 0.8.0-dev、清空 @downloadURL/@updateURL（防被 GreasyFork 覆盖）
+//   @name 加 (dev)、@version 追加 -dev、清空 @downloadURL/@updateURL（若有）
 // 跑法：node tools/.gen-dev.mjs
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const srcPath = path.join(root, 'NTR_ToolBox.user.js');
-const devPath = path.join(root, 'NTR_ToolBox.dev.user.js');
+const srcPath = path.join(root, 'ntr-toolbox-alpha.user.js');
+const devPath = path.join(root, 'ntr-toolbox-alpha.dev.user.js');
 
 const src = fs.readFileSync(srcPath, 'utf8');
+const version = src.match(/^\/\/ @version\s+(.+)$/m)?.[1]?.trim() ?? '';
+const devVersion = version.replace(/^v/, '') + '-dev';
 const out = src
-  .replace(/^\/\/ @name\s+.*$/m, '// @name         NTR ToolBox (dev 术语增强)')
-  .replace(/^\/\/ @version\s+.*$/m, '// @version      0.8.0-dev')
+  .replace(/^\/\/ @name\s+.*$/m, '// @name         NTR Toolbox Alpha (dev)')
+  .replace(/^\/\/ @version\s+.*$/m, `// @version      ${devVersion}`)
   .replace(/^\/\/ @downloadURL.*$/m, '')
   .replace(/^\/\/ @updateURL.*$/m, '');
 // 行数必须一致（只动头部那 4 行的内容），防止正则误伤正文

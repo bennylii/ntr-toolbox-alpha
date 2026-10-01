@@ -1,4 +1,4 @@
-// Mock LLM 端点：OpenAI 兼容 /v1/chat/completions，用于 NTR ToolBox 术语提取功能的本地测试
+// Mock LLM 端点：OpenAI 兼容 /v1/chat/completions，用于 ntr-toolbox-alpha 术语提取功能的本地测试
 // 零依赖（node 内置 http），默认端口 8788
 //
 // 用法：
@@ -198,15 +198,15 @@ const server = http.createServer(async (req, res) => {
   }
 
   // 供 Tampermonkey 安装的用户脚本：
-  //  - /NTR_ToolBox.dev.user.js → 直接给生成好的 dev 文件（@name/@version 与本地文件一致，已去掉 updateURL/downloadURL，不会被 GreasyFork 覆盖）
-  //  - /NTR_ToolBox.user.js     → 主文件（临时把 updateURL/downloadURL 注释掉，避免装完被 GreasyFork 自动更新顶掉）
-  if (url.pathname === '/NTR_ToolBox.dev.user.js' || url.pathname === '/NTR_ToolBox.user.js') {
+  //  - /ntr-toolbox-alpha.dev.user.js → 直接给生成好的 dev 文件（@name/@version 与本地文件一致）
+  //  - /ntr-toolbox-alpha.user.js     → 主文件（若还留着 updateURL/downloadURL 就地注释掉，防止装完被自动更新顶掉）
+  if (url.pathname === '/ntr-toolbox-alpha.dev.user.js' || url.pathname === '/ntr-toolbox-alpha.user.js') {
     try {
       const fsMod = await import('node:fs');
       const pathMod = await import('node:path');
       const root = pathMod.join(pathMod.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
       const isDev = url.pathname.endsWith('.dev.user.js');
-      const file = pathMod.join(root, isDev ? 'NTR_ToolBox.dev.user.js' : 'NTR_ToolBox.user.js');
+      const file = pathMod.join(root, isDev ? 'ntr-toolbox-alpha.dev.user.js' : 'ntr-toolbox-alpha.user.js');
       let src = fsMod.readFileSync(file, 'utf8');
       if (!isDev) {
         src = src.replace(/^\/\/ @(downloadURL|updateURL).*$/gm, '// @$1  (disabled in mock build)');

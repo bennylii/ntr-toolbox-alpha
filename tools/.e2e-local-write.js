@@ -33,6 +33,26 @@ const readMeta = async () => {
 };
 
 try {
+  // 防御：清掉上一个用例残留的队列任务，避免自动续跑在后台抢跑/报错干扰本用例
+  try { await window._NTRGlossaryDev.GlossaryQueue.stop(); } catch (e) { }
+  {
+    const db = await new Promise((res, rej) => { const r = indexedDB.open('ntr-glossary', 1); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    const names = ['jobs', 'chunks', 'snapshots'].filter((n) => db.objectStoreNames.contains(n));
+    const tx = db.transaction(names, 'readwrite');
+    names.forEach((n) => tx.objectStore(n).clear());
+    await new Promise((res) => { tx.oncomplete = res; tx.onerror = res; });
+    db.close();
+  }
+  // 「任务方式」默认「加入队列」会让本用例等不到现场提取的合并浮窗 —— 临时切成「直接提取」+ 临时端点，结束前还原
+  const cfgMod = window._NTRToolBox.configuration.modules.find((m) => m.name === 'AI提取术语表');
+  out.savedSettings = cfgMod.settings.map((s) => ({ name: s.name, value: s.value }));
+  const setSetting = (name, value) => { const s = cfgMod.settings.find((x) => x.name === name); if (s) s.value = value; };
+  setSetting('任务方式', '直接提取');
+  setSetting('模式', '写入');
+  setSetting('使用临时端点', true);
+  setSetting('临时端点', 'http://127.0.0.1:8788/v1');
+  setSetting('临时模型', 'mock-glossary-1');
+
   mark('read-before');
   out.before = await readMeta();
   mark('read-before-done');
@@ -79,7 +99,7 @@ try {
   out.afterWrite = await readMeta();
   out.snapshot = await window._NTRGlossaryDev.GlossaryDB.getAll('snapshots')
     .then((all) => {
-      const mine = all.filter((s) => String(s.key || '').startsWith('local:' + volumeId + '#')).sort((a, b) => b.createAt - a.createAt);
+      const mine = all.filter((s) => String(s.id || '').startsWith('local:' + volumeId + '#')).sort((a, b) => b.createAt - a.createAt);
       return mine.length ? { latest: Object.keys(mine[0].glossary || {}).length, count: mine.length } : null;
     });
   mark('write-done');
@@ -99,6 +119,10 @@ try {
   out.errors.push('fatal: ' + (e && (e.stack || e.message || e)));
   mark('fatal');
 }
+try {
+  const cfgMod = window._NTRToolBox.configuration.modules.find((m) => m.name === 'AI提取术语表');
+  (out.savedSettings || []).forEach(({ name, value }) => { const s = cfgMod.settings.find((x) => x.name === name); if (s) s.value = value; });
+} catch (e) { }
 collect();
 mark('end');
 return JSON.stringify(out, null, 2);

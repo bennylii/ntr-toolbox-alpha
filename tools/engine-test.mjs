@@ -1,4 +1,4 @@
-// GlossaryEngine 单元测试：从 NTR_ToolBox.user.js 抽取引擎段并在 node 里跑
+// GlossaryEngine 单元测试：从 ntr-toolbox-alpha.user.js 抽取引擎段并在 node 里跑
 // 用法: node tools/engine-test.mjs        （集成测试需要 mock-llm/server.mjs 已在 8788 运行）
 import fs from 'node:fs';
 import path from 'node:path';
@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const userscript = path.join(here, '..', 'NTR_ToolBox.user.js');
+const userscript = path.join(here, '..', 'ntr-toolbox-alpha.user.js');
 const extractPath = path.join(here, '.engine-extract.mjs');
 
 const source = fs.readFileSync(userscript, 'utf8');

@@ -2,7 +2,7 @@ import re, sys, shutil, difflib, os
 import opencc
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PATH = os.path.join(_ROOT, "NTR_ToolBox.user.js")
+PATH = os.path.join(_ROOT, "ntr-toolbox-alpha.user.js")
 BAK = os.path.join(_ROOT, ".t2s-backup.user.js")
 DIFF = os.path.join(_ROOT, ".t2s.diff")
 

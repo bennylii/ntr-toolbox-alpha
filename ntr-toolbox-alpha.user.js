@@ -1,17 +1,14 @@
 // ==UserScript==
-// @name         NTR ToolBox (dev 术语增强)
-// @namespace    http://tampermonkey.net/
-// @version      0.8.0-dev
-// @author       TheNano
-// @description  ToolBox for Novel Translate bot website
+// @name         NTR Toolbox Alpha
+// @namespace    https://github.com/bennylii
+// @version      v0.8.0-alpha.1
+// @author       bennylii
+// @description  ToolBox for novel translation sites, with an AI glossary pipeline (alpha)
 // @match        https://books.fishhawk.top/*
 // @match        https://books1.fishhawk.top/*
 // @match        https://n.novelia.cc/*
-// @icon         https://github.com/LittleSurvival/NTR-ToolBox/blob/main/icon.jpg?raw=true
 // @grant        GM_openInTab
-// @license      All Rights Reserved
-
-
+// @license      MIT
 // ==/UserScript==
 
 (function () {
@@ -24,7 +21,7 @@
     window._NTRToolBoxInstance = true;
 
     const CONFIG_VERSION = 23;
-    const VERSION = 'v0.7.2';
+    const VERSION = 'v0.8.0-alpha.1';
     const CONFIG_STORAGE_KEY = 'NTR_ToolBox_Config';
     const IS_MOBILE = /Mobi|Android/i.test(navigator.userAgent);
     const domainAllowed = (location.hostname === 'books.fishhawk.top' || location.hostname === 'books1.fishhawk.top' || location.hostname === 'n.novelia.cc');
@@ -1913,7 +1910,7 @@
             try { return !!reader(); } catch (e) { return false; }
         };
         const setEnabledSource = (fn) => { if (typeof fn === 'function') reader = fn; };
-        const line = (rec) => `[NTR-G] ${stamp(rec.t)} ${rec.level.toUpperCase()} ${rec.msg}${rec.data ? ' ' + JSON.stringify(rec.data) : ''}`;
+        const line = (rec) => `[NTA-G] ${stamp(rec.t)} ${rec.level.toUpperCase()} ${rec.msg}${rec.data ? ' ' + JSON.stringify(rec.data) : ''}`;
         const push = (level, msg, data) => {
             const rec = { t: Date.now(), level, msg: String(msg) };
             if (data !== undefined) {
@@ -2120,7 +2117,7 @@
         };
         const showDetails = () => {
             const lines = results.map((r) => `[${r.status}] ${r.name}：${r.detail}`);
-            try { console.log('[NTR 站点自检]\n' + lines.join('\n')); } catch (e) { }
+            try { console.log('[NTA 站点自检]\n' + lines.join('\n')); } catch (e) { }
             const warns = results.filter((r) => r.status === 'warn');
             if (warns.length) NotificationUtils.showWarning(warns.map((r) => `${r.name}：${r.detail}`).join('；').slice(0, 200));
             else NotificationUtils.showSuccess('站点自检：当前页面没有发现问题');
@@ -5171,12 +5168,12 @@
                     return;
                 }
                 const head = [
-                    `# NTR ToolBox 日志（${new Date().toLocaleString()}）`,
+                    `# ntr-toolbox-alpha 日志（${new Date().toLocaleString()}）`,
                     `# 调试日志：${stats.enabled ? '开' : '关（只留了警告/错误；要看全部请勾「调试日志」）'}`,
                     `# 条数：${stats.kept}（其中警告/错误 ${stats.errors}）`,
                     '',
                 ].join('\n');
-                GlossaryUI.downloadText(`ntr-toolbox-log.${Date.now()}.txt`, head + GlossaryLog.format());
+                GlossaryUI.downloadText(`nta-log.${Date.now()}.txt`, head + GlossaryLog.format());
             });
             card.appendChild(toolbar);
 
@@ -5972,7 +5969,7 @@
             this.isMinimized = false;
             this.titleBar = document.createElement('div');
             this.titleBar.className = 'ntr-titlebar';
-            this.titleBar.innerHTML = 'NTR ToolBox ' + VERSION;
+            this.titleBar.innerHTML = 'NTR Toolbox Alpha ' + VERSION;
 
             this.toggleSpan = document.createElement('span');
             this.toggleSpan.style.float = 'right';
@@ -5992,7 +5989,8 @@
             leftInfo.textContent = IS_MOBILE
                 ? '单击执行 | ⚙️设置'
                 : '左键执行/切换 | 右键设置';
-            rightInfo.textContent = 'Author: TheNano(百合仙人)';
+            rightInfo.textContent = 'bennylii · MIT';
+            rightInfo.title = '基于 TheNano 的 NTR ToolBox（GreasyFork 527754）功能行为的 clean-room 重构；代码为独立实现，遵循 MIT 许可';
             // 站点自检角标：只在发现「挂点变动」时显示（平时隐藏）
             this.siteCheckEl = document.createElement('span');
             this.siteCheckEl.id = 'ntr-sitecheck';

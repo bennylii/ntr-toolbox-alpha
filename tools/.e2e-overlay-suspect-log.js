@@ -104,7 +104,7 @@ try {
   exportBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
   await sleep(250);
   D.GlossaryUI.downloadText = origDownload;
-  check('导出文件名是 ntr-toolbox-log.*.txt', !!captured && /^ntr-toolbox-log\.\d+\.txt$/.test(captured.name), captured && captured.name);
+  check('导出文件名是 nta-log.*.txt', !!captured && /^nta-log\.\d+\.txt$/.test(captured.name), captured && captured.name);
   check('导出内容包含刚才的日志行', !!captured && captured.text.includes('e2e-info-on'), captured && captured.text.slice(0, 200));
   check('导出头部写明开关状态与条数', !!captured && /调试日志：开/.test(captured.text) && /条数：\d+/.test(captured.text));
 

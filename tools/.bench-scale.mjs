@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const source = fs.readFileSync(path.join(here, '..', 'NTR_ToolBox.user.js'), 'utf8');
+const source = fs.readFileSync(path.join(here, '..', 'ntr-toolbox-alpha.user.js'), 'utf8');
 const start = source.indexOf('// ==GlossaryEngine-START==');
 const end = source.indexOf('// ==GlossaryEngine-END==');
 const extractPath = path.join(here, '.engine-extract.mjs');

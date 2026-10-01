@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>测试小说页面 - NTR ToolBox Debug</title>
+    <title>测试小说页面 - NTR Toolbox Alpha Debug</title>
     <style>
         * {
             margin: 0;
@@ -296,7 +296,7 @@
         // 模拟排队 Sakura
         function simulateSakuraQueue() {
             DebugLogger.info('开始模拟排隊Sakura v2...');
-            // 触发 NTR ToolBox 模块（如果已加载）
+            // 触发 NTR Toolbox Alpha 模块（如果已加载）
             if (window.script && window.script.configuration) {
                 const sakuraModule = window.script.configuration.modules.find(m => m.name === '排隊Sakura v2');
                 if (sakuraModule) {
@@ -305,7 +305,7 @@
                     DebugLogger.error('未找到排隊Sakura v2模块');
                 }
             } else {
-                DebugLogger.warn('NTR ToolBox 脚本尚未加载，请先加载脚本');
+                DebugLogger.warn('NTR Toolbox Alpha 脚本尚未加载，请先加载脚本');
             }
         }
 
@@ -320,7 +320,7 @@
                     DebugLogger.error('未找到排隊GPT v2模块');
                 }
             } else {
-                DebugLogger.warn('NTR ToolBox 脚本尚未加载，请先加载脚本');
+                DebugLogger.warn('NTR Toolbox Alpha 脚本尚未加载，请先加载脚本');
             }
         }
 

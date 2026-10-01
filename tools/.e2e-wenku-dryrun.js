@@ -38,6 +38,9 @@ try {
   mark('configure-extract');
   const mod = window._NTRToolBox.configuration.modules.find((m) => m.name === 'AI提取术语表');
   const set = (name, value) => { const s = mod.settings.find((it) => it.name === name); if (!s) throw new Error('缺少设置 ' + name); s.value = value; };
+  // 显式自给自足：不依赖 localStorage 里残留的工作区翻译器/旧配置（顺序无关）
+  set('任务方式', '直接提取');
+  set('使用临时端点', true);
   set('临时端点', 'http://127.0.0.1:8788');
   set('临时模型', 'mock-glossary-1');
   set('临时Key', 'no_key_required');
@@ -52,9 +55,9 @@ try {
   mark('extract-run');
   window._NTRToolBox.runModule('AI提取术语表');
 
-  // 等 diff 弹层出现（提取期间会经历 抓取正文 -> 多轮提取）
+  // 等 diff 弹层出现（提取期间会经历 抓取正文 -> 多轮提取）；上限 60s，避免窗口遮挡节流下拖爆 CDP 超时
   let overlay = null;
-  for (let i = 0; i < 600; i++) {
+  for (let i = 0; i < 300; i++) {
     await sleep(200);
     if (i % 10 === 0) collect();
     const o = document.getElementById('ntr-glossary-overlay');
