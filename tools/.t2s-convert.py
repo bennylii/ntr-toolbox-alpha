@@ -1,9 +1,10 @@
-import re, sys, shutil, difflib
+import re, sys, shutil, difflib, os
 import opencc
 
-PATH = r"C:\cache\ntr-toolbox\NTR_ToolBox.user.js"
-BAK = r"C:\cache\ntr-toolbox\.t2s-backup.user.js"
-DIFF = r"C:\cache\ntr-toolbox\.t2s.diff"
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PATH = os.path.join(_ROOT, "NTR_ToolBox.user.js")
+BAK = os.path.join(_ROOT, ".t2s-backup.user.js")
+DIFF = os.path.join(_ROOT, ".t2s.diff")
 
 cc = opencc.OpenCC("t2s")
 CJK_RUN = re.compile(r"[\u2e80-\u9fff\uf900-\ufaff\u3000-\u303f\uff01-\uff5e\uffe0-\uffee]+")

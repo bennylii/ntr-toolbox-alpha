@@ -1,7 +1,7 @@
 import re, glob, os
 import opencc
 
-ROOT = r"C:\cache\ntr-toolbox"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TARGETS = []
 for pat in ("tools/*.mjs", "tools/*.js", "mock-llm/*.mjs"):
     TARGETS += glob.glob(os.path.join(ROOT, pat))
