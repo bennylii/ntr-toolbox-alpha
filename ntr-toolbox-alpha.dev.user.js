@@ -5670,45 +5670,34 @@
         }
     }
 
+    // 轻量 toast（clean-room 重写，契约见 docs/cleanroom/spec-01-config-notifications.md §2）：
+    // 单容器懒挂载；图标 + 纯文本；1s 后淡出、再 300ms 移除；各条独立计时，不排队不去重。
+    // DOM 结构与类名是 e2e 抓取契约，保持不变。
     class NotificationUtils {
-        static _initContainer() {
-            if (!this._container) {
-                this._container = document.createElement('div');
-                this._container.className = 'ntr-notification-container';
-                document.body.appendChild(this._container);
-            }
+        static _ensureTray() {
+            if (this._tray) return;
+            this._tray = document.createElement('div');
+            this._tray.className = 'ntr-notification-container';
+            document.body.appendChild(this._tray);
         }
 
-        static showSuccess(text) {
-            this._show(text, '✅');
-        }
+        static showSuccess(text) { this._toast(text, '✅'); }
+        static showWarning(text) { this._toast(text, '⚠️'); }
+        static showError(text) { this._toast(text, '❌'); }
 
-        static showWarning(text) {
-            this._show(text, '⚠️');
-        }
-
-        static showError(text) {
-            this._show(text, '❌');
-        }
-
-        static _show(msg, icon) {
-            this._initContainer();
-            const box = document.createElement('div');
-            box.className = 'ntr-notification-message';
-
-            const iconSpan = document.createElement('span');
-            iconSpan.className = 'ntr-icon';
-            iconSpan.textContent = icon;
-
-            const textNode = document.createTextNode(msg);
-
-            box.appendChild(iconSpan);
-            box.appendChild(textNode);
-            this._container.appendChild(box);
-
+        static _toast(message, icon) {
+            this._ensureTray();
+            const item = document.createElement('div');
+            item.className = 'ntr-notification-message';
+            const iconEl = document.createElement('span');
+            iconEl.className = 'ntr-icon';
+            iconEl.textContent = icon;
+            item.appendChild(iconEl);
+            item.appendChild(document.createTextNode(message));
+            this._tray.appendChild(item);
             setTimeout(() => {
-                box.classList.add('fade-out');
-                setTimeout(() => box.remove(), 300);
+                item.classList.add('fade-out');
+                setTimeout(() => item.remove(), 300);
             }, 1000);
         }
     }
@@ -5853,97 +5842,96 @@
             }
         }
 
+        // 会话 token（clean-room 重写，契约见 docs/cleanroom/spec-01-config-notifications.md §3）：
+        // auth-v2 是站点当前会话（{token, adminMode}，短效 token + refresh cookie 续期）；
+        // auth 是历史格式（{profile:{token}}），停更已久，只在 auth-v2 缺失时回落
         initToken() {
-            // 新版站点把会话写到 auth-v2（{token, adminMode}，短效 access token + refresh cookie 自动续期）；
-            // 旧键 auth 是历史格式（{profile:{token}}），早就停止更新、token 过期后是死值 ——
-            // 先读 auth-v2，读不到再回落 auth（老站点/老会话兼容）
-            try {
-                const v2 = localStorage.getItem('auth-v2');
-                if (v2) {
-                    const parsed = JSON.parse(v2);
-                    if (parsed && parsed.token) return parsed.token;
-                }
-            } catch (e) { }
-            try {
-                const auth = localStorage.getItem('auth');
-                if (auth) {
-                    const parsedInfo = JSON.parse(auth);
-                    if (parsedInfo && parsedInfo.profile && parsedInfo.profile.token) return parsedInfo.profile.token;
-                }
-            } catch (e) { }
+            const extract = (raw, pick) => {
+                try {
+                    const parsed = JSON.parse(raw);
+                    return parsed ? pick(parsed) : null;
+                } catch (e) { return null; }
+            };
+            const v2 = localStorage.getItem('auth-v2');
+            if (v2) {
+                const token = extract(v2, (d) => d.token || null);
+                if (token) return token;
+            }
+            const legacy = localStorage.getItem('auth');
+            if (legacy) {
+                const token = extract(legacy, (d) => (d.profile && d.profile.token) || null);
+                if (token) return token;
+            }
             return null;
         }
 
-        loadConfiguration() {
-            let stored;
+        // ---------- 配置存取（clean-room 重写，行为规格：docs/cleanroom/spec-01-config-notifications.md §1） ----------
+
+        _readStoredConfig() {
+            let raw = null;
+            try { raw = localStorage.getItem(CONFIG_STORAGE_KEY); } catch (e) { return null; }
+            if (!raw) return null;
             try {
-                stored = JSON.parse(localStorage.getItem(CONFIG_STORAGE_KEY));
-            } catch (e) { }
-            if (!stored || stored.version !== CONFIG_VERSION) {
-                const fresh = NTRToolBox.cloneDefaultModules();
-                return { version: CONFIG_VERSION, modules: fresh };
-            }
-            const loaded = NTRToolBox.cloneDefaultModules();
-            stored.modules.forEach(storedMod => {
-                const defMod = loaded.find(m => m.name === storedMod.name);
-                if (defMod) {
-                    for (const k in storedMod) {
-                        // settings 单独逐项合并；whitelist/needsTarget/settingGroups 都是代码逻辑（路由或结构会变），一律以代码为准
-                        if (k === 'settings' || k === 'whitelist' || k === 'needsTarget' || k === 'settingGroups') continue;
-                        if (
-                            defMod.hasOwnProperty(k) &&
-                            typeof defMod[k] === typeof storedMod[k] &&
-                            storedMod[k] !== undefined
-                        ) {
-                            defMod[k] = storedMod[k];
-                        }
-                    }
-                    // settings 按设置名逐项合并：保留默认里的新设置项（老配置升级不丢新功能），只取用户改过的「值」
-                    // （type/options 由代码定义：老配置里存着 type:'string' 会把代码改成的 select 顶回去）
-                    if (Array.isArray(storedMod.settings) && Array.isArray(defMod.settings)) {
-                        storedMod.settings.forEach(storedSetting => {
-                            const defSetting = defMod.settings.find(s => s.name === storedSetting.name);
-                            if (defSetting && 'value' in storedSetting) {
-                                defSetting.value = storedSetting.value;
-                            }
-                        });
-                        // 一次性迁移：以前「临时端点」填了就直接生效，现在由「使用临时端点」勾选控制
-                        // （老配置里没有这个开关，但填了端点 → 视为原本就在用临时端点，自动勾上）
-                        const hadSwitch = storedMod.settings.some(s => s.name === '使用临时端点');
-                        const switchSetting = defMod.settings.find(s => s.name === '使用临时端点');
-                        const endpointSetting = defMod.settings.find(s => s.name === '临时端点');
-                        if (!hadSwitch && switchSetting && endpointSetting && String(endpointSetting.value || '').trim() !== '') {
-                            switchSetting.value = true;
-                        }
-                    }
-                }
-            });
-            if (loaded.length !== defaultModules.length) {
-                const fresh = NTRToolBox.cloneDefaultModules();
-                localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify({ version: CONFIG_VERSION, modules: fresh }));
-                return { version: CONFIG_VERSION, modules: fresh };
-            } else {
-                const defNames = defaultModules.map(x => x.name).sort().join(',');
-                const storedNames = loaded.map(x => x.name).sort().join(',');
-                if (defNames !== storedNames) {
-                    const fresh = NTRToolBox.cloneDefaultModules();
-                    localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify({ version: CONFIG_VERSION, modules: fresh }));
-                    return { version: CONFIG_VERSION, modules: fresh };
+                const parsed = JSON.parse(raw);
+                return (parsed && typeof parsed === 'object') ? parsed : null;
+            } catch (e) { return null; }
+        }
+
+        _freshConfiguration() {
+            return { version: CONFIG_VERSION, modules: NTRToolBox.cloneDefaultModules() };
+        }
+
+        // 把存储里的一份模块定义合并进默认定义：字段级门槛见 spec §1.2
+        _mergeSavedModule(target, saved) {
+            for (const key of Object.keys(saved)) {
+                if (key === 'settings' || key === 'whitelist' || key === 'needsTarget' || key === 'settingGroups') continue;
+                if (Object.prototype.hasOwnProperty.call(target, key)
+                    && typeof target[key] === typeof saved[key]
+                    && saved[key] !== undefined) {
+                    target[key] = saved[key];
                 }
             }
-            // Reattach run
-            loaded.forEach(m => {
-                const found = defaultModules.find(d => d.name === m.name);
-                if (found && typeof found.run === 'function') {
-                    for (const p in found) {
-                        if (!m.hasOwnProperty(p)) {
-                            m[p] = found[p];
-                        }
-                    }
-                    m.run = found.run;
+            if (!Array.isArray(saved.settings) || !Array.isArray(target.settings)) return;
+            const savedByName = new Map();
+            for (const item of saved.settings) {
+                if (item && item.name !== undefined) savedByName.set(item.name, item);
+            }
+            // settings 只认「值」：type/options 由代码定义，默认新增的设置项自动补上
+            for (const defSetting of target.settings) {
+                const savedSetting = savedByName.get(defSetting.name);
+                if (savedSetting && 'value' in savedSetting) defSetting.value = savedSetting.value;
+            }
+            // 老配置迁移：当年「临时端点」填了即生效，后来才加的「使用临时端点」开关 ——
+            // 存档里没有该开关且端点非空 → 视作原本就在用临时端点，替用户把开关勾上
+            const endpoint = target.settings.find(s => s.name === '临时端点');
+            const switchSetting = target.settings.find(s => s.name === '使用临时端点');
+            const savedHadSwitch = saved.settings.some(s => s && s.name === '使用临时端点');
+            if (!savedHadSwitch && switchSetting && endpoint && String(endpoint.value || '').trim() !== '') {
+                switchSetting.value = true;
+            }
+        }
+
+        loadConfiguration() {
+            const stored = this._readStoredConfig();
+            if (!stored || stored.version !== CONFIG_VERSION || !Array.isArray(stored.modules)) {
+                return this._freshConfiguration();
+            }
+            // 以默认深拷贝为底合并：名字对不上号的存储模块直接忽略；
+            // whitelist/needsTarget/settingGroups 属代码结构，一律以代码为准（spec §1.2）
+            const modules = NTRToolBox.cloneDefaultModules();
+            const byName = new Map(modules.map(m => [m.name, m]));
+            for (const savedMod of stored.modules) {
+                const target = savedMod && byName.get(savedMod.name);
+                if (target) this._mergeSavedModule(target, savedMod);
+            }
+            // 函数不来自存储（JSON 序列化丢函数）：run 必须是当前代码里的这一份
+            for (const mod of modules) {
+                if (typeof mod.run !== 'function') {
+                    const def = defaultModules.find(d => d.name === mod.name);
+                    if (def && typeof def.run === 'function') mod.run = def.run;
                 }
-            });
-            return { version: CONFIG_VERSION, modules: loaded };
+            }
+            return { version: CONFIG_VERSION, modules };
         }
 
         saveConfiguration() {
