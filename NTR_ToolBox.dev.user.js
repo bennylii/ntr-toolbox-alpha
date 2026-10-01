@@ -1947,6 +1947,193 @@
         };
     })();
 
+    // ---------- 站点自检：脚本依赖的「站点挂点」是否发生变动 ----------
+    // 脚本很多功能挂在站点的固定位置上（面板、会话存储、工作区翻译器存储、本地卷库、
+    // 列表页条目/分页、工作区任务条目）。站点改版时这些位置可能移动/改名，功能就会
+    // 静默失灵。启动后自动跑一遍（SPA 路由切换也会重跑）：结果进日志；确有变动时
+    // 面板信息栏常驻「⚠ 自检 N」，并弹一次提示。
+    const SiteCheck = (() => {
+        let scriptRef = null;
+        let results = [];
+        let lastSummary = null;
+        let lastPath = null;
+        let timer = null;
+        let running = false;
+        let rerun = false;
+        let epoch = 0;   // 新一轮检查开始 / cancel 时 +1，作废还在等待 DOM 的旧一轮
+
+        const isSite = () => domainAllowed;
+        // 和「填充术语表」collectNovels 同款判定：站内 /novel/{provider}/{id} 链接（相对/绝对 href 都算）
+        const listLinks = () => [...document.querySelectorAll('a')].filter((a) => {
+            try {
+                const u = new URL(a.href);
+                return u.origin === location.origin && /^\/novel\/[^/]+\/[^/]+$/.test(u.pathname);
+            } catch (e) { return false; }
+        }).length;
+        const waitFor = async (fn, ms, my) => {
+            const t0 = Date.now();
+            while (!fn() && Date.now() - t0 < ms) {
+                if (epoch !== my) return fn();
+                await new Promise((r) => setTimeout(r, 400));
+            }
+            return fn();
+        };
+        const findVisiblePagination = () => [...document.querySelectorAll('.n-pagination')].find((p) => p.offsetWidth || p.offsetHeight) || null;
+
+        const CHECKS = [
+            {
+                id: 'panel', name: '面板挂载点',
+                run: () => (scriptRef && scriptRef.panel && document.body.contains(scriptRef.panel))
+                    ? { status: 'ok', detail: '#ntr-panel 挂在 body 上' }
+                    : { status: 'warn', detail: '找不到 #ntr-panel（面板没挂上或被移除）' },
+            },
+            {
+                id: 'auth', name: '会话存储（auth-v2）', site: true,
+                run: () => (scriptRef && scriptRef.initToken && scriptRef.initToken())
+                    ? { status: 'ok', detail: '已读到会话 token' }
+                    : { status: 'warn', detail: '读不到 auth-v2 / auth 里的 token：未登录，或站点会话存储键已变动（接口会 401）' },
+            },
+            {
+                id: 'workspace-gpt', name: '工作区翻译器存储', site: true,
+                run: () => {
+                    const ws = readWorkspaceGptWorkers() || [];
+                    return ws.length
+                        ? { status: 'ok', detail: `${ws.length} 个：${ws.map((w) => w.id).slice(0, 4).join('、')}${ws.length > 4 ? '…' : ''}` }
+                        : { status: 'info', detail: '没有找到工作区翻译器（workspace-gpt / workspace-gpt-pipeline 都空）：术语表需要用「临时端点」' };
+                },
+            },
+            {
+                id: 'volumes-idb', name: '本地卷数据库（IndexedDB volumes）', site: true,
+                run: async () => {
+                    if (!indexedDB.databases) return { status: 'info', detail: '浏览器不支持 indexedDB.databases()，跳过' };
+                    try {
+                        const dbs = await indexedDB.databases();
+                        return dbs.some((d) => d.name === 'volumes')
+                            ? { status: 'ok', detail: 'volumes 库存在' }
+                            : { status: 'info', detail: '还没有 volumes 库（用过「本地卷」功能后才创建）' };
+                    } catch (e) { return { status: 'info', detail: '查询失败：' + e.message }; }
+                },
+            },
+            {
+                id: 'list-items', name: '列表页条目容器', path: (p) => p === '/novel',
+                run: async (ctx) => {
+                    await ctx.wait(() => listLinks() > 0 || !!findVisiblePagination());
+                    const links = listLinks();
+                    if (links === 0) return { status: 'info', detail: '本页没有小说条目链接（空结果，或还没加载完）' };
+                    const items = document.querySelectorAll('.n-list-item').length;
+                    return items > 0
+                        ? { status: 'ok', detail: `${links} 个条目链接、${items} 个 .n-list-item` }
+                        : { status: 'warn', detail: `${links} 个条目链接但找不到 .n-list-item（徽章注入/填充定位可能失灵）` };
+                },
+            },
+            {
+                id: 'list-pagination', name: '列表页分页结构', path: (p) => p === '/novel',
+                run: async (ctx) => {
+                    await ctx.wait(() => listLinks() > 0 || !!findVisiblePagination());
+                    const pag = findVisiblePagination();
+                    if (!pag) return { status: 'info', detail: '本页没有分页（单页/空结果则正常）' };
+                    const btns = pag.querySelectorAll('.n-pagination-item--button').length;
+                    return btns > 0
+                        ? { status: 'ok', detail: `分页含 ${btns} 个翻页按钮` }
+                        : { status: 'warn', detail: '.n-pagination 里找不到 .n-pagination-item--button（自动翻页会失灵）' };
+                },
+            },
+            {
+                id: 'workspace-items', name: '工作区任务条目', path: (p) => p.startsWith('/workspace'),
+                run: async (ctx) => {
+                    await ctx.wait(() => document.querySelectorAll('.n-list-item').length > 0);
+                    const items = [...document.querySelectorAll('.n-list-item')];
+                    if (items.length === 0) return { status: 'info', detail: '没看到任务条目（可能没有任务）' };
+                    const withDesc = items.some((it) => it.querySelector('.n-thing-main__description'));
+                    return withDesc
+                        ? { status: 'ok', detail: `${items.length} 个条目，含 .n-thing-main__description` }
+                        : { status: 'warn', detail: '条目里找不到 .n-thing-main__description（「未完成」判定/自动重试会失灵）' };
+                },
+            },
+        ];
+
+        const renderIndicator = (summary) => {
+            const el = scriptRef && scriptRef.siteCheckEl;
+            if (!el) return;
+            if (summary.warns.length) {
+                el.style.display = '';
+                el.textContent = `⚠ 自检 ${summary.warns.length}`;
+                el.title = '站点自检发现变动（站点可能改版）：\n' + summary.warns.join('\n') + '\n（点一下输出到 Console 与日志）';
+            } else {
+                el.style.display = 'none';
+                el.title = '';
+            }
+        };
+
+        const run = async (opts = {}) => {
+            if (running) { rerun = true; return lastSummary; }
+            running = true;
+            const my = ++epoch;
+            try {
+                const path = location.pathname;
+                const ctx = {
+                    waitMs: Number(opts.waitMs) > 0 ? Number(opts.waitMs) : 8000,
+                    wait: (fn) => waitFor(fn, Number(opts.waitMs) > 0 ? Number(opts.waitMs) : 8000, my),
+                };
+                const site = opts.site !== undefined ? !!opts.site : isSite();
+                results = [];
+                for (const c of CHECKS) {
+                    if (c.site && !site) { results.push({ id: c.id, name: c.name, status: 'skip', detail: '非站点域名，跳过' }); continue; }
+                    if (c.path && !c.path(path)) { results.push({ id: c.id, name: c.name, status: 'skip', detail: `本页（${path}）不适用` }); continue; }
+                    let r;
+                    try { r = await c.run(ctx); } catch (e) { r = { status: 'info', detail: '检查出错：' + e.message }; }
+                    results.push({ id: c.id, name: c.name, status: r.status, detail: r.detail });
+                }
+                lastPath = path;
+                const warns = results.filter((r) => r.status === 'warn');
+                lastSummary = {
+                    at: Date.now(), path, site,
+                    results: results.map((r) => ({ ...r })),
+                    warns: warns.map((r) => `${r.name}：${r.detail}`),
+                };
+                if (warns.length) {
+                    GlossaryLog.warn(`站点自检发现 ${warns.length} 处变动`, { path, issues: lastSummary.warns });
+                    if (!opts.silent) NotificationUtils.showWarning(`站点自检：${warns.length} 处挂点变动（${warns.map((r) => r.name).join('、')}）——站点可能改版，相关功能会失灵`);
+                } else {
+                    GlossaryLog.info('站点自检通过', {
+                        path,
+                        ok: results.filter((r) => r.status === 'ok').length,
+                        info: results.filter((r) => r.status === 'info').length,
+                    });
+                }
+                renderIndicator(lastSummary);
+                return lastSummary;
+            } finally {
+                running = false;
+                if (rerun) { rerun = false; schedule(500); }
+            }
+        };
+
+        const schedule = (delay) => {
+            clearTimeout(timer);
+            timer = setTimeout(() => { run().catch(() => { }); }, delay === undefined ? 1500 : delay);
+        };
+        // SPA 路由切换后重跑（由主循环发现 href 变化时调用）
+        const onRouteChange = () => {
+            if (location.pathname === lastPath) return;
+            schedule(800);
+        };
+        const showDetails = () => {
+            const lines = results.map((r) => `[${r.status}] ${r.name}：${r.detail}`);
+            try { console.log('[NTR 站点自检]\n' + lines.join('\n')); } catch (e) { }
+            const warns = results.filter((r) => r.status === 'warn');
+            if (warns.length) NotificationUtils.showWarning(warns.map((r) => `${r.name}：${r.detail}`).join('；').slice(0, 200));
+            else NotificationUtils.showSuccess('站点自检：当前页面没有发现问题');
+        };
+        const bind = (script) => { scriptRef = script; };
+        const last = () => lastSummary;
+        // 作废还在等待 DOM 的检查 + 清掉已排期的检查（路由切换/测试用）
+        const cancel = () => { epoch++; clearTimeout(timer); };
+        const busy = () => running;
+
+        return { run, last, schedule, onRouteChange, showDetails, bind, cancel, busy };
+    })();
+
     const GlossaryEngine = (() => {
         'use strict';
 
@@ -5552,6 +5739,10 @@
             this.attachGlobalKeyBindings();
             this.loadKeepStateAndStart();
             this.scheduleNextPoll();
+
+            // 站点自检：启动后跑一遍（看各「站点挂点」有没有变动）
+            SiteCheck.bind(this);
+            SiteCheck.schedule();
         }
 
         static cloneDefaultModules() {
@@ -5802,7 +5993,15 @@
                 ? '单击执行 | ⚙️设置'
                 : '左键执行/切换 | 右键设置';
             rightInfo.textContent = 'Author: TheNano(百合仙人)';
+            // 站点自检角标：只在发现「挂点变动」时显示（平时隐藏）
+            this.siteCheckEl = document.createElement('span');
+            this.siteCheckEl.id = 'ntr-sitecheck';
+            this.siteCheckEl.style.display = 'none';
+            this.siteCheckEl.style.cursor = 'pointer';
+            this.siteCheckEl.style.color = '#E8C46A';
+            this.siteCheckEl.onclick = () => SiteCheck.showDetails();
             this.infoBar.appendChild(leftInfo);
+            this.infoBar.appendChild(this.siteCheckEl);
             this.infoBar.appendChild(rightInfo);
             this.panel.appendChild(this.infoBar);
 
@@ -6200,6 +6399,7 @@
                 if (this._lastEndPoint != window.location.href) {
                     StorageUtils.update();
                     this._lastEndPoint = window.location.href;
+                    SiteCheck.onRouteChange();
                 }
                 this._lastVisRun = now;
             }
@@ -6571,6 +6771,7 @@
         GlossaryDB,
         GlossaryQueue,
         GlossaryLog,
+        SiteCheck,
         resolveGlossaryWorkers,
         resolveGlossaryTarget,
         loadGlossarySourceText,
