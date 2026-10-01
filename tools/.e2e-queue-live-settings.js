@@ -138,6 +138,18 @@ try {
     !!foot && /右键「术语队列」的设置里可覆盖/.test(foot.textContent) && /0=跟随/.test(foot.textContent) && /在入队时固定/.test(foot.textContent),
     foot && foot.textContent);
 
+  // 「说明」默认收起（页脚只占一行），点开全文、再点收起
+  const hintBtn = [...document.querySelectorAll('#ntr-queue-overlay .ntr-g-foot button')].find((b) => b.textContent.startsWith('说明'));
+  check('页脚「说明」默认收起：按钮文案 ▸、正文不可见（文案仍在 DOM）',
+    !!hintBtn && hintBtn.textContent === '说明 ▸' && getComputedStyle(foot).display === 'none' && foot.textContent.length > 100,
+    { btn: hintBtn && hintBtn.textContent, disp: foot && getComputedStyle(foot).display });
+  hintBtn.click();
+  await sleep(50);
+  check('点「说明」展开全文（▾ + 可见）', hintBtn.textContent === '说明 ▾' && getComputedStyle(foot).display !== 'none', hintBtn.textContent);
+  hintBtn.click();
+  await sleep(50);
+  check('再点收起（▸ + 不可见）', hintBtn.textContent === '说明 ▸' && getComputedStyle(foot).display === 'none', hintBtn.textContent);
+
   // 改设置：同一个已入队任务立刻跟着变（证明是执行时读，不是入队时读）
   setSetting('并发', 3);
   setSetting('逾时(秒)', 90);

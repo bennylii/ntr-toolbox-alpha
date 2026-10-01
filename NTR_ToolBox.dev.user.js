@@ -4885,6 +4885,7 @@
         };
 
         // ---------- 队列面板 ----------
+        let queueHintOpen = false;   // 底部「说明」默认收起（这次页面会话内记住展开状态）
         const openPanel = () => {
             // 触发样式注入
             const warm = GlossaryUI.status('术语队列');
@@ -5074,11 +5075,22 @@
             const hint = document.createElement('div');
             hint.className = 'ntr-g-warn';
             hint.textContent = '并发/RPM/逾时：右键「术语队列」的设置里可覆盖（0=跟随「AI提取术语表」），执行时实时生效（下一次开跑/续跑；正在跑的不变）；分块字数·最大轮数·行数上限·翻译器 在入队时固定。队列串行执行；「待确认」的任务点“预览”走 预览-合并-diff 后再写入。刷新/重开页面会自动续跑。「重试」= 把任务转回「待处理」、只补没覆盖到的正文行；「重跑」= 转回「待处理」后整本重来一遍（成功的分块走缓存；只有曾经失败的块才会重新请求，全都在缓存里时它会提示而不是空跑）；「重试未完成」= 把所有没跑完的一次性转回「待处理」。重试/重跑只改任务状态，开跑统一由「开始/续跑」控制（队列正在跑时，转回的任务会被自动轮到）。队列面板的「运行翻译器 ▾」选定后，未跑完的任务（pending / running / 还有未覆盖行的 review·failed）立即对齐；已写入完成（done）的不动。';
+            hint.style.display = queueHintOpen ? '' : 'none';
+            const btnHint = document.createElement('button');
+            btnHint.className = 'ntr-g-btn';
+            btnHint.textContent = queueHintOpen ? '说明 ▾' : '说明 ▸';
+            btnHint.title = '展开/收起面板操作说明（并发覆盖、重试/重跑语义等）';
+            btnHint.onclick = () => {
+                queueHintOpen = !queueHintOpen;
+                hint.style.display = queueHintOpen ? '' : 'none';
+                btnHint.textContent = queueHintOpen ? '说明 ▾' : '说明 ▸';
+            };
             const btnClose = document.createElement('button');
             btnClose.className = 'ntr-g-btn';
             btnClose.textContent = '关闭';
             btnClose.onclick = () => { overlay.remove(); panelRefresh = null; };
             foot.appendChild(hint);
+            foot.appendChild(btnHint);
             foot.appendChild(btnClose);
             card.appendChild(foot);
 
