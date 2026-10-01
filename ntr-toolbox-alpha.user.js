@@ -27,28 +27,29 @@
     const domainAllowed = (location.hostname === 'books.fishhawk.top' || location.hostname === 'books1.fishhawk.top' || location.hostname === 'n.novelia.cc');
 
     // -----------------------------------
-    // Module settings
+    // Module settings（clean-room 重写，契约：docs/cleanroom/spec-02-helper-layer.md §1）
     // -----------------------------------
 
-    function newBooleanSetting(nameDefault, boolDefault) {
-        return { name: nameDefault, type: 'boolean', value: Boolean(boolDefault) };
+    // 设置项的形状刻意保持扁平（name/type/value [+options]）：它们会被整体序列化进 NTR_ToolBox_Config，
+    // spec-01 的合并逻辑按 name 对号、只取 value —— 改形状等于改存储契约
+    function newBooleanSetting(name, boolDefault) {
+        return { name, type: 'boolean', value: Boolean(boolDefault) };
     }
-    function newNumberSetting(nameDefault, numDefault) {
-        return { name: nameDefault, type: 'number', value: Number(numDefault || 0) };
+    function newNumberSetting(name, numDefault) {
+        return { name, type: 'number', value: Number(numDefault || 0) };
     }
-    function newStringSetting(nameDefault, strDefault) {
-        return { name: nameDefault, type: 'string', value: String(strDefault == null ? '' : strDefault) };
+    function newStringSetting(name, strDefault) {
+        return { name, type: 'string', value: String(strDefault == null ? '' : strDefault) };
     }
-    function newSelectSetting(nameDefault, arrOptions, valDefault) {
-        return { name: nameDefault, type: 'select', value: valDefault, options: arrOptions };
+    function newSelectSetting(name, options, valDefault) {
+        return { name, type: 'select', value: valDefault, options };
     }
-    function newTextareaSetting(nameDefault, strDefault) {
-        return { name: nameDefault, type: 'textarea', value: String(strDefault == null ? '' : strDefault) };
+    function newTextareaSetting(name, strDefault) {
+        return { name, type: 'textarea', value: String(strDefault == null ? '' : strDefault) };
     }
     function getModuleSetting(mod, key) {
-        if (!mod.settings) return undefined;
-        const found = mod.settings.find(s => s.name === key);
-        return found ? found.value : undefined;
+        const setting = mod && mod.settings && mod.settings.find((s) => s.name === key);
+        return setting ? setting.value : undefined;
     }
 
     // 站点工作区里配置的 GPT 翻译器：老工作区存 workspace-gpt，
@@ -90,6 +91,8 @@
         /^\/favorite\/local/,       // 本地书架（运行时再从卷列表里选）
     ].some((re) => re.test(location.pathname));
 
+    // 模块在当前页是否可用（clean-room 重写，契约：docs/cleanroom/spec-02-helper-layer.md §2）：
+    // needsTarget 的模块还要落在「能确定术语表目标」的页面上才有意义
     function isModuleEnabledByWhitelist(modItem) {
         if (modItem.needsTarget && !hasGlossaryTargetPage()) {
             return false;
@@ -97,18 +100,16 @@
         if (!modItem.whitelist) {
             return domainAllowed;
         }
-        const whitelist = modItem.whitelist;
-        const parts = Array.isArray(whitelist) ? whitelist : [whitelist];
-        return domainAllowed && parts.some(p => {
-            if (typeof p === 'string') {
-                if (p.endsWith('/*')) {
-                    const base = p.slice(0, -2);
-                    return location.pathname.startsWith(base) || location.pathname === base;
-                }
-                return location.pathname.includes(p);
+        const routes = Array.isArray(modItem.whitelist) ? modItem.whitelist : [modItem.whitelist];
+        const onAllowedRoute = routes.some((route) => {
+            if (typeof route !== 'string') return false;
+            if (route.endsWith('/*')) {
+                const base = route.slice(0, -2);
+                return location.pathname === base || location.pathname.startsWith(base);
             }
-            return false;
+            return location.pathname.includes(route);
         });
+        return domainAllowed && onAllowedRoute;
     }
 
     // -----------------------------------
@@ -1684,199 +1685,151 @@
     // Setting Utils
     // -----------------------------------
     class SettingUtils {
+        // 「模式」设置值 → 任务串里的 level= 档位（linkBuilder 的 mode 参数）
         static getTranslateMode(mode) {
-            const map = { '常规': 'normal', '过期': 'expire', '重翻': 'all' };
-            return map[mode];
+            const levels = [['常规', 'normal'], ['过期', 'expire'], ['重翻', 'all']];
+            const hit = levels.find(([label]) => label === mode);
+            return hit ? hit[1] : undefined;
         }
     }
 
     // -----------------------------------
-    // TaskUtils Utils
+    // TaskUtils Utils（clean-room 重写，契约：docs/cleanroom/spec-02-helper-layer.md §4）
     // -----------------------------------
     class TaskUtils {
-        static getTypeString = (url) => {
-            const patterns = {
-                'wenkus': new RegExp(`^/wenku(\\?.*)?$`), // Matches /wenku and /wenku?params
-                'wenku': new RegExp(`^/wenku\\/.*(\\?.*)?$`), // Matches /wenku/* and /wenku/*?params
-                'novels': new RegExp(`^/novel(\\?.*)?$`), // Matches /novel and /novel?params
-                'novel': new RegExp(`^/novel\\/.*(\\?.*)?$`), // Matches /novel/*/* and /novel/*/*?params
-                'favorite-web': new RegExp(`^/favorite/web(/.*)?(\\?.*)?$`), // Matches /favorite/web and /favorite/web/* and /favorite/web?params
-                'favorite-wenku': new RegExp(`^/favorite/wenku(/.*)?(\\?.*)?$`), // Matches /favorite/wenku and /favorite/wenku/* and /favorite/wenku?params
-                'favorite-local': new RegExp(`^/favorite/local(/.*)?(\\?.*)?$`) // Matches /favorite/local and /favorite/local/* and /favorite/local?params
-            };
-            for (const [key, pattern] of Object.entries(patterns)) {
-                if (pattern.test(url)) {
-                    return key;
-                }
-            }
-            return null;
-        };
-
-        static wenkuLinkBuilder(series, name, mode) {
-            return `wenku/${series}/${name}?level=${mode}&forceMetadata=false&startIndex=0&endIndex=65536`
+        // 页型判定：顺序敏感 —— 列表页（无子路径）必须排在详情页之前
+        static getTypeString(url) {
+            const pages = [
+                ['wenkus', /^\/wenku(\?.*)?$/],
+                ['wenku', /^\/wenku\/.*(\?.*)?$/],
+                ['novels', /^\/novel(\?.*)?$/],
+                ['novel', /^\/novel\/.*(\?.*)?$/],
+                ['favorite-web', /^\/favorite\/web(\/.*)?(\?.*)?$/],
+                ['favorite-wenku', /^\/favorite\/wenku(\/.*)?(\?.*)?$/],
+                ['favorite-local', /^\/favorite\/local(\/.*)?(\?.*)?$/],
+            ];
+            const hit = pages.find(([, re]) => re.test(url));
+            return hit ? hit[0] : null;
         }
 
-        static webLinkBuilder(url, from = 0, to = 65536, mode) {
-            return `web${url}?level=${mode}&forceMetadata=false&startIndex=${from}&endIndex=${to}`
+        // 任务串 = 目标路径 + 档位 + 章节区间；格式是站点接口契约，一字不差
+        static wenkuLinkBuilder(series, volume, mode) {
+            return `wenku/${series}/${volume}?level=${mode}&forceMetadata=false&startIndex=0&endIndex=65536`;
         }
 
-        //return "id"
+        static webLinkBuilder(path, from = 0, to = 65536, mode) {
+            return `web${path}?level=${mode}&forceMetadata=false&startIndex=${from}&endIndex=${to}`;
+        }
+
         static wenkuIds() {
-            const links = [...document.querySelectorAll('a[href^="/wenku/"]')];
-            return links.map(link => link.getAttribute('href').split('/wenku/')[1]);
+            return [...document.querySelectorAll('a[href^="/wenku/"]')]
+                .map((a) => a.getAttribute('href').split('/wenku/')[1]);
         }
 
-        //return api link
+        // 搜索接口 URL：筛选条件来自列表页 URL 参数（selected 依次为 站点位掩码/类型/分级/翻译/排序）
         static webSearchApi(limit = 20) {
-            const urlParams = new URLSearchParams(location.search);
-            const page = Math.max(parseInt(urlParams.get('page')) - 1 || 0, 0);
-            const query = urlParams.get('query') || '';
-            const selected = urlParams.getAll('selected').map(Number);
+            const params = new URLSearchParams(location.search);
+            const page = Math.max(parseInt(params.get('page')) - 1 || 0, 0);
+            const query = params.get('query') || '';
+            const picked = params.getAll('selected').map(Number);
+            const providerVal = picked[0] ?? 0xff;
+            const typeVal = picked[1] ?? 0;
+            const levelVal = picked[2] ?? 0;
+            const translateVal = picked[3] ?? 0;
+            const sortVal = picked[4] ?? 0;
 
-            const typeMap = { '连载中': '1', '已完结': '2', '短篇': '3', '全部': '0' };
-            const levelMap = { '一般向': '1', 'R18': '2', '全部': '0' };
-            const translateMap = { 'GPT': '1', 'Sakura': '2', '全部': '0' };
-            const sortMap = { '更新': '0', '点击': '1', '相关': '2' };
-
-            // Map selected indices back to values if possible, or use default if URL is empty
-            // On n.novelia.cc, selected[0] is provider, [1] is type, [2] is level, [3] is translate, [4] is sort
-            const providerVal = selected[0] ?? 0xff; // 0xff is 'All'
-            const typeVal = selected[1] ?? 0;
-            const levelVal = selected[2] ?? 0;
-            const translateVal = selected[3] ?? 0;
-            const sortVal = selected[4] ?? 0;
-
-            // Convert provider bitmask back to string
-            const sourceMap = {
-                'kakuyomu': 1,
-                'syosetu': 2,
-                'novelup': 4,
-                'hameln': 8,
-                'pixiv': 16,
-                'alphapolis': 32
-            };
-            let providers = Object.keys(sourceMap)
-                .filter(k => (providerVal & sourceMap[k]))
+            const providerBits = { kakuyomu: 1, syosetu: 2, novelup: 4, hameln: 8, pixiv: 16, alphapolis: 32 };
+            const allProviders = Object.keys(providerBits).join(',');
+            let providers = Object.keys(providerBits)
+                .filter((name) => providerVal & providerBits[name])
                 .join(',');
-            
             if (providerVal === 0xff || !providers) {
-                providers = 'kakuyomu,syosetu,novelup,hameln,pixiv,alphapolis';
+                providers = allProviders;
             }
 
-            return `/api/novel?page=${page}&pageSize=${limit}&query=${encodeURIComponent(query)}` +
-                `&provider=${encodeURIComponent(providers)}&type=${typeVal}&level=${levelVal}` +
-                `&translate=${translateVal}&sort=${sortVal}`;
+            return `/api/novel?page=${page}&pageSize=${limit}&query=${encodeURIComponent(query)}`
+                + `&provider=${encodeURIComponent(providers)}&type=${typeVal}&level=${levelVal}`
+                + `&translate=${translateVal}&sort=${sortVal}`;
         }
 
-        //return { task, description }
-        static async assignTasksSmart(novels, smartJobLimit, smartChapterLimit, mode) {
-            function undone(n) {
-                if (mode === "normal") {
-                    const sOrG = (n.sakura ?? n.gpt) || 0;
-                    //Using max to deal with some total > sakura situation
-                    return Math.max(n.total - sOrG, 0);
-                }
-                return n.total;
-            }
-            const totalChapters = novels.reduce((acc, n) => acc + undone(n), 0);
-            const potentialMaxTask = Math.floor(totalChapters / smartChapterLimit);
-            let maxTasks = Math.min(potentialMaxTask, smartJobLimit);
+        // 每本还差多少章：normal 档按站点进度扣减（可钳到 0），其余档全量
+        static _chaptersLeft(novel, mode, clipAtZero) {
+            if (mode !== 'normal') return novel.total;
+            const done = (novel.sakura ?? novel.gpt) || 0;
+            const left = novel.total - done;
+            return clipAtZero ? Math.max(left, 0) : left;
+        }
 
-            if (maxTasks <= 0 && totalChapters > 0) {
-                maxTasks = smartJobLimit;
-            }
-            if (totalChapters === 0) {
+        // 智能分段：全库按缺口降序凑任务，块大小 = ⌈总缺口/任务数⌉，凑满 jobLimit 为止
+        static async assignTasksSmart(novels, jobLimit, chapterLimit, mode) {
+            const left = (n) => TaskUtils._chaptersLeft(n, mode, true);
+            const totalLeft = novels.reduce((sum, n) => sum + left(n), 0);
+            if (totalLeft === 0) {
                 return [];
             }
-            const chunkSize = Math.ceil(totalChapters / (maxTasks || 1));
-            const sorted = [...novels].sort((a, b) => undone(b) - undone(a));
+            let taskCount = Math.min(Math.floor(totalLeft / chapterLimit), jobLimit);
+            if (taskCount <= 0) {
+                taskCount = jobLimit;
+            }
+            const chunkSize = Math.ceil(totalLeft / (taskCount || 1));
 
             const result = [];
-            let usedTasks = 0;
-
-            for (const novel of sorted) {
-                let remain = undone(novel);
-                if (remain <= 0) continue;
-
-                let startIndex = (mode === "normal") ? (novel.total - remain) : 0;
-
-                while (remain > 0 && usedTasks < smartJobLimit) {
-                    const thisChunk = Math.min(remain, chunkSize);
-                    const endIndex = startIndex + thisChunk;
-
+            let used = 0;
+            for (const novel of [...novels].sort((a, b) => left(b) - left(a))) {
+                let remain = left(novel);
+                let start = (mode === 'normal') ? (novel.total - remain) : 0;
+                while (remain > 0 && used < jobLimit) {
+                    const size = Math.min(remain, chunkSize);
                     result.push({
-                        task: TaskUtils.webLinkBuilder(novel.url, startIndex, endIndex, mode),
-                        description: novel.description
+                        task: TaskUtils.webLinkBuilder(novel.url, start, start + size, mode),
+                        description: novel.description,
                     });
-
-                    usedTasks++;
-                    remain -= thisChunk;
-                    startIndex = endIndex;
-                    if (usedTasks >= smartJobLimit) {
-                        break;
-                    }
+                    used++;
+                    remain -= size;
+                    start += size;
                 }
-                if (usedTasks >= smartJobLimit) {
+                if (used >= jobLimit) {
                     break;
                 }
             }
-
             return result;
         }
 
-        //return { task, description }
+        // 固定分段：每本固定切 parts 块，末块吞余数；缺口 ≤0 的整本跳过
         static async assignTasksStatic(novels, parts, mode) {
-            function undone(n) {
-                if (mode === "normal") {
-                    const sOrG = (n.sakura ?? n.gpt) || 0;
-                    return n.total - sOrG;
-                }
-                return n.total;
-            }
-
             const result = [];
-
             for (const novel of novels) {
-                const totalChapters = undone(novel);
-                if (totalChapters <= 0) continue;
-                const startBase = (mode === "normal")
-                    ? (novel.total - totalChapters)
-                    : 0;
-
-                const chunkSize = Math.ceil(totalChapters / parts);
-
+                const totalLeft = TaskUtils._chaptersLeft(novel, mode, false);
+                if (totalLeft <= 0) continue;
+                const startBase = (mode === 'normal') ? (novel.total - totalLeft) : 0;
+                const chunkSize = Math.ceil(totalLeft / parts);
                 for (let i = 0; i < parts; i++) {
                     const chunkStart = startBase + i * chunkSize;
-                    const chunkEnd = (i === parts - 1)
-                        ? (startBase + totalChapters)
-                        : (chunkStart + chunkSize);
-
-                    if (chunkStart < startBase + totalChapters) {
-                        result.push({
-                            task: TaskUtils.webLinkBuilder(novel.url, chunkStart, chunkEnd, mode),
-                            description: novel.description
-                        });
-                    }
+                    if (chunkStart >= startBase + totalLeft) continue;
+                    const chunkEnd = (i === parts - 1) ? (startBase + totalLeft) : (chunkStart + chunkSize);
+                    result.push({
+                        task: TaskUtils.webLinkBuilder(novel.url, chunkStart, chunkEnd, mode),
+                        description: novel.description,
+                    });
                 }
             }
             return result;
         }
 
-        static async clickTaskMoveToTop(count, reserve=true) {
+        // 置顶按钮：reserve 时从最后一个 extra 往前数
+        static async clickTaskMoveToTop(count, reserve = true) {
             const extras = document.querySelectorAll('.n-thing-header__extra');
-            for (let i = 0; i < count;i++) {
-                const offset = reserve ? extras.length - i - 1 : i;
-                const container = extras[offset];
-                const buttons = container.querySelectorAll('button');
-                if (buttons.length) {
-                    buttons[0].click();
+            for (let i = 0; i < count; i++) {
+                const container = extras[reserve ? (extras.length - i - 1) : i];
+                const button = container && container.querySelectorAll('button')[0];
+                if (button) {
+                    button.click();
                 }
             }
         }
 
         static async clickButtons(name = '') {
-            const btns = document.querySelectorAll('button');
-            btns.forEach(btn => {
+            [...document.querySelectorAll('button')].forEach((btn) => {
                 if (name === '' || btn.textContent.includes(name)) {
                     btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                 }
@@ -5539,128 +5492,112 @@
     // -----------------------------------
     // Storage Utils
     // -----------------------------------
+    // 站点工作区数据（workspace-sakura / workspace-gpt）的读写层（clean-room 重写，契约：docs/cleanroom/spec-02-helper-layer.md §5）
+    // 注意：这是「上游工作区」的 localStorage，不是分叉术语队列的 IndexedDB 库（ntr-glossary）
     class StorageUtils {
+        // n.novelia.cc 与老镜像域的工作区键名不同；gpt 两域同名
         static sakura = location.hostname === 'n.novelia.cc' ? 'workspace-sakura' : 'sakura-workspace';
-        static gpt = location.hostname === 'n.novelia.cc' ? 'workspace-gpt' : 'workspace-gpt';
-        static updateUrl = [
-            'workspace/sakura',
-            'workspace/gpt'
-        ];
+        static gpt = 'workspace-gpt';
 
+        // 面板停在工作区页时由主循环调用：读出再写回，顺带把缺的数组字段补齐
         static async update() {
-            const storageKey = (window.location.pathname.includes('workspace/sakura') ? this.sakura : (window.location.pathname.includes('workspace/gpt') ? this.gpt : null));
-            if (!storageKey) return;
-
-            const data = await this._getData(storageKey);
-            await this._setData(storageKey, data);
+            const key = window.location.pathname.includes('workspace/sakura') ? this.sakura
+                : (window.location.pathname.includes('workspace/gpt') ? this.gpt : null);
+            if (!key) return;
+            await this._setData(key, await this._getData(key));
         }
 
         static async _setData(key, data) {
-            localStorage.setItem(key, JSON.stringify(data));
+            const serialized = JSON.stringify(data);
+            localStorage.setItem(key, serialized);
+            // 合成 storage 事件：让同页监听者（以及站点脚本）感知工作区数据变化
             window.dispatchEvent(new StorageEvent('storage', {
                 key: key,
-                newValue: JSON.stringify(data),
+                newValue: serialized,
                 url: window.location.href,
                 storageArea: localStorage
             }));
         }
 
         static async _getData(key) {
+            let raw = null;
             try {
-                let raw = localStorage.getItem(key);
-                if (raw) {
-                    const data = JSON.parse(raw);
-                    // 验证数据结构完整性
-                    if (!data.workers) data.workers = [];
-                    if (!data.jobs) data.jobs = [];
-                    if (!data.uncompletedJobs) data.uncompletedJobs = [];
-                    return data;
-                }
-            } catch (e) {
-                console.error('Failed to parse localStorage data for key:', key, e);
-                // 数据损坏时尝试修复或重置
+                raw = localStorage.getItem(key);
+            } catch (e) { }
+            if (raw) {
                 try {
-                    localStorage.removeItem(key);
-                } catch (removeError) {
-                    console.error('Failed to remove corrupted data:', removeError);
+                    const data = JSON.parse(raw);
+                    // 缺哪个数组补哪个：站点侧旧数据/半成品数据也能安全读写（其余字段原样保留）
+                    data.workers = data.workers || [];
+                    data.jobs = data.jobs || [];
+                    data.uncompletedJobs = data.uncompletedJobs || [];
+                    return data;
+                } catch (e) {
+                    // 坏数据当场清掉，下次进来是干净结构
+                    console.error('Failed to parse localStorage data for key:', key, e);
+                    try {
+                        localStorage.removeItem(key);
+                    } catch (removeError) {
+                        console.error('Failed to remove corrupted data:', removeError);
+                    }
                 }
             }
             return { workers: [], jobs: [], uncompletedJobs: [] };
         }
 
-        static async addSakuraWorker(id, endpoint, amount = null, prevSegLength = 500, segLength = 500) {
-            const total = amount ?? -1;
-            let data = await this._getData(this.sakura);
-
-            function _dataInsert(id, endpoint, prevSegLength, segLength) {
-                const worker = { id, endpoint, prevSegLength, segLength };
-                const existingIndex = data.workers.findIndex(w => w.id === id);
-                if (existingIndex !== -1) {
-                    data.workers[existingIndex] = worker;
-                } else {
-                    data.workers.push(worker);
-                }
-            }
-            if (total == -1) {
-                _dataInsert(id, endpoint, prevSegLength, segLength);
+        // 同 id 覆盖、新 id 追加
+        static _upsertWorker(data, worker) {
+            const existingIndex = data.workers.findIndex((w) => w.id === worker.id);
+            if (existingIndex !== -1) {
+                data.workers[existingIndex] = worker;
             } else {
-                for (let i = 1; i < total + 1; i++) {
-                    _dataInsert(id + i, endpoint, prevSegLength, segLength);
-                }
+                data.workers.push(worker);
             }
+        }
+
+        static async addSakuraWorker(id, endpoint, amount = null, prevSegLength = 500, segLength = 500) {
+            const data = await this._getData(this.sakura);
+            const total = amount ?? -1;
+            const ids = (total === -1) ? [id] : Array.from({ length: total }, (_, i) => `${id}${i + 1}`);
+            ids.forEach((workerId) => this._upsertWorker(data, { id: workerId, endpoint, prevSegLength, segLength }));
             await this._setData(this.sakura, data);
         }
 
         static async addGPTWorker(id, model, endpoint, key, amount = null) {
+            const data = await this._getData(this.gpt);
             const total = amount ?? -1;
-            let data = await this._getData(this.gpt);
-
-            function _dataInsert(id, model, endpoint, key) {
-                const worker = { id, type: 'api', model, endpoint, key };
-                const existingIndex = data.workers.findIndex(w => w.id === id);
-                if (existingIndex !== -1) {
-                    data.workers[existingIndex] = worker;
-                } else {
-                    data.workers.push(worker);
-                }
-            }
-            if (total == -1) {
-                _dataInsert(id, model, endpoint, key);
-            } else {
-                for (let i = 1; i < total + 1; i++) {
-                    _dataInsert(id + i, model, endpoint, key);
-                }
-            }
+            const ids = (total === -1) ? [id] : Array.from({ length: total }, (_, i) => `${id}${i + 1}`);
+            ids.forEach((workerId) => this._upsertWorker(data, { id: workerId, type: 'api', model, endpoint, key }));
             await this._setData(this.gpt, data);
         }
 
         static async removeWorker(key, id) {
-            let data = await this._getData(key);
-            data.workers = data.workers.filter(w => w.id !== id);
+            const data = await this._getData(key);
+            data.workers = data.workers.filter((w) => w.id !== id);
             await this._setData(key, data);
         }
 
+        // 语义与名字相反：留下的是「排除名单」里的（共享/本机这类不归脚本管的），其余全删
         static async removeAllWorkers(key, exclude = []) {
-            let data = await this._getData(key);
-            data.workers = data.workers.filter(w => exclude.includes(w.id));
+            const data = await this._getData(key);
+            data.workers = data.workers.filter((w) => exclude.includes(w.id));
             await this._setData(key, data);
         }
 
         static async addJob(key, task, description, createAt = Date.now()) {
-            const job = { task, description, createAt };
-            let data = await this._getData(key);
-            data.jobs.push(job);
+            const data = await this._getData(key);
+            data.jobs.push({ task, description, createAt });
             await this._setData(key, data);
         }
 
+        // 同 task 视为已排队，跳过（createAt 统一取本批调用时刻）
         static async addJobs(key, jobs = [], createAt = Date.now()) {
-            let data = await this._getData(key);
-            const existingTasks = new Set(data.jobs.map(job => job.task));
+            const data = await this._getData(key);
+            const queued = new Set(data.jobs.map((job) => job.task));
             jobs.forEach(({ task, description }) => {
-                if (!existingTasks.has(task)) {
-                    const job = { task, description, createAt };
-                    data.jobs.push(job);
-                }
+                if (queued.has(task)) return;
+                queued.add(task);
+                data.jobs.push({ task, description, createAt });
             });
             await this._setData(key, data);
         }
