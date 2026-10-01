@@ -1,0 +1,6568 @@
+// ==UserScript==
+// @name         NTR ToolBox (dev 术语增强)
+// @namespace    http://tampermonkey.net/
+// @version      0.8.0-dev
+// @author       TheNano
+// @description  ToolBox for Novel Translate bot website
+// @match        https://books.fishhawk.top/*
+// @match        https://books1.fishhawk.top/*
+// @match        https://n.novelia.cc/*
+// @icon         https://github.com/LittleSurvival/NTR-ToolBox/blob/main/icon.jpg?raw=true
+// @grant        GM_openInTab
+// @license      All Rights Reserved
+
+
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    if (window._NTRToolBoxInstance) {
+        return;
+    }
+
+    window._NTRToolBoxInstance = true;
+
+    const CONFIG_VERSION = 23;
+    const VERSION = 'v0.7.2';
+    const CONFIG_STORAGE_KEY = 'NTR_ToolBox_Config';
+    const IS_MOBILE = /Mobi|Android/i.test(navigator.userAgent);
+    const domainAllowed = (location.hostname === 'books.fishhawk.top' || location.hostname === 'books1.fishhawk.top' || location.hostname === 'n.novelia.cc');
+
+    // -----------------------------------
+    // Module settings
+    // -----------------------------------
+
+    function newBooleanSetting(nameDefault, boolDefault) {
+        return { name: nameDefault, type: 'boolean', value: Boolean(boolDefault) };
+    }
+    function newNumberSetting(nameDefault, numDefault) {
+        return { name: nameDefault, type: 'number', value: Number(numDefault || 0) };
+    }
+    function newStringSetting(nameDefault, strDefault) {
+        return { name: nameDefault, type: 'string', value: String(strDefault == null ? '' : strDefault) };
+    }
+    function newSelectSetting(nameDefault, arrOptions, valDefault) {
+        return { name: nameDefault, type: 'select', value: valDefault, options: arrOptions };
+    }
+    function newTextareaSetting(nameDefault, strDefault) {
+        return { name: nameDefault, type: 'textarea', value: String(strDefault == null ? '' : strDefault) };
+    }
+    function getModuleSetting(mod, key) {
+        if (!mod.settings) return undefined;
+        const found = mod.settings.find(s => s.name === key);
+        return found ? found.value : undefined;
+    }
+
+    // 站点工作区里配置的 GPT 翻译器：老工作区存 workspace-gpt，
+    // 新版「GPT工作区BETA」(/workspace/gpt-pipeline) 另存一份 workspace-gpt-pipeline —— 两处都要读，否则新工作区里加的翻译器在设置里看不到
+    const WORKSPACE_GPT_KEYS = ['workspace-gpt-pipeline', 'workspace-gpt'];
+    const readWorkspaceGptWorkers = () => {
+        const seen = new Set();
+        const out = [];
+        for (const key of WORKSPACE_GPT_KEYS) {
+            let workers = [];
+            try {
+                const raw = localStorage.getItem(key);
+                workers = raw ? ((JSON.parse(raw) || {}).workers || []) : [];
+            } catch (e) { workers = []; }
+            for (const w of workers) {
+                if (!w || !w.id || !w.endpoint) continue;
+                const sig = `${w.id}|${w.endpoint}|${w.model || ''}`;
+                if (seen.has(sig)) continue;
+                seen.add(sig);
+                out.push(w);
+            }
+        }
+        return out;
+    };
+    // 「翻译器」选择框的选项（id 就是添加时填的名字）
+    // '' = 全部（按顺序轮换）；函数形式是为了每次渲染/打开设置时重新读取（工作区里新增的翻译器不用刷新页面）
+    const workspaceTranslatorOptions = () => {
+        const options = [{ value: '', label: '全部（自动轮换）' }];
+        readWorkspaceGptWorkers().forEach((w) => {
+            options.push({ value: String(w.id), label: w.model ? `${w.id}（${w.model}）` : String(w.id) });
+        });
+        return options;
+    };
+    // 需要「术语表目标」的模块只在能确定目标的页面显示：网页小说详情 / 文库详情 / 本地书架
+    // （列表页、工作区这类页面点了也无法确定改哪本书的术语表，干脆不显示；术语队列管理的是已存任务，不受此限）
+    const hasGlossaryTargetPage = () => [
+        /^\/novel\/[^/]+\/[^/]+/,   // /novel/{provider}/{novelId}
+        /^\/wenku\/[^/]+/,          // /wenku/{novelId}
+        /^\/favorite\/local/,       // 本地书架（运行时再从卷列表里选）
+    ].some((re) => re.test(location.pathname));
+
+    function isModuleEnabledByWhitelist(modItem) {
+        if (modItem.needsTarget && !hasGlossaryTargetPage()) {
+            return false;
+        }
+        if (!modItem.whitelist) {
+            return domainAllowed;
+        }
+        const whitelist = modItem.whitelist;
+        const parts = Array.isArray(whitelist) ? whitelist : [whitelist];
+        return domainAllowed && parts.some(p => {
+            if (typeof p === 'string') {
+                if (p.endsWith('/*')) {
+                    const base = p.slice(0, -2);
+                    return location.pathname.startsWith(base) || location.pathname === base;
+                }
+                return location.pathname.includes(p);
+            }
+            return false;
+        });
+    }
+
+    // -----------------------------------
+    // Module definitions
+    // -----------------------------------
+    const moduleAddSakuraTranslator = {
+        name: '添加Sakura翻译器',
+        type: 'onclick',
+        whitelist: '/workspace/sakura',
+        settings: [
+            newNumberSetting('数量', 5),
+            newStringSetting('名称', 'NTR translator '),
+            newStringSetting('链接', 'https://sakura-share.one'),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg) {
+            const totalCount = getModuleSetting(cfg, '数量') || 1;
+            const namePrefix = getModuleSetting(cfg, '名称') || '';
+            const linkValue = getModuleSetting(cfg, '链接') || '';
+
+            StorageUtils.addSakuraWorker(namePrefix, linkValue, totalCount);
+        }
+    }
+
+    const moduleAddGPTTranslator = {
+        name: '添加GPT翻译器',
+        type: 'onclick',
+        whitelist: '/workspace/gpt',
+        settings: [
+            newNumberSetting('数量', 5),
+            newStringSetting('名称', 'NTR translator '),
+            newStringSetting('模型', 'deepseek-chat'),
+            newStringSetting('链接', 'https://api.deepseek.com'),
+            newStringSetting('Key', 'sk-wait-for-input'),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg) {
+            const totalCount = getModuleSetting(cfg, '数量') || 1;
+            const namePrefix = getModuleSetting(cfg, '名称') || '';
+            const model = getModuleSetting(cfg, '模型') || '';
+            const apiKey = getModuleSetting(cfg, 'Key') || '';
+            const apiUrl = getModuleSetting(cfg, '链接') || '';
+
+            StorageUtils.addGPTWorker(namePrefix, model, apiUrl, apiKey, totalCount);
+        }
+    };
+
+    const moduleDeleteTranslator = {
+        name: '删除翻译器',
+        type: 'onclick',
+        whitelist: '/workspace',
+        settings: [
+            newBooleanSetting('确认删除', true),
+            newStringSetting('排除', '共享,本机,AutoDL'),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg) {
+            const confirmDelete = getModuleSetting(cfg, '确认删除');
+            const excludeStr = getModuleSetting(cfg, '排除') || '';
+            const excludeArr = excludeStr.split(',').filter(x => x);
+
+            // Get current workers to show count
+            let currentWorkers = [];
+            const key = location.href.endsWith('gpt') ? StorageUtils.gpt : (location.href.endsWith('sakura') ? StorageUtils.sakura : null);
+            if (key) {
+                const data = await StorageUtils._getData(key);
+                currentWorkers = data.workers.filter(w => !excludeArr.includes(w.id));
+            }
+
+            if (confirmDelete && currentWorkers.length > 0) {
+                if (!confirm(`确定要删除 ${currentWorkers.length} 个翻译器吗？`)) {
+                    NotificationUtils.showWarning('已取消删除');
+                    return;
+                }
+            }
+
+            if (location.href.endsWith('gpt')) {
+                await StorageUtils.removeAllWorkers(StorageUtils.gpt, excludeArr);
+                NotificationUtils.showSuccess('已删除 GPT 翻译器');
+            } else if (location.href.endsWith('sakura')) {
+                await StorageUtils.removeAllWorkers(StorageUtils.sakura, excludeArr);
+                NotificationUtils.showSuccess('已删除 Sakura 翻译器');
+            }
+        }
+    };
+
+    const moduleLaunchTranslator = {
+        name: '启动翻译器',
+        type: 'onclick',
+        whitelist: '/workspace',
+        settings: [
+            newNumberSetting('延迟间隔', 50),
+            newNumberSetting('最多启动', 999),
+            newBooleanSetting('避免无效启动', true),
+            newStringSetting('排除', '本机,AutoDL'),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg, auto) {
+            const intervalVal = getModuleSetting(cfg, '延迟间隔') || 50;
+            const maxClick = getModuleSetting(cfg, '最多启动') || 999;
+            const noEmptyLaunch = getModuleSetting(cfg, '避免无效启动');
+            const allBtns = [...document.querySelectorAll('button')].filter(btn => {
+                if (!auto && noEmptyLaunch) return true;
+                const listItem = btn.closest('.n-list-item');
+                if (listItem) {
+                    const errorMessages = listItem.querySelectorAll('div');
+                    return !Array.from(errorMessages).some(div => div.textContent.includes("TypeError: Failed to fetch"));
+                }
+                return true;
+            });
+            const delay = ms => new Promise(r => setTimeout(r, ms));
+            let idx = 0, clickCount = 0, lastRunning = 0, emptyCheck = 0;
+
+            async function nextClick() {
+                while (idx < allBtns.length && clickCount < maxClick) {
+                    const btn = allBtns[idx++];
+                    if (btn.textContent.includes('启动')) {
+                        btn.click();
+                        clickCount++;
+                        await delay(intervalVal);
+                    }
+                    if (noEmptyLaunch) {
+                        let running = [...document.querySelectorAll('button')].filter(btn => btn.textContent.includes('停止')).length;
+                        if (running == lastRunning) emptyCheck++;
+                        if (emptyCheck > 3) break;
+                    }
+                }
+            }
+            await nextClick();
+        }
+    };
+
+    const moduleQueueSakuraV2 = {
+        name: '排队Sakura v2',
+        type: 'onclick',
+        whitelist: ['/wenku', '/novel', '/favorite'],
+        progress: { percentage: 0, info: '' },
+        settings: [
+            newNumberSetting('单次撷取web数量(可破限)', 20),
+            newNumberSetting('撷取单页wenku数量(deving)', 20),
+            newSelectSetting('模式', ['常规', '过期', '重翻'], '常规'),
+            newSelectSetting('分段', ['智能', '固定'], '智能'),
+            newNumberSetting('智能均分任务上限', 1000),
+            newNumberSetting('智能均分章节下限', 5),
+            newNumberSetting('固定均分任务', 6),
+            newBooleanSetting('R18(需登入)', true),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg) {
+            const webCatchLimit = getModuleSetting(cfg, '单次撷取web数量(可破限)') || 20;
+            const wenkuCatchLimit = getModuleSetting(cfg, '撷取单页wenku数量(deving)') || 20;
+            const pair = getModuleSetting(cfg, '固定均分任务') || 6;
+            const smartJobLimit = getModuleSetting(cfg, '智能均分任务上限') || 1000;
+            const smartChapterLimit = getModuleSetting(cfg, '智能均分章节下限') || 5;
+            const type = TaskUtils.getTypeString(window.location.pathname);
+            const mode = getModuleSetting(cfg, '模式') || '常规';
+            const sepMode = getModuleSetting(cfg, '分段') || '智能';
+            const r18Bypass = getModuleSetting(cfg, 'R18(需登入)');
+
+            let results = [];
+            let errorFlag = false;
+            const maxRetries = 3;
+
+            const modeMap = { '常规': '常规', '过期': '过期', '重翻': '重翻' };
+            const cnMode = modeMap[mode] || '常规';
+            const translateMode = SettingUtils.getTranslateMode(mode);
+
+            switch (type) {
+                case 'wenkus': {
+                    const wenkuIds = TaskUtils.wenkuIds();
+                    const apiEndpoint = `/api/wenku/`;
+
+                    await Promise.all(
+                        wenkuIds.map(async (id) => {
+                            let attempts = 0;
+                            let success = false;
+
+                            while (attempts < maxRetries && !success) {
+                                try {
+                                    const response = await script.fetch(`${window.location.origin}${apiEndpoint}${id}`, r18Bypass);
+                                    if (!response.ok) throw new Error('Network response was not ok');
+                                    const data = await response.json();
+                                    const volumeIds = data.volumeJp.map(volume => volume.volumeId);
+
+                                    volumeIds.forEach(name => results.push({ task: TaskUtils.wenkuLinkBuilder(id, name, translateMode), description: name }))
+                                    success = true;
+                                } catch (error) {
+                                    NotificationUtils.showError(`Failed to fetch data for ID ${id}, attempt ${attempts + 1}.`);
+                                    attempts++;
+                                    if (attempts < maxRetries) {
+                                        await new Promise(resolve => setTimeout(resolve, 1000));
+                                    }
+                                }
+                            }
+                        })
+                    );
+                    await StorageUtils.addJobs(StorageUtils.sakura, results);
+                    break;
+                };
+                case 'wenku': {
+                    await TaskUtils.clickButtons(cnMode);
+                    await TaskUtils.clickButtons('排队Sakura');
+                    break;
+                }
+                case 'novels': {
+                    const apiUrl = TaskUtils.webSearchApi(webCatchLimit);
+                    try {
+                        const response = await script.fetch(`${window.location.origin}${apiUrl}`, r18Bypass);
+                        if (!response.ok) throw new Error('Network response was not ok');
+                        const data = await response.json();
+                        const novels = data.items.map(item => {
+                            const title = item.titleZh ?? item.titleJp;
+                            return {
+                                url: `/${item.providerId}/${item.novelId}`,
+                                description: title,
+                                total: item.total,
+                                sakura: item.sakura
+                            };
+                        });
+                        results = sepMode == '智能'
+                            ? await TaskUtils.assignTasksSmart(novels, smartJobLimit, smartChapterLimit, translateMode)
+                            : await TaskUtils.assignTasksStatic(novels, pair, translateMode);
+
+                        await StorageUtils.addJobs(StorageUtils.sakura, results);
+                    } catch (error) {
+                        errorFlag = true;
+                        NotificationUtils.showError(`Failed to fetch web search results.`);
+                    }
+                    break;
+                }
+                case 'novel': {
+                    try {
+                        const targetSpan = Array.from(document.querySelectorAll('span.n-text')).find(span => /总计 (\d+) \/ 百度 (\d+) \/ 有道 (\d+) \/ GPT (\d+) \/ Sakura (\d+)/.test(span.textContent));
+                        if (!targetSpan) {
+                            throw Error('无法找到统计信息');
+                        }
+                        const [_, total, , , , sakura] = targetSpan.textContent.match(/总计 (\d+) \/ 百度 (\d+) \/ 有道 (\d+) \/ GPT (\d+) \/ Sakura (\d+)/);
+                        const url = window.location.pathname.split('/novel')[1];
+                        const title = document.title;
+                        if (title.includes('轻小说机翻机器人')) throw Error('小说页尚未载入');
+
+                        const novels = [{ url: url, total: total, sakura: sakura, description: title }];
+                        results = sepMode == '智能'
+                            ? await TaskUtils.assignTasksSmart(novels, smartJobLimit, smartChapterLimit, translateMode)
+                            : await TaskUtils.assignTasksStatic(novels, pair, translateMode);
+
+                        await StorageUtils.addJobs(StorageUtils.sakura, results);
+                    } catch (error) {
+                        errorFlag = true;
+                        NotificationUtils.showError(`Failed to fetch data for ${title}.`);
+                    }
+                    break;
+                }
+                case 'favorite-web': {
+                    const url = new URL(window.location.href);
+                    //get folder id
+                    const id = url.pathname.endsWith('/web') ? 'default' : url.pathname.split('/').pop();
+                    let tries = 0;
+                    let page = 0;
+
+                    while (true) {
+                        const apiUrl = `${url.origin}/api/user/favored-web/${id}?page=${page}&pageSize=90&sort=update`;
+                        let tasks = [];
+                        let novelCount = 0;
+                        try {
+                            const response = await script.fetch(apiUrl);
+                            const data = await response.json();
+                            const novels = data.items.map(item => {
+                                const title = item.titleZh ?? item.titleJp;
+                                return {
+                                    url: `/${item.providerId}/${item.novelId}`,
+                                    description: title,
+                                    total: item.total,
+                                    sakura: item.sakura
+                                };
+                            });
+                            novelCount = novels.length;
+                            tasks = sepMode == '智能'
+                                ? await TaskUtils.assignTasksSmart(novels, smartJobLimit, smartChapterLimit, translateMode)
+                                : await TaskUtils.assignTasksStatic(novels, pair, translateMode);
+
+                            await StorageUtils.addJobs(StorageUtils.sakura, tasks);
+                            results.push(...tasks);
+                            NotificationUtils.showSuccess(`成功排队 ${3 * page + 1}-${3 * page + 3}页, 共${tasks.length}个任务`);
+                        } catch (error) {
+                            console.log(error);
+                            NotificationUtils.showError(`Failed to fetch data for ${id}, page ${page + 1}.`);
+                            if (tries++ > 3) break;
+                            continue;
+                        }
+                        if (novelCount < 90) break;
+                        else page++;
+                    }
+                    break;
+                }
+                case 'favorite-wenku': {
+                    const url = new URL(window.location.href);
+                    //get folder id
+                    const id = url.pathname.endsWith('/wenku') ? 'default' : url.pathname.split('/').pop();
+                    let page = 0;
+                    let tries = 0;
+                    while (true) {
+                        const apiUrl = `${url.origin}/api/user/favored-wenku/${id}?page=${page}&pageSize=72&sort=update`;
+                        let tasks = [];
+                        let novelCount = 0;
+                        try {
+                            const response = await script.fetch(apiUrl);
+                            const data = await response.json();
+                            const wenkuIds = data.items.map(novel => novel.id);
+                            novelCount = wenkuIds.length;
+
+                            await Promise.all(
+                                wenkuIds.map(async (id) => {
+                                    let attempts = 0;
+                                    let success = false;
+                                    const apiEndpoint = `/api/wenku/`;
+
+                                    while (attempts < maxRetries && !success) {
+                                        try {
+                                            const response = await script.fetch(`${window.location.origin}${apiEndpoint}${id}`, r18Bypass);
+                                            if (!response.ok) throw new Error('Network response was not ok');
+                                            const data = await response.json();
+                                            const volumeIds = data.volumeJp.map(volume => volume.volumeId);
+
+                                            volumeIds.forEach(name => tasks.push({ task: TaskUtils.wenkuLinkBuilder(id, name, translateMode), description: name }))
+                                            success = true;
+                                        } catch (error) {
+                                            NotificationUtils.showError(`Failed to fetch data for ID ${id}, attempt ${attempts + 1}:`);
+                                            attempts++;
+                                            if (attempts < maxRetries) {
+                                                await new Promise(resolve => setTimeout(resolve, 1000));
+                                            }
+                                        }
+                                    }
+                                })
+                            );
+                            await StorageUtils.addJobs(StorageUtils.sakura, tasks);
+                            results.push(...tasks);
+                            NotificationUtils.showSuccess(`成功排队 ${3 * page + 1}-${3 * page + 3}页, 共${tasks.length}本小说`);
+                        } catch (error) {
+                            console.log(error);
+                            NotificationUtils.showError(`Failed to fetch data for ${id}, page ${page + 1}.`);
+                            if (tries > 3) break;
+                            continue;
+                        }
+                        if (novelCount < 72) break;
+                        else page++;
+                    }
+                    break;
+                }
+                default: { }
+            }
+            if (errorFlag) return;
+            // Fix: Properly filter unique novels by description
+            const uniqueNovels = new Set(results.map(result => result.description));
+            NotificationUtils.showSuccess(`排队成功 : 共 ${uniqueNovels.size} 本小说, 均分 ${results.length} 分段.`);
+        }
+    }
+
+    const moduleQueueGPTV2 = {
+        name: '排队GPT v2',
+        type: 'onclick',
+        whitelist: ['/wenku', '/novel', '/favorite/web'],
+        progress: { percentage: 0, info: '' },
+        settings: [
+            newNumberSetting('单次撷取web数量(可破限)', 20),
+            newNumberSetting('撷取单页wenku数量(deving)', 20),
+            newSelectSetting('模式', ['常规', '过期', '重翻'], '常规'),
+            newSelectSetting('分段', ['智能', '固定'], '智能'),
+            newNumberSetting('智能均分任务上限', 1000),
+            newNumberSetting('智能均分章节下限', 5),
+            newNumberSetting('固定均分任务', 6),
+            newBooleanSetting('R18(需登入)', true),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg) {
+            const webCatchLimit = getModuleSetting(cfg, '单次撷取web数量(可破限)') || 20;
+            const wenkuCatchLimit = getModuleSetting(cfg, '撷取单页wenku数量(deving)') || 20;
+            const pair = getModuleSetting(cfg, '固定均分任务') || 6;
+            const smartJobLimit = getModuleSetting(cfg, '智能均分任务上限') || 1000;
+            const smartChapterLimit = getModuleSetting(cfg, '智能均分章节下限') || 5;
+            const type = TaskUtils.getTypeString(window.location.pathname);
+            const mode = getModuleSetting(cfg, '模式') || '常规';
+            const sepMode = getModuleSetting(cfg, '分段') || '智能';
+            const r18Bypass = getModuleSetting(cfg, 'R18(需登入)');
+
+            let results = [];
+            const maxRetries = 3;
+            let errorFlag = false;
+
+            const modeMap = { '常规': '常规', '过期': '过期', '重翻': '重翻' };
+            const cnMode = modeMap[mode] || '常规';
+            const translateMode = SettingUtils.getTranslateMode(mode);
+
+
+            switch (type) {
+                case 'wenkus': {
+                    const wenkuIds = TaskUtils.wenkuIds();
+                    const apiEndpoint = `/api/wenku/`;
+
+                    await Promise.all(
+                        wenkuIds.map(async (id) => {
+                            let attempts = 0;
+                            let success = false;
+
+                            while (attempts < maxRetries && !success) {
+                                try {
+                                    const response = await script.fetch(`${window.location.origin}${apiEndpoint}${id}`, r18Bypass);
+                                    if (!response.ok) throw new Error('Network response was not ok');
+                                    const data = await response.json();
+                                    const volumeIds = data.volumeJp.map(volume => volume.volumeId);
+
+                                    volumeIds.forEach(name => results.push({ task: TaskUtils.wenkuLinkBuilder(id, name, translateMode), description: name }))
+                                    success = true;
+                                } catch (error) {
+                                    NotificationUtils.showError(`Failed to fetch data for ID ${id}, attempt ${attempts + 1}:`);
+                                    attempts++;
+                                    if (attempts < maxRetries) {
+                                        await new Promise(resolve => setTimeout(resolve, 1000));
+                                    }
+                                }
+                            }
+                        })
+                    );
+                    await StorageUtils.addJobs(StorageUtils.gpt, results);
+                    break;
+                };
+                case 'wenku': {
+                    await TaskUtils.clickButtons(cnMode);
+                    await TaskUtils.clickButtons('排队GPT');
+                    break;
+                }
+                case 'novels': {
+                    const apiUrl = TaskUtils.webSearchApi(webCatchLimit);
+                    try {
+                        const response = await script.fetch(`${window.location.origin}${apiUrl}`, r18Bypass)
+                        if (!response.ok) throw new Error('Network response was not ok');
+                        const data = await response.json();
+                        const novels = data.items.map(item => {
+                            const title = item.titleZh ?? item.titleJp;
+                            return {
+                                url: `/${item.providerId}/${item.novelId}`,
+                                description: title,
+                                total: item.total,
+                                gpt: item.gpt
+                            };
+                        });
+                        results = sepMode == '智能'
+                            ? await TaskUtils.assignTasksSmart(novels, smartJobLimit, smartChapterLimit, translateMode)
+                            : await TaskUtils.assignTasksStatic(novels, pair, translateMode);
+
+                        await StorageUtils.addJobs(StorageUtils.gpt, results);
+                    } catch (error) {
+                        errorFlag = true;
+                        NotificationUtils.showError(`Failed to fetch web search results.`);
+                    }
+                    break;
+                }
+                case 'novel': {
+                    try {
+                        const targetSpan = Array.from(document.querySelectorAll('span.n-text')).find(span => /总计 (\d+) \/ 百度 (\d+) \/ 有道 (\d+) \/ GPT (\d+) \/ Sakura (\d+)/.test(span.textContent));
+                        if (!targetSpan) {
+                            throw Error('无法找到统计信息');
+                        }
+                        const [_, total, , , gpt] = targetSpan.textContent.match(/总计 (\d+) \/ 百度 (\d+) \/ 有道 (\d+) \/ GPT (\d+) \/ Sakura (\d+)/);
+                        const url = window.location.pathname.split('/novel')[1];
+
+                        const title = document.title;
+                        if (title.includes('轻小说机翻机器人')) throw Error('小说页尚未载入');
+
+                        const novels = [{ url: url, total: total, gpt: gpt, description: title }]
+
+                        results = sepMode == '智能'
+                            ? await TaskUtils.assignTasksSmart(novels, smartJobLimit, smartChapterLimit, translateMode)
+                            : await TaskUtils.assignTasksStatic(novels, pair, translateMode);
+
+                        await StorageUtils.addJobs(StorageUtils.gpt, results);
+                    } catch (error) {
+                        errorFlag = true;
+                        NotificationUtils.showError(`Failed to fetch data for ${title}.`);
+                    }
+                    break;
+                }
+                case 'favorite-web': {
+                    const url = new URL(window.location.href);
+                    //get folder id
+                    const id = url.pathname.endsWith('/web') ? 'default' : url.pathname.split('/').pop();
+                    let tries = 0;
+                    let page = 0;
+
+                    while (true) {
+                        const apiUrl = `${url.origin}/api/user/favored-web/${id}?page=${page}&pageSize=90&sort=update`;
+                        let tasks = [];
+                        let novelCount = 0;
+                        try {
+                            const response = await script.fetch(apiUrl);
+                            const data = await response.json();
+                            const novels = data.items.map(item => {
+                                const title = item.titleZh ?? item.titleJp;
+                                return {
+                                    url: `/${item.providerId}/${item.novelId}`,
+                                    description: title,
+                                    total: item.total,
+                                    gpt: item.gpt
+                                };
+                            });
+                            novelCount = novels.length;
+                            tasks = sepMode == '智能'
+                                ? await TaskUtils.assignTasksSmart(novels, smartJobLimit, smartChapterLimit, translateMode)
+                                : await TaskUtils.assignTasksStatic(novels, pair, translateMode);
+
+                            await StorageUtils.addJobs(StorageUtils.gpt, tasks);
+                            results.push(...tasks);
+                            NotificationUtils.showSuccess(`成功排队 ${3 * page + 1}-${3 * page + 3}页, 共${novelCount}本小说`);
+                        } catch (error) {
+                            console.log(error);
+                            NotificationUtils.showError(`Failed to fetch data for ${id}, page ${page + 1}.`);
+                            if (tries++ > 3) break;
+                            continue;
+                        }
+                        if (novelCount < 90) break;
+                        else page++;
+                    }
+                    break;
+                }
+                case 'favorite-wenku': {
+                    const url = new URL(window.location.href);
+                    //get folder id
+                    const id = url.pathname.endsWith('/wenku') ? 'default' : url.pathname.split('/').pop();
+                    let page = 0;
+                    let tries = 0;
+                    while (true) {
+                        const apiUrl = `${url.origin}/api/user/favored-wenku/${id}?page=${page}&pageSize=72&sort=update`;
+                        let tasks = [];
+                        let novelCount = 0;
+                        try {
+                            const response = await script.fetch(apiUrl);
+                            const data = await response.json();
+                            const wenkuIds = data.items.map(novel => novel.id);
+                            novelCount = wenkuIds.length;
+
+                            await Promise.all(
+                                wenkuIds.map(async (id) => {
+                                    let attempts = 0;
+                                    let success = false;
+                                    const apiEndpoint = `/api/wenku/`;
+
+                                    while (attempts < maxRetries && !success) {
+                                        try {
+                                            const response = await script.fetch(`${window.location.origin}${apiEndpoint}${id}`, r18Bypass);
+                                            if (!response.ok) throw new Error('Network response was not ok');
+                                            const data = await response.json();
+                                            const volumeIds = data.volumeJp.map(volume => volume.volumeId);
+
+                                            volumeIds.forEach(name => tasks.push({ task: TaskUtils.wenkuLinkBuilder(id, name, translateMode), description: name }))
+                                            success = true;
+                                        } catch (error) {
+                                            NotificationUtils.showError(`Failed to fetch data for ID ${id}, attempt ${attempts + 1}:`);
+                                            attempts++;
+                                            if (attempts < maxRetries) {
+                                                await new Promise(resolve => setTimeout(resolve, 1000));
+                                            }
+                                        }
+                                    }
+                                })
+                            );
+                            await StorageUtils.addJobs(StorageUtils.gpt, tasks);
+                            results.push(...tasks);
+                            NotificationUtils.showSuccess(`成功排队 ${3 * page + 1}-${3 * page + 3}页, 共${tasks.length}本小说`);
+                        } catch (error) {
+                            console.log(error);
+                            NotificationUtils.showError(`Failed to fetch data for ${id}, page ${page + 1}.`);
+                            if (tries > 3) break;
+                            continue;
+                        }
+                        if (novelCount < 72) break;
+                        else page++;
+                    }
+                    break;
+                }
+                default: { }
+            }
+            if (errorFlag) return;
+            // Fix: Properly filter unique novels by description
+            const uniqueNovels = new Set(results.map(result => result.description));
+            NotificationUtils.showSuccess(`排队成功 : 共 ${uniqueNovels.size} 本小说, 均分 ${results.length} 分段.`);
+        }
+    }
+
+    const moduleAutoRetry = {
+        name: '自动重试',
+        type: 'keep',
+        whitelist: '/workspace/*',
+        settings: [
+            newNumberSetting('最大重试次数', 99),
+            newBooleanSetting('置顶重试任务', false),
+            newBooleanSetting('重启翻译器', true),
+        ],
+        _attempts: 0,
+        _lastRun: 0,
+        _interval: 1000,
+        run: async function (cfg) {
+            const now = Date.now();
+            if (now - this._lastRun < this._interval) return;
+            this._lastRun = now;
+
+            const maxAttempts = getModuleSetting(cfg, '最大重试次数') || 99;
+            const relaunch = getModuleSetting(cfg, '重启翻译器') || 3;
+            const moveToTop = getModuleSetting(cfg, '置顶重试任务');
+
+            if (!this._boundClickHandler) {
+                this._boundClickHandler = (e) => {
+                    if (e.target.tagName === 'button') {
+                        this._attempts = 0;
+                    }
+                };
+                document.addEventListener('click', this._boundClickHandler);
+            }
+
+            const listItems = document.querySelectorAll('.n-list-item');
+            const unfinished = [...listItems].filter(item => {
+                const desc = item.querySelector('.n-thing-main__description');
+                return desc && desc.textContent.includes('未完成');
+            });
+            async function retryTasks(attempts) {
+                const hasStop = [...document.querySelectorAll('button')].some(b => b.textContent === '停止');
+                if (!hasStop) {
+                    const retryBtns = [...document.querySelectorAll('button')].filter(b => b.textContent.includes('重试未完成任务'));
+                    if (retryBtns[0]) {
+                        const clickCount = Math.min(unfinished.length, listItems.length);
+                        for (let i = 0; i < clickCount; i++) {
+                            retryBtns[0].click();
+                        }
+                        if (moveToTop) {
+                            TaskUtils.clickTaskMoveToTop(unfinished.length);
+                        }
+                        attempts++;
+                    }
+                }
+                return attempts;
+            }
+
+            if (unfinished.length > 0 && this._attempts < maxAttempts) {
+                this._attempts = await retryTasks(this._attempts);
+                script.delay(10);
+                if (relaunch) {
+                    script.runModule('启动翻译器');
+                }
+            }
+        }
+    };
+
+    const moduleClearJobs = {
+        name: '清空任务',
+        type: 'onclick',
+        whitelist: '/workspace/*',
+        settings: [
+            newBooleanSetting('确认清空', true),
+            newBooleanSetting('仅清空已完成', false),
+        ],
+        run: async function (cfg) {
+            const confirmClear = getModuleSetting(cfg, '确认清空');
+            const onlyCompleted = getModuleSetting(cfg, '仅清空已完成');
+            
+            const key = window.location.pathname.includes('workspace/sakura') ? StorageUtils.sakura : 
+                        (window.location.pathname.includes('workspace/gpt') ? StorageUtils.gpt : null);
+            
+            if (!key) {
+                NotificationUtils.showError('无法确定工作区类型');
+                return;
+            }
+
+            const data = await StorageUtils._getData(key);
+            
+            let jobsToRemove = [];
+            if (onlyCompleted) {
+                // 只清空已完成的 jobs（需要根据实际数据结构判断）
+                // 假设 jobs 中有 status 字段或通过其他方式判断
+                NotificationUtils.showWarning('仅清空已完成功能需配合网站API');
+                return;
+            } else {
+                jobsToRemove = data.jobs;
+            }
+
+            if (confirmClear && jobsToRemove.length > 0) {
+                if (!confirm(`确定要清空 ${jobsToRemove.length} 个任务吗？此操作不可恢复！`)) {
+                    NotificationUtils.showWarning('已取消清空');
+                    return;
+                }
+            }
+
+            data.jobs = [];
+            await StorageUtils._setData(key, data);
+            NotificationUtils.showSuccess(`已清空 ${jobsToRemove.length} 个任务`);
+        }
+    };
+
+    const moduleSyncStorage = {
+        name: '资料同步',
+        type: 'onclick',
+        whitelist: '/workspace/*',
+        hidden: true,
+        settings: [
+            newStringSetting('bind', 'none')
+        ],
+        run: async function (cfg) {
+        }
+    }
+
+    const moduleFillGlossary = {
+        name: '填充术语表',
+        type: 'onclick',
+        whitelist: '/novel',
+        settings: [
+            newTextareaSetting('术语表', ''),
+            newBooleanSetting('追加模式', true),
+            newBooleanSetting('页面可视化反馈', true),
+            newBooleanSetting('自动翻页至末页', false),
+            newNumberSetting('翻页上限', 20),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg) {
+            const glossaryText = getModuleSetting(cfg, '术语表') || '';
+            const isAppend = getModuleSetting(cfg, '追加模式');
+            const visualFeedback = getModuleSetting(cfg, '页面可视化反馈');
+            const autoPaginate = getModuleSetting(cfg, '自动翻页至末页') === true;
+            const maxPages = Math.max(1, Number(getModuleSetting(cfg, '翻页上限')) || 20);
+
+            if (!glossaryText.trim()) {
+                NotificationUtils.showWarning('术语表为空');
+                return;
+            }
+
+            // Parse glossary
+            const newGlossary = {};
+            const delimiter = '=>';
+            glossaryText.split('\n').forEach(line => {
+                line = line.trim();
+                if (!line) return;
+                const parts = line.split(delimiter);
+                if (parts.length === 2) {
+                    newGlossary[parts[0].trim()] = parts[1].trim();
+                } else {
+                    try {
+                        const obj = JSON.parse(line);
+                        if (typeof obj === 'object') {
+                            Object.assign(newGlossary, obj);
+                        }
+                    } catch (e) { }
+                }
+            });
+
+            if (Object.keys(newGlossary).length === 0) {
+                NotificationUtils.showError('未能解析任何术语 (格式: 日文 => 中文)');
+                return;
+            }
+
+            const collectNovels = () => {
+                const links = [...document.querySelectorAll('a')];
+                const novels = [];
+                const seen = new Set();
+                links.forEach(a => {
+                    try {
+                        const url = new URL(a.href);
+                        if (url.origin !== window.location.origin) return;
+                        const match = url.pathname.match(/^\/novel\/([^/]+)\/([^/]+)$/);
+                        if (match) {
+                            const id = `${match[1]}/${match[2]}`;
+                            if (!seen.has(id)) {
+                                let container = a.closest('n-list-item');
+                                if (!container) container = a.closest('.n-list-item');
+                                if (!container) container = a.closest('.novel-card');
+                                if (!container) container = a.closest('div');
+                                novels.push({ providerId: match[1], novelId: match[2], id, container });
+                                seen.add(id);
+                            }
+                        }
+                    } catch (e) { }
+                });
+                return novels;
+            };
+
+            // 先收一便当前页 novels 用于 confirm 提示；开启翻页时也告知用户范围
+            const firstPage = collectNovels();
+            if (firstPage.length === 0) {
+                NotificationUtils.showWarning('未在当前页面找到小说条目');
+                return;
+            }
+            const tail = autoPaginate
+                ? `\n\n将自动翻到第 1/${maxPages} 页（每页点「下一页」后等新列表载入；点不到/按钮禁用/翻不动会自动停止）。`
+                : '';
+            if (!confirm(`确定要为当前页面的 ${firstPage.length} 本小说${isAppend ? '追加' : '填充'}术语表吗？\n(包含 ${Object.keys(newGlossary).length} 个术语)${tail}`)) {
+                return;
+            }
+
+            if (visualFeedback) {
+                document.querySelectorAll('.ntr-glossary-badge').forEach(el => el.remove());
+            }
+
+            let successCount = 0;
+            let failCount = 0;
+            let pagesProcessed = 0;
+            let stoppedReason = null;  // 'no-next' | 'disabled' | 'max-pages' | null
+
+            const setNovelStatus = (container, status, message) => {
+                if (!visualFeedback || !container) return;
+                let badge = container.querySelector('.ntr-glossary-badge');
+                if (!badge) {
+                    badge = document.createElement('span');
+                    badge.className = 'ntr-glossary-badge';
+                    const flex = container.querySelector('n-flex') || container.querySelector('.n-flex') || container;
+                    if (flex.firstElementChild) {
+                        flex.insertBefore(badge, flex.firstElementChild);
+                    } else {
+                        flex.appendChild(badge);
+                    }
+                }
+                badge.className = 'ntr-glossary-badge ntr-glossary-' + status;
+                badge.title = message;
+                const iconMap = { success: '✅', fail: '❌', pending: '⏳' };
+                badge.textContent = iconMap[status] || '⏳';
+            };
+
+            // 找下一页按钮：
+            // ①真站（naive-ui）：.n-pagination 里的 .n-pagination-item--button —— 首个是「上一页」、
+            //   末个是「下一页」；按钮只有图标（无文字/无 aria-label），禁用态是 class（--disabled），不是 disabled 属性
+            // ②回落：文本含「下/›」或 aria 含 next 的 <button>（旧结构/其它页面）
+            const findNextButton = () => {
+                const pag = [...document.querySelectorAll('.n-pagination')].find(p => p.offsetWidth || p.offsetHeight);
+                if (pag) {
+                    const btns = [...pag.querySelectorAll('.n-pagination-item--button')];
+                    if (btns.length) return btns[btns.length - 1];
+                }
+                const candidates = [...document.querySelectorAll('.n-pagination button')];
+                for (const btn of candidates) {
+                    const text = (btn.textContent || '').trim();
+                    const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+                    if (text.includes('下') || text.includes('›') || aria.includes('next')) return btn;
+                }
+                return null;
+            };
+            const isNextDisabled = (el) => el.disabled === true || el.getAttribute('disabled') !== null || el.classList.contains('n-pagination-item--disabled');
+
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+            // 当前页「签名」：条目数 + 首末条目 id（用于确认列表真的翻过去了）
+            const pageSignature = () => {
+                const list = collectNovels();
+                const first = list[0];
+                const last = list[list.length - 1];
+                return `${list.length}|${first ? first.id : ''}|${last ? last.id : ''}`;
+            };
+
+            // 一次一页填完后决定下一步
+            const processCurrentPage = async () => {
+                const novels = collectNovels();
+                if (novels.length === 0) {
+                    stoppedReason = 'empty';
+                    return;
+                }
+                pagesProcessed += 1;
+                for (const novel of novels) {
+                    if (visualFeedback && novel.container) {
+                        setNovelStatus(novel.container, 'pending', '正在填充术语表...');
+                    }
+                    try {
+                        let finalGlossary = newGlossary;
+                        if (isAppend) {
+                            const getRes = await script.fetch(`${window.location.origin}/api/novel/${novel.providerId}/${novel.novelId}`);
+                            if (getRes.ok) {
+                                const data = await getRes.json();
+                                finalGlossary = Object.assign({}, data.glossary || {}, newGlossary);
+                            } else {
+                                throw new Error('Fetch failed');
+                            }
+                        }
+
+                        const putRes = await script.fetch(`${window.location.origin}/api/novel/${novel.providerId}/${novel.novelId}/glossary`, true, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(finalGlossary)
+                        });
+
+                        if (putRes.ok) {
+                            successCount++;
+                            setNovelStatus(novel.container, 'success', `术语表填充成功 (+${Object.keys(newGlossary).length} 术语)`);
+                        } else {
+                            failCount++;
+                            setNovelStatus(novel.container, 'fail', `术语表填充失败: HTTP ${putRes.status}`);
+                        }
+                    } catch (e) {
+                        console.error(`Failed to update glossary for ${novel.id}:`, e);
+                        failCount++;
+                        setNovelStatus(novel.container, 'fail', `术语表填充失败: ${e.message || '网络错误'}`);
+                    }
+                }
+            };
+
+            // 主循环
+            await processCurrentPage();
+
+            if (autoPaginate) {
+                while (pagesProcessed < maxPages) {
+                    const nextBtn = findNextButton();
+                    if (!nextBtn) { stoppedReason = 'no-next'; break; }
+                    if (isNextDisabled(nextBtn)) { stoppedReason = 'disabled'; break; }
+                    const sigBefore = pageSignature();
+                    nextBtn.click();
+                    // 等列表真的翻页（真站是异步路由 + 请求，可能超过 1 秒）→ 最长等 10 秒
+                    let changed = false;
+                    for (let waited = 0; waited < 10000; waited += 250) {
+                        await sleep(250);
+                        if (pageSignature() !== sigBefore) { changed = true; break; }
+                    }
+                    if (!changed) { stoppedReason = 'stuck'; break; }  // 点了没反应：别把同一页重复填一遍
+                    await sleep(400);  // 列表刚换上，稍等渲染稳定再收
+                    await processCurrentPage();
+                }
+                if (!stoppedReason && pagesProcessed >= maxPages) stoppedReason = 'max-pages';
+            }
+
+            const tailMsg = autoPaginate ? `，翻页 ${pagesProcessed} 页${stoppedReason ? `（停止：${({ 'no-next': '已到末页', 'disabled': '下一页按钮不可用', 'max-pages': '达到翻页上限', 'empty': '翻到空白页', 'stuck': '列表没有翻动' })[stoppedReason] || stoppedReason}）` : ''}` : '';
+            if (failCount === 0) {
+                NotificationUtils.showSuccess(`成功填充 ${successCount} 本小说的术语表${tailMsg}`);
+            } else {
+                NotificationUtils.showWarning(`填充完成: ${successCount} 成功, ${failCount} 失败${tailMsg}`);
+            }
+        }
+    };
+
+    // -----------------------------------
+    // AI 术语表 modules
+    // -----------------------------------
+
+    // 公共：解析 LLM workers（勾选「使用临时端点」时用临时端点，否则取工作区 GPT 翻译器）
+    const resolveGlossaryWorkers = async (cfg) => {
+        const useTest = getModuleSetting(cfg, '使用临时端点') === true;
+        const testEndpoint = useTest ? (getModuleSetting(cfg, '临时端点') || '').trim() : '';
+        if (testEndpoint) {
+            const testModel = (getModuleSetting(cfg, '临时模型') || '').trim();
+            if (testModel === '') return [];   // 用临时端点时必须填模型，由调用方提示
+            return [{
+                id: '临时端点',
+                model: testModel,
+                endpoint: testEndpoint,
+                key: (getModuleSetting(cfg, '临时Key') || '').trim() || 'no_key_required',
+            }];
+        }
+        const wanted = (getModuleSetting(cfg, '翻译器') || '').trim();
+        const workers = readWorkspaceGptWorkers()
+            .filter((w) => !wanted || w.id === wanted)
+            .filter((w) => w.endpoint && w.model)
+            .map((w) => ({ id: w.id, model: w.model, endpoint: w.endpoint, key: w.key }));
+        return workers;
+    };
+
+    // 公共：确定提取目标（小说页 -> 网页小说；文库页 -> 文库小说；其它页面 -> 从本地书架选择）
+    const resolveGlossaryTarget = async () => {
+        const m = window.location.pathname.match(/^\/novel\/([^/]+)\/([^/]+)/);
+        if (m) {
+            return { kind: 'web', providerId: m[1], novelId: m[2] };
+        }
+        const mw = window.location.pathname.match(/^\/wenku\/([^/]+)/);
+        if (mw) {
+            return { kind: 'wenku', novelId: mw[1] };
+        }
+        const volumes = await GlossaryTargets.listLocalVolumes();
+        if (volumes.length === 0) {
+            NotificationUtils.showWarning('未找到本地卷（可在书架本地上传 EPUB/TXT）');
+            return undefined;
+        }
+        const picked = await GlossaryUI.pick({
+            title: '选择本地卷',
+            options: volumes,
+            renderOption: (v) => `${v.id}（${v.chapters} 章，术语 ${v.glossaryCount} 条）`,
+        });
+        if (!picked) return undefined;
+        return { kind: 'local', volumeId: picked.id };
+    };
+
+    // 公共：抓取正文
+    const loadGlossarySourceText = async (target, onProgress) => {
+        if (target.kind === 'web') {
+            const novelRes = await script.fetch(`${window.location.origin}/api/novel/${target.providerId}/${target.novelId}`);
+            const novel = novelRes.ok ? await novelRes.json() : {};
+            target.title = novel.titleZh || novel.titleJp || target.novelId;
+            const filename = `jp.${String(target.title).replace(/[\/|\\:*?"<>]/g, '')}.txt`;
+            const params = new URLSearchParams({ mode: 'jp', translationsMode: 'parallel', type: 'txt', filename });
+            const res = await script.fetch(`${window.location.origin}/api/novel/${target.providerId}/${target.novelId}/file?${params}`);
+            if (!res.ok) throw new Error(`下载原文失败: HTTP ${res.status}`);
+            return { text: await res.text() };
+        }
+        if (target.kind === 'wenku') {
+            const novelRes = await script.fetch(`${window.location.origin}/api/wenku/${target.novelId}`);
+            if (!novelRes.ok) throw new Error(`读取文库信息失败: HTTP ${novelRes.status}`);
+            const novel = await novelRes.json();
+            target.title = novel.titleZh || novel.title || target.novelId;
+            const volumes = novel.volumeJp || [];
+            if (volumes.length === 0) throw new Error('该文库小说没有已上传的日文卷');
+            // 文库没有原文下载接口（服务端拒绝 mode=jp），走翻译任务的只读链路取原段落：
+            // 卷目录（toc）-> 每章 chapter-task -> paragraphJp
+            const parts = [];
+            for (let vi = 0; vi < volumes.length; vi++) {
+                const volumeId = volumes[vi].volumeId;
+                if (onProgress) onProgress(`抓取正文：卷 ${vi + 1}/${volumes.length}（${volumeId}）`);
+                const taskRes = await script.fetch(`${window.location.origin}/api/wenku/${target.novelId}/translate-v2/gpt/${encodeURIComponent(volumeId)}`);
+                if (!taskRes.ok) throw new Error(`读取卷目录失败（${volumeId}）: HTTP ${taskRes.status}`);
+                const task = await taskRes.json();
+                const toc = task.toc || [];
+                for (let ci = 0; ci < toc.length; ci++) {
+                    if (onProgress && toc.length > 1) onProgress(`抓取正文：卷 ${vi + 1}/${volumes.length} · 章 ${ci + 1}/${toc.length}`);
+                    const chRes = await script.fetch(`${window.location.origin}/api/wenku/${target.novelId}/translate-v2/gpt/${encodeURIComponent(volumeId)}/chapter-task/${toc[ci].chapterId}`);
+                    if (!chRes.ok) continue;
+                    const dto = await chRes.json();
+                    parts.push((dto.paragraphJp || []).join('\n'));
+                }
+            }
+            return { text: parts.join('\n\n') };
+        }
+        if (target.kind === 'local') {
+            target.title = target.volumeId;
+            const { text } = await GlossaryTargets.loadLocalVolumeText(target.volumeId);
+            return { text };
+        }
+        throw new Error('未知目标');
+    };
+
+    // 公共：跑一次提取（含进度浮窗）
+    const runGlossaryExtraction = async (cfg, target) => {
+        const workers = await resolveGlossaryWorkers(cfg);
+        if (workers.length === 0) {
+            const useTest = getModuleSetting(cfg, '使用临时端点') === true;
+            const testEndpoint = useTest ? (getModuleSetting(cfg, '临时端点') || '').trim() : '';
+            const wantedWorker = (getModuleSetting(cfg, '翻译器') || '').trim();
+            if (testEndpoint) NotificationUtils.showError('已勾选「使用临时端点」，但「临时模型」没填：临时端点需要模型名才能用');
+            else if (useTest) NotificationUtils.showError('已勾选「使用临时端点」，但「临时端点」是空的：请展开填好端点，或取消勾选改用翻译器下拉');
+            else if (wantedWorker) NotificationUtils.showError(`没有可用的翻译器「${wantedWorker}」：工作区里可能已删除或没填端点，也可改选「全部（自动轮换）」`);
+            else NotificationUtils.showError('没有可用的翻译器：请在工作区添加 GPT 翻译器，或勾选「使用临时端点」并填好端点/模型');
+            return undefined;
+        }
+        const sourceLanguage = getModuleSetting(cfg, '原文语言') || 'JA';
+        const maxLines = Number(getModuleSetting(cfg, '行数上限')) || 0;
+        const timeoutMs = Math.max(5, Number(getModuleSetting(cfg, '逾时(秒)')) || 300) * 1000;
+        const concurrency = Math.max(1, Number(getModuleSetting(cfg, '并发')) || 2);
+        const maxRounds = Math.max(1, Number(getModuleSetting(cfg, '最大轮数')) || 3);
+        const budgetChars = Math.max(200, Number(getModuleSetting(cfg, '分块字数')) || 3000);
+        const rpm = Math.max(0, Number(getModuleSetting(cfg, 'RPM')) || 0);
+        const maxTokens = Math.max(0, Number(getModuleSetting(cfg, '输出上限')) || 0);
+
+        let stopped = false;
+        const progress = GlossaryUI.status(`AI提取术语表 - ${GlossaryTargets.describe(target)}`, { onStop: () => { stopped = true; } });
+        try {
+            progress.update('抓取正文…');
+            const { text } = await loadGlossarySourceText(target, (msg) => progress.update(msg));
+            let lines = GlossaryEngine.splitLines(text)
+                .filter((line) => GlossaryEngine.languageFilter(line, sourceLanguage))
+                .filter((line) => !GlossaryEngine.ruleFilter(line));
+            if (maxLines > 0) lines = lines.slice(0, maxLines);
+            if (lines.length === 0) {
+                progress.close();
+                NotificationUtils.showWarning('正文为空或语言过滤后无内容');
+                return undefined;
+            }
+            progress.update(`准备提取：${lines.length} 行 / ${workers.length} 个翻译器`);
+
+            const requester = GlossaryEngine.createRequester(workers, { timeoutMs, rps: concurrency, rpm, maxTokens });
+            const result = await GlossaryEngine.runJob({
+                lines,
+                callLLM: (messages) => requester.call(messages),
+                options: { budgetChars, maxRounds, concurrency, targetLanguage: '中文' },
+                shouldStop: () => stopped,
+                onProgress: (p) => {
+                    const ratio = p.totalChunks ? p.chunksDone / Math.max(1, p.totalChunks) : 0;
+                    progress.update(`第 ${p.round}/${p.maxRounds} 轮 · 完成 ${p.chunksDone} 块 / 失败 ${p.chunksFailed} 块 · 待处理 ${p.pendingLines} 行`, ratio);
+                },
+            });
+            progress.close();
+
+            const failedHint = result.pendingLines > 0 ? `（${result.pendingLines} 行未能提取）` : '';
+            const drop = result.dropped || {};
+            const dropHint = (drop.punct || drop.honorific) ? `（清洗：整句 ${drop.punct || 0} 条 / 敬称 ${drop.honorific || 0} 条）` : '';
+            NotificationUtils.showSuccess(`提取完成：${result.glossary.length} 条术语${failedHint}${dropHint}`);
+
+            const existing = await GlossaryTargets.loadGlossary(target);
+            const mode = (getModuleSetting(cfg, '模式') || '预览') === '写入' ? 'merge' : 'preview';
+            GlossaryUI.open({
+                title: `AI提取术语表 - ${target.title || GlossaryTargets.describe(target)}（${result.glossary.length} 条）`,
+                target,
+                entries: result.glossary,
+                existing,
+                mode,
+                onWrite: (picked) => writeGlossaryMerged(target, picked),
+                auditConcurrency: concurrency,   // 审计也并行（同一个「并发」设置）
+                // 再次筛选：复用同一批 worker，温度 0、不发送输出上限（失败即放过，不改任何东西）
+                onAudit: (auditEntries, { onProgress }) => {
+                    const auditRequester = GlossaryEngine.createRequester(workers, { timeoutMs, rpm, maxTokens: 0, temperature: 0 });
+                    return GlossaryEngine.auditGlossary({
+                        entries: auditEntries,
+                        call: (messages) => auditRequester.call(messages),
+                        context: {
+                            title: target.title || GlossaryTargets.describe(target),
+                            snippet: lines.slice(0, 6).join(' ').slice(0, 300),
+                        },
+                        concurrency,     // 和提取共用同一个「并发」设置
+                        onProgress,
+                    });
+                },
+            });
+            return result;
+        } catch (e) {
+            progress.close();
+            NotificationUtils.showError(`提取失败：${e.message || e}`);
+            return undefined;
+        }
+    };
+
+    // 公共：合并写入（快照 + 合并 + 保存）
+    const writeGlossaryMerged = async (target, picked) => {
+        const current = await GlossaryTargets.loadGlossary(target);
+        const added = picked.filter((row) => !Object.prototype.hasOwnProperty.call(current, row.src)).length;
+        GlossaryLog.info('写入术语表', { target: GlossaryTargets.describe(target), picked: picked.length, added, overwrite: picked.length - added });
+        await GlossaryTargets.takeSnapshot(target, current, `写入：新增 ${added} / 覆盖 ${picked.length - added}`);
+        const merged = Object.assign({}, current);
+        picked.forEach((row) => { merged[row.src] = row.dst; });
+        const res = await GlossaryTargets.saveGlossary(target, merged);
+        if (res && res.refresh) {
+            NotificationUtils.showWarning('本地卷术语表已更新：请刷新页面后生效');
+        }
+        return { before: current, after: merged };
+    };
+
+    // 公共：解析术语表条目，返回 [{ src, dst, type, count, context? }]
+    // 支持三种来源：KWG 默认 output.json（对象数组）/ 扁平 JSON（output_kv.json 等）/ “原文 => 译文” 行
+    const parseGlossaryEntries = (text) => {
+        // 去掉 BOM：Windows 记事本等存出来的 UTF-8 文件常带 BOM，否则 startsWith('{') 判断会失效
+        const trimmed = (text || '').replace(/^[\uFEFF\uFFFE]+/, '').trim();
+        const list = [];
+        const push = (src, dst, extra) => {
+            if (typeof src !== 'string' || typeof dst !== 'string') return;
+            if (src.trim() === '' || dst.trim() === '') return;
+            list.push(Object.assign({ src: src.trim(), dst: dst.trim(), type: '', count: 0 }, extra || {}));
+        };
+        if (!trimmed) return list;
+        if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+            let parsed;
+            try {
+                parsed = JSON.parse(trimmed);
+            } catch (e) {
+                NotificationUtils.showError(`JSON 解析失败：${e.message}`);
+                return list;
+            }
+            if (Array.isArray(parsed)) {
+                // KWG 默认 output.json：json.dumps([{ 'src': ..., 'dst': ..., 'type': ..., 'count': ... }])
+                parsed.forEach((item) => {
+                    if (!item || typeof item !== 'object') return;
+                    const extra = {};
+                    if (typeof item.type === 'string') extra.type = item.type;
+                    if (typeof item.count === 'number') extra.count = item.count;
+                    if (Array.isArray(item.context)) extra.context = item.context;
+                    push(item.src, item.dst, extra);
+                });
+                return list;
+            }
+            if (parsed && typeof parsed === 'object') {
+                Object.keys(parsed).forEach((k) => push(k, parsed[k]));
+                return list;
+            }
+            return list;
+        }
+        trimmed.split('\n').forEach((line) => {
+            const idx = line.indexOf('=>');
+            if (idx < 0) return;
+            push(line.slice(0, idx), line.slice(idx + 2));
+        });
+        return list;
+    };
+
+    const parseGlossaryText = (text) => {
+        const out = {};
+        parseGlossaryEntries(text).forEach((entry) => { out[entry.src] = entry.dst; });
+        return out;
+    };
+
+    const moduleGlossaryExtract = {
+        name: 'AI提取术语表',
+        type: 'onclick',
+        whitelist: ['/novel', '/wenku', '/favorite', '/workspace'],
+        needsTarget: true,
+        settings: [
+            newSelectSetting('任务方式', ['加入队列', '直接提取'], '加入队列'),
+            newSelectSetting('翻译器', workspaceTranslatorOptions, ''),
+            newBooleanSetting('使用临时端点', false),
+            newStringSetting('临时端点', ''),
+            newStringSetting('临时模型', ''),
+            newStringSetting('临时Key', ''),
+            newSelectSetting('原文语言', ['JA', 'KO', 'ZH'], 'JA'),
+            newSelectSetting('模式', ['预览', '写入'], '预览'),
+            newNumberSetting('分块字数', 3000),
+            newNumberSetting('输出上限', 0),
+            newNumberSetting('最大轮数', 3),
+            newNumberSetting('并发', 2),
+            newNumberSetting('RPM', 0),
+            newNumberSetting('逾时(秒)', 300),
+            newNumberSetting('行数上限', 0),
+            newBooleanSetting('调试日志', false),
+            newStringSetting('bind', 'none'),
+        ],
+        // 折叠框：这几个设置收在一起，勾选「使用临时端点」后才可用（勾选时覆盖上面的翻译器下拉）
+        settingGroups: [
+            { id: 'testEndpoint', title: '临时端点设置（勾选后覆盖上面的翻译器）', members: ['临时端点', '临时模型', '临时Key'], enabledBy: '使用临时端点' },
+        ],
+        run: async function (cfg) {
+            const target = await resolveGlossaryTarget();
+            if (!target) return;
+            // 默认只把目标排进队列（任务持久化，断了能续跑、失败能重试）；想立刻跑就把「任务方式」切成 直接提取
+            if ((getModuleSetting(cfg, '任务方式') || '加入队列') === '加入队列') {
+                await GlossaryQueue.addJobs([target], GlossaryQueue.extractSettings());
+                NotificationUtils.showSuccess(`已加入队列：${GlossaryTargets.describe(target)}（在「术语队列」里点「开始/续跑」）`);
+                return;
+            }
+            await runGlossaryExtraction(cfg, target);
+        },
+    };
+
+    const moduleGlossaryImport = {
+        name: '导入术语表(KWG)',
+        type: 'onclick',
+        whitelist: ['/novel', '/wenku', '/favorite', '/workspace'],
+        needsTarget: true,
+        settings: [
+            newTextareaSetting('术语表', ''),
+            newBooleanSetting('读取剪贴板', false),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg) {
+            let text = getModuleSetting(cfg, '术语表') || '';
+            if (getModuleSetting(cfg, '读取剪贴板')) {
+                try {
+                    // readText 在标签页不可见/无焦点时会永久挂起（既不返回也不 reject），必须超时兜底
+                    const clip = await Promise.race([
+                        navigator.clipboard.readText(),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('clipboard timeout')), 3000)),
+                    ]);
+                    if (String(clip || '').trim() !== '') {
+                        text = clip;
+                    } else {
+                        NotificationUtils.showWarning('剪贴板为空，改用设置里的术语表');
+                    }
+                } catch (e) { NotificationUtils.showWarning('读取剪贴板失败，改用设置里的术语表'); }
+            }
+            const entries = parseGlossaryEntries(text);
+            const count = entries.length;
+            const target = await resolveGlossaryTarget();
+            if (!target) return;
+            const existing = await GlossaryTargets.loadGlossary(target);
+            // 文本/剪贴板都没内容时也照常打开弹层：可以在弹层里选 JSON 文件或直接拖进去
+            if (count > 0) NotificationUtils.showSuccess(`已解析 ${count} 条术语`);
+            else NotificationUtils.showWarning('没有解析到术语：可在弹层里选择 JSON 文件或把文件拖进去');
+            GlossaryUI.open({
+                title: `导入术语表 - ${target.title || GlossaryTargets.describe(target)}（${count} 条）`,
+                target,
+                entries,
+                existing,
+                mode: 'merge',
+                enableImport: true,
+                onWrite: (picked) => writeGlossaryMerged(target, picked),
+            });
+        },
+    };
+
+    const moduleGlossaryRollback = {
+        name: '回滚术语表',
+        type: 'onclick',
+        whitelist: ['/novel', '/wenku', '/favorite', '/workspace'],
+        needsTarget: true,
+        settings: [
+            newBooleanSetting('确认', true),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg) {
+            const target = await resolveGlossaryTarget();
+            if (!target) return;
+            const versions = await GlossaryTargets.listSnapshots(target);
+            if (versions.length === 0) {
+                NotificationUtils.showWarning('没有找到该目标的快照（写入术语表时会自动生成）');
+                return;
+            }
+            const current = await GlossaryTargets.loadGlossary(target);
+            const countOf = (glossary) => Object.keys(glossary || {}).length;
+            const picked = await GlossaryUI.pick({
+                title: `回滚术语表 - ${target.title || GlossaryTargets.describe(target)}（共 ${versions.length} 个版本）`,
+                options: versions,
+                renderOption: (v) => {
+                    const g = v.glossary || {};
+                    let add = 0; let update = 0; let remove = 0;
+                    Object.keys(g).forEach((src) => {
+                        if (!Object.prototype.hasOwnProperty.call(current, src)) add += 1;
+                        else if (current[src] !== g[src]) update += 1;
+                    });
+                    Object.keys(current).forEach((src) => { if (!Object.prototype.hasOwnProperty.call(g, src)) remove += 1; });
+                    const time = new Date(v.createAt).toLocaleString();
+                    return `${time} | ${countOf(g)} 条 | 相对当前：新增 ${add} / 覆盖 ${update} / 删除 ${remove}${v.note ? ' | ' + v.note : ''}`;
+                },
+            });
+            if (!picked) return;
+            const snapGlossary = picked.glossary || {};
+            const entries = Object.keys(snapGlossary).map((src) => ({ src, dst: snapGlossary[src], type: '', count: 0 }));
+            const timeHint = new Date(picked.createAt).toLocaleString();
+            GlossaryUI.open({
+                title: `回滚预览 - ${timeHint} 的版本（${entries.length} 条）`,
+                target,
+                entries,
+                existing: current,
+                mode: 'restore',
+                confirmRestore: !!getModuleSetting(cfg, '确认'),
+                onRestore: async () => {
+                    await GlossaryTargets.takeSnapshot(target, current, '回滚前自动快照');
+                    const res = await GlossaryTargets.saveGlossary(target, snapGlossary);
+                    if (res && res.refresh) NotificationUtils.showWarning('本地卷术语表已更新：请刷新页面后生效');
+                    NotificationUtils.showSuccess(`已回滚到 ${timeHint} 的版本（${entries.length} 条）`);
+                },
+            });
+        },
+    };
+
+    const moduleGlossaryQueue = {
+        name: '术语队列',
+        type: 'onclick',
+        whitelist: ['/novel', '/wenku', '/favorite', '/workspace'],
+        settings: [
+            newBooleanSetting('自动续跑', true),
+            newBooleanSetting('自动确认纯新增', false),
+            newNumberSetting('保留已完成', 5),
+            newNumberSetting('收藏添加上限', 30),
+            // 队列任务的运行类覆盖：填了值就覆盖「AI提取术语表」的同名设置，0 = 跟随
+            newNumberSetting('并发(0=跟随)', 0),
+            newNumberSetting('RPM(0=跟随)', 0),
+            newNumberSetting('逾时(秒,0=跟随)', 0),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg) {
+            GlossaryQueue.openPanel();
+        },
+    };
+
+    // 站点新版「GPT工作区BETA」(/workspace/gpt-pipeline) 用的是另一个存储键 workspace-gpt-pipeline，
+    // 翻译器不会自动搬过去 —— 这个模块就是把老工作区的 GPT 翻译器一键复制过去（任务队列不搬）
+    const moduleCopyWorkersToBeta = {
+        name: '复制翻译器到BETA工作区',
+        type: 'onclick',
+        whitelist: ['/workspace', '/novel', '/wenku', '/favorite'],
+        settings: [
+            newBooleanSetting('覆盖同名翻译器', false),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg) {
+            const overwrite = getModuleSetting(cfg, '覆盖同名翻译器') === true;
+            const readStore = (key) => {
+                try {
+                    const raw = localStorage.getItem(key);
+                    return raw ? (JSON.parse(raw) || {}) : {};
+                } catch (e) { return {}; }
+            };
+            const BETA_KEY = 'workspace-gpt-pipeline';
+            // 'web' 类型是老工作区里被站点自己淘汰的（chat.openai.com 那套），不搬
+            const src = (readStore('workspace-gpt').workers || []).filter((w) => w && w.id && w.endpoint && w.type !== 'web');
+            if (src.length === 0) {
+                NotificationUtils.showWarning('老「GPT工作区」里没有可复制的翻译器');
+                return;
+            }
+            const betaRaw = readStore(BETA_KEY);
+            const beta = {
+                workers: Array.isArray(betaRaw.workers) ? betaRaw.workers : [],
+                jobs: Array.isArray(betaRaw.jobs) ? betaRaw.jobs : [],
+                uncompletedJobs: Array.isArray(betaRaw.uncompletedJobs) ? betaRaw.uncompletedJobs : [],
+            };
+            let added = 0, updated = 0, skipped = 0;
+            src.forEach((w) => {
+                const i = beta.workers.findIndex((x) => x && x.id === w.id);
+                if (i < 0) { beta.workers.push(Object.assign({}, w)); added++; }
+                else if (overwrite) { beta.workers[i] = Object.assign({}, w); updated++; }
+                else skipped++;
+            });
+            if (added + updated === 0) {
+                NotificationUtils.showWarning(`BETA 工作区里已有同名翻译器（${skipped} 个），勾选「覆盖同名翻译器」可更新`);
+                return;
+            }
+            const text = JSON.stringify(beta);
+            localStorage.setItem(BETA_KEY, text);
+            // 通知页面上已经打开的 BETA 工作区（VueUse 的 useLocalStorage 监听 storage 事件），避免它下一次保存把我们的写入顶掉
+            window.dispatchEvent(new StorageEvent('storage', { key: BETA_KEY, newValue: text, url: location.href, storageArea: localStorage }));
+            NotificationUtils.showSuccess(`已复制 ${added} 个翻译器到 BETA 工作区${updated ? `，更新 ${updated} 个` : ''}${skipped ? `，跳过同名 ${skipped} 个` : ''}`);
+        },
+    };
+
+    // 把老工作区 workspace-gpt 与「GPT工作区BETA」workspace-gpt-pipeline 的翻译器当成同一份配置（按 id 映射），
+    // 三路合并后写回两边：base = 上次同步的结果（存在我们自己的 ntr-workspace-sync，站点键不碰）。
+    //   · 只在一边出现的翻译器 → 复制到另一边
+    //   · 上次同步后从一边消失的 → 另一边也删掉（删除能生效，不会"复活"）
+    //   · 同一条的某个字段两边都改了 → 按「当前所在的工作区」取值（不在工作区页面时按老工作区）
+    // 任务队列（jobs/uncompletedJobs）各自保留不动；老式 type:'web' 翻译器不参与（站点自己已淘汰）。
+    const WORKSPACE_SYNC_STATE = 'ntr-workspace-sync';
+    const WORKSPACE_PAIR = { legacy: 'workspace-gpt', beta: 'workspace-gpt-pipeline' };
+
+    const readWorkspaceStoreFull = (key) => {
+        let obj = {};
+        try {
+            const raw = localStorage.getItem(key);
+            obj = raw ? (JSON.parse(raw) || {}) : {};
+        } catch (e) { obj = {}; }
+        return {
+            workers: Array.isArray(obj.workers) ? obj.workers : [],
+            jobs: Array.isArray(obj.jobs) ? obj.jobs : [],
+            uncompletedJobs: Array.isArray(obj.uncompletedJobs) ? obj.uncompletedJobs : [],
+        };
+    };
+    const syncableWorker = (w) => !!w && !!w.id && w.type !== 'web';
+    const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const workerSig = (w) => JSON.stringify([w.endpoint, w.model, w.key]);
+
+    const mergeWorkerFields = (a, b, baseW, preferSide) => {
+        const out = {};
+        const keys = new Set([...Object.keys(a || {}), ...Object.keys(b || {}), ...Object.keys(baseW || {})]);
+        keys.forEach((k) => {
+            const av = a ? a[k] : undefined;
+            const bv = b ? b[k] : undefined;
+            const baseV = baseW ? baseW[k] : undefined;
+            if (sameJson(av, bv)) { if (av !== undefined) out[k] = av; return; }
+            if (sameJson(av, baseV)) { if (bv !== undefined) out[k] = bv; return; }   // 只有 BETA 改过
+            if (sameJson(bv, baseV)) { if (av !== undefined) out[k] = av; return; }   // 只有老工作区改过
+            const pick = preferSide === 'beta' ? bv : av;
+            if (pick !== undefined) out[k] = pick;
+        });
+        return out;
+    };
+
+    const currentWorkspaceSide = () => {
+        if (location.pathname.includes('/workspace/gpt-pipeline')) return 'beta';
+        if (location.pathname.includes('/workspace/gpt')) return 'legacy';
+        return null;
+    };
+
+    const syncWorkspaceTranslators = (preferSide) => {
+        const L = readWorkspaceStoreFull(WORKSPACE_PAIR.legacy);
+        const B = readWorkspaceStoreFull(WORKSPACE_PAIR.beta);
+        let base = {};
+        let hasBase = false;
+        try {
+            const raw = localStorage.getItem(WORKSPACE_SYNC_STATE);
+            if (raw) { base = (JSON.parse(raw) || {}).workers || {}; hasBase = true; }
+        } catch (e) { base = {}; }
+
+        const toMap = (workers) => {
+            const m = new Map();
+            workers.filter(syncableWorker).forEach((w) => m.set(String(w.id), w));
+            return m;
+        };
+        const lMap = toMap(L.workers);
+        const bMap = toMap(B.workers);
+
+        // 内容一样但 id 不同（老工作区用自定义名字、BETA 弹窗拿模型名当 id）→ 视为同一条，统一用老工作区的 id
+        const bTwin = new Map();
+        bMap.forEach((w, id) => { const s = workerSig(w); if (!bTwin.has(s)) bTwin.set(s, id); });
+        lMap.forEach((w, id) => {
+            if (bMap.has(id)) return;
+            const twin = bTwin.get(workerSig(w));
+            if (twin && !lMap.has(twin)) {
+                bMap.set(id, bMap.get(twin));
+                bMap.delete(twin);
+                bTwin.delete(workerSig(w));
+            }
+        });
+
+        const beforeIds = new Set([...lMap.keys(), ...bMap.keys()]);
+        const merged = new Map();
+        let added = 0, updated = 0, removed = 0;
+        [...new Set([...beforeIds, ...Object.keys(base)])].forEach((id) => {
+            const a = lMap.get(id), b = bMap.get(id);
+            const baseW = base[id];
+            if (baseW && !a && !b) { removed++; return; }        // 两边都删了
+            if (baseW && a && !b) { removed++; return; }         // BETA 删了 → 老工作区跟着删（删除优先）
+            if (baseW && !a && b) { removed++; return; }         // 老工作区删了 → BETA 跟着删
+            if (!a && !b) return;
+            if (!baseW && a && !b) { merged.set(id, Object.assign({}, a, { id })); added++; return; }
+            if (!baseW && !a && b) { merged.set(id, Object.assign({}, b, { id })); added++; return; }
+            const m = mergeWorkerFields(a, b, baseW || {}, preferSide);
+            m.id = id;
+            if (!sameJson(m, a) || !sameJson(m, b)) updated++;
+            merged.set(id, m);
+        });
+
+        const orderedIds = [];
+        const seenId = new Set();
+        [lMap, bMap].forEach((map) => map.forEach((_, id) => {
+            if (!merged.has(id) || seenId.has(id)) return;
+            seenId.add(id);
+            orderedIds.push(id);
+        }));
+        const mergedWorkers = orderedIds.map((id) => merged.get(id));
+
+        // 不参与同步的条目（web 类型等）原样留在各自存储里
+        let wrote = 0;
+        const apply = (key, store, keepTail) => {
+            const next = mergedWorkers.concat(keepTail);
+            if (sameJson(store.workers, next)) return;
+            const text = JSON.stringify({ workers: next, jobs: store.jobs, uncompletedJobs: store.uncompletedJobs });
+            localStorage.setItem(key, text);
+            // 让页面上已打开的工作区（VueUse 的 useLocalStorage 监听 storage）同步，避免它下次保存把写入顶掉
+            window.dispatchEvent(new StorageEvent('storage', { key, newValue: text, url: location.href, storageArea: localStorage }));
+            wrote++;
+        };
+        apply(WORKSPACE_PAIR.legacy, L, L.workers.filter((w) => !syncableWorker(w)));
+        apply(WORKSPACE_PAIR.beta, B, B.workers.filter((w) => !syncableWorker(w)));
+
+        if (added + updated + removed > 0 || !hasBase) {
+            localStorage.setItem(WORKSPACE_SYNC_STATE, JSON.stringify({ at: Date.now(), workers: Object.fromEntries(merged) }));
+        }
+        return { added, updated, removed, wrote, total: mergedWorkers.length };
+    };
+
+    // 离开任一工作区页面后仍在跑（keep 模块在被启动后跨页面持续轮询），所以"切出时同步"是靠下一次轮询落地的
+    const moduleWorkspaceSync = {
+        name: '工作区翻译器自动同步',
+        type: 'keep',
+        whitelist: ['/novel', '/wenku', '/favorite', '/workspace'],
+        settings: [
+            newBooleanSetting('自动同步', true),
+            newStringSetting('bind', 'none'),
+        ],
+        _lastRun: 0,
+        _interval: 3000,
+        _wasActive: false,
+        run: async function (cfg) {
+            if (getModuleSetting(cfg, '自动同步') === false) return;
+            const now = Date.now();
+            if (!this._wasActive) {
+                this._wasActive = true;
+                NotificationUtils.showSuccess('工作区翻译器自动同步已开启（老工作区 ⇄ BETA 工作区）');
+            }
+            if (now - this._lastRun < this._interval) return;
+            this._lastRun = now;
+            try {
+                const r = syncWorkspaceTranslators(currentWorkspaceSide());
+                if (r.added + r.updated + r.removed > 0) {
+                    NotificationUtils.showSuccess(`工作区翻译器已同步：新增 ${r.added} · 更新 ${r.updated} · 删除 ${r.removed}`);
+                }
+            } catch (e) {
+                console.error('工作区翻译器自动同步失败', e);
+            }
+        },
+    };
+
+    const defaultModules = [
+        moduleAddSakuraTranslator,
+        moduleAddGPTTranslator,
+        moduleDeleteTranslator,
+        moduleLaunchTranslator,
+        moduleQueueSakuraV2,
+        moduleQueueGPTV2,
+        moduleAutoRetry,
+        moduleClearJobs,
+        moduleFillGlossary,
+        moduleGlossaryExtract,
+        moduleGlossaryImport,
+        moduleGlossaryRollback,
+        moduleGlossaryQueue,
+        moduleCopyWorkersToBeta,
+        moduleWorkspaceSync,
+        moduleSyncStorage,
+    ];
+
+    // -----------------------------------
+    // Setting Utils
+    // -----------------------------------
+    class SettingUtils {
+        static getTranslateMode(mode) {
+            const map = { '常规': 'normal', '过期': 'expire', '重翻': 'all' };
+            return map[mode];
+        }
+    }
+
+    // -----------------------------------
+    // TaskUtils Utils
+    // -----------------------------------
+    class TaskUtils {
+        static getTypeString = (url) => {
+            const patterns = {
+                'wenkus': new RegExp(`^/wenku(\\?.*)?$`), // Matches /wenku and /wenku?params
+                'wenku': new RegExp(`^/wenku\\/.*(\\?.*)?$`), // Matches /wenku/* and /wenku/*?params
+                'novels': new RegExp(`^/novel(\\?.*)?$`), // Matches /novel and /novel?params
+                'novel': new RegExp(`^/novel\\/.*(\\?.*)?$`), // Matches /novel/*/* and /novel/*/*?params
+                'favorite-web': new RegExp(`^/favorite/web(/.*)?(\\?.*)?$`), // Matches /favorite/web and /favorite/web/* and /favorite/web?params
+                'favorite-wenku': new RegExp(`^/favorite/wenku(/.*)?(\\?.*)?$`), // Matches /favorite/wenku and /favorite/wenku/* and /favorite/wenku?params
+                'favorite-local': new RegExp(`^/favorite/local(/.*)?(\\?.*)?$`) // Matches /favorite/local and /favorite/local/* and /favorite/local?params
+            };
+            for (const [key, pattern] of Object.entries(patterns)) {
+                if (pattern.test(url)) {
+                    return key;
+                }
+            }
+            return null;
+        };
+
+        static wenkuLinkBuilder(series, name, mode) {
+            return `wenku/${series}/${name}?level=${mode}&forceMetadata=false&startIndex=0&endIndex=65536`
+        }
+
+        static webLinkBuilder(url, from = 0, to = 65536, mode) {
+            return `web${url}?level=${mode}&forceMetadata=false&startIndex=${from}&endIndex=${to}`
+        }
+
+        //return "id"
+        static wenkuIds() {
+            const links = [...document.querySelectorAll('a[href^="/wenku/"]')];
+            return links.map(link => link.getAttribute('href').split('/wenku/')[1]);
+        }
+
+        //return api link
+        static webSearchApi(limit = 20) {
+            const urlParams = new URLSearchParams(location.search);
+            const page = Math.max(parseInt(urlParams.get('page')) - 1 || 0, 0);
+            const query = urlParams.get('query') || '';
+            const selected = urlParams.getAll('selected').map(Number);
+
+            const typeMap = { '连载中': '1', '已完结': '2', '短篇': '3', '全部': '0' };
+            const levelMap = { '一般向': '1', 'R18': '2', '全部': '0' };
+            const translateMap = { 'GPT': '1', 'Sakura': '2', '全部': '0' };
+            const sortMap = { '更新': '0', '点击': '1', '相关': '2' };
+
+            // Map selected indices back to values if possible, or use default if URL is empty
+            // On n.novelia.cc, selected[0] is provider, [1] is type, [2] is level, [3] is translate, [4] is sort
+            const providerVal = selected[0] ?? 0xff; // 0xff is 'All'
+            const typeVal = selected[1] ?? 0;
+            const levelVal = selected[2] ?? 0;
+            const translateVal = selected[3] ?? 0;
+            const sortVal = selected[4] ?? 0;
+
+            // Convert provider bitmask back to string
+            const sourceMap = {
+                'kakuyomu': 1,
+                'syosetu': 2,
+                'novelup': 4,
+                'hameln': 8,
+                'pixiv': 16,
+                'alphapolis': 32
+            };
+            let providers = Object.keys(sourceMap)
+                .filter(k => (providerVal & sourceMap[k]))
+                .join(',');
+            
+            if (providerVal === 0xff || !providers) {
+                providers = 'kakuyomu,syosetu,novelup,hameln,pixiv,alphapolis';
+            }
+
+            return `/api/novel?page=${page}&pageSize=${limit}&query=${encodeURIComponent(query)}` +
+                `&provider=${encodeURIComponent(providers)}&type=${typeVal}&level=${levelVal}` +
+                `&translate=${translateVal}&sort=${sortVal}`;
+        }
+
+        //return { task, description }
+        static async assignTasksSmart(novels, smartJobLimit, smartChapterLimit, mode) {
+            function undone(n) {
+                if (mode === "normal") {
+                    const sOrG = (n.sakura ?? n.gpt) || 0;
+                    //Using max to deal with some total > sakura situation
+                    return Math.max(n.total - sOrG, 0);
+                }
+                return n.total;
+            }
+            const totalChapters = novels.reduce((acc, n) => acc + undone(n), 0);
+            const potentialMaxTask = Math.floor(totalChapters / smartChapterLimit);
+            let maxTasks = Math.min(potentialMaxTask, smartJobLimit);
+
+            if (maxTasks <= 0 && totalChapters > 0) {
+                maxTasks = smartJobLimit;
+            }
+            if (totalChapters === 0) {
+                return [];
+            }
+            const chunkSize = Math.ceil(totalChapters / (maxTasks || 1));
+            const sorted = [...novels].sort((a, b) => undone(b) - undone(a));
+
+            const result = [];
+            let usedTasks = 0;
+
+            for (const novel of sorted) {
+                let remain = undone(novel);
+                if (remain <= 0) continue;
+
+                let startIndex = (mode === "normal") ? (novel.total - remain) : 0;
+
+                while (remain > 0 && usedTasks < smartJobLimit) {
+                    const thisChunk = Math.min(remain, chunkSize);
+                    const endIndex = startIndex + thisChunk;
+
+                    result.push({
+                        task: TaskUtils.webLinkBuilder(novel.url, startIndex, endIndex, mode),
+                        description: novel.description
+                    });
+
+                    usedTasks++;
+                    remain -= thisChunk;
+                    startIndex = endIndex;
+                    if (usedTasks >= smartJobLimit) {
+                        break;
+                    }
+                }
+                if (usedTasks >= smartJobLimit) {
+                    break;
+                }
+            }
+
+            return result;
+        }
+
+        //return { task, description }
+        static async assignTasksStatic(novels, parts, mode) {
+            function undone(n) {
+                if (mode === "normal") {
+                    const sOrG = (n.sakura ?? n.gpt) || 0;
+                    return n.total - sOrG;
+                }
+                return n.total;
+            }
+
+            const result = [];
+
+            for (const novel of novels) {
+                const totalChapters = undone(novel);
+                if (totalChapters <= 0) continue;
+                const startBase = (mode === "normal")
+                    ? (novel.total - totalChapters)
+                    : 0;
+
+                const chunkSize = Math.ceil(totalChapters / parts);
+
+                for (let i = 0; i < parts; i++) {
+                    const chunkStart = startBase + i * chunkSize;
+                    const chunkEnd = (i === parts - 1)
+                        ? (startBase + totalChapters)
+                        : (chunkStart + chunkSize);
+
+                    if (chunkStart < startBase + totalChapters) {
+                        result.push({
+                            task: TaskUtils.webLinkBuilder(novel.url, chunkStart, chunkEnd, mode),
+                            description: novel.description
+                        });
+                    }
+                }
+            }
+            return result;
+        }
+
+        static async clickTaskMoveToTop(count, reserve=true) {
+            const extras = document.querySelectorAll('.n-thing-header__extra');
+            for (let i = 0; i < count;i++) {
+                const offset = reserve ? extras.length - i - 1 : i;
+                const container = extras[offset];
+                const buttons = container.querySelectorAll('button');
+                if (buttons.length) {
+                    buttons[0].click();
+                }
+            }
+        }
+
+        static async clickButtons(name = '') {
+            const btns = document.querySelectorAll('button');
+            btns.forEach(btn => {
+                if (name === '' || btn.textContent.includes(name)) {
+                    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                }
+            });
+        }
+    }
+
+    // -----------------------------------
+    // Glossary Engine (移植 KeywordGacha module/{Text,PromptBuilder,Response,Filter,Engine})
+    // -----------------------------------
+    // ==GlossaryEngine-START==
+    // -----------------------------------
+    // 调试日志（可选）：Console 输出 + 内存环形缓冲 + 导出文本
+    // - WARN/ERROR 永远记（最近 200 条，也永远打 Console，和以前 chunk failed 的行为一致）
+    // - 开了设置项「调试日志」后 INFO/DEBUG 也记（最近 1000 条）并打 Console
+    // - 「开没开」由外面注入的读取器决定；引擎段单独在 node 里跑测试时没有读取器 = 关闭
+    // -----------------------------------
+    const GlossaryLog = (() => {
+        const MAX_ALL = 1000;
+        const MAX_ERR = 200;
+        const all = [];
+        const errs = [];
+        let reader = null;
+        const pad = (n, w = 2) => String(n).padStart(w, '0');
+        const stamp = (t) => {
+            const d = new Date(t);
+            return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+        };
+        const enabled = () => {
+            if (!reader) return false;
+            try { return !!reader(); } catch (e) { return false; }
+        };
+        const setEnabledSource = (fn) => { if (typeof fn === 'function') reader = fn; };
+        const line = (rec) => `[NTR-G] ${stamp(rec.t)} ${rec.level.toUpperCase()} ${rec.msg}${rec.data ? ' ' + JSON.stringify(rec.data) : ''}`;
+        const push = (level, msg, data) => {
+            const rec = { t: Date.now(), level, msg: String(msg) };
+            if (data !== undefined) {
+                try { rec.data = JSON.parse(JSON.stringify(data)); } catch (e) { rec.data = String(data); }
+            }
+            if (level === 'warn' || level === 'error') {
+                errs.push(rec);
+                if (errs.length > MAX_ERR) errs.shift();
+                try { (level === 'error' ? console.error : console.warn).call(console, line(rec)); } catch (e) { }
+            }
+            if (!enabled()) return rec;
+            all.push(rec);
+            if (all.length > MAX_ALL) all.shift();
+            if (level === 'info' || level === 'debug') {
+                try { console.log(line(rec)); } catch (e) { }
+            }
+            return rec;
+        };
+        return {
+            setEnabledSource,
+            enabled,
+            info: (msg, data) => push('info', msg, data),
+            debug: (msg, data) => push('debug', msg, data),
+            warn: (msg, data) => push('warn', msg, data),
+            error: (msg, data) => push('error', msg, data),
+            // 导出：开着 → 全部事件；没开（或开了还没产生事件）→ 只有警告/错误，也够定位问题了
+            lines: () => (enabled() && all.length > 0 ? all : errs),
+            format: () => (enabled() && all.length > 0 ? all : errs).map(line).join('\n'),
+            clear: () => { all.length = 0; errs.length = 0; },
+            stats: () => ({ enabled: enabled(), kept: (enabled() && all.length > 0 ? all : errs).length, errors: errs.length }),
+        };
+    })();
+
+    const GlossaryEngine = (() => {
+        'use strict';
+
+        // ---------- 文本工具（Normalizer.py / RubyCleaner.py / TextHelper.py） ----------
+
+        // 全角 -> 半角（A-Z a-z 0-9）与半角片假名 -> 全角片假名
+        const KANA_HALF = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜｦﾝｧｨｩｪｫｬｭｮｯｰﾞﾟ';
+        const KANA_FULL = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲンァィゥェォャュョッー゛゜';
+        const NORMALIZE_RULE = (() => {
+            const rule = {};
+            for (let i = 0; i < 26; i++) {
+                rule[String.fromCharCode(0xFF21 + i)] = String.fromCharCode(0x41 + i);
+                rule[String.fromCharCode(0xFF41 + i)] = String.fromCharCode(0x61 + i);
+            }
+            for (let i = 0; i < 10; i++) {
+                rule[String.fromCharCode(0xFF10 + i)] = String.fromCharCode(0x30 + i);
+            }
+            for (let i = 0; i < KANA_HALF.length; i++) {
+                rule[KANA_HALF[i]] = KANA_FULL[i];
+            }
+            return rule;
+        })();
+
+        const normalize = (text) => {
+            if (typeof text !== 'string') return '';
+            let out = text.normalize ? text.normalize('NFC') : text;
+            return out.split('').map((c) => NORMALIZE_RULE[c] || c).join('');
+        };
+
+        // 去振假名（RubyCleaner.RULE 的 10 条规则，Python -> JS 直译）
+        const RUBY_RULES = [
+            [/\((.+)\/.+\)/gi, '$1'],
+            [/\[(.+)\/.+\]/gi, '$1'],
+            [/\|(.+?)\[.+?\]/gi, '$1'],
+            [/\\r\[(.+?),.+?\]/gi, '$1'],
+            [/\\rb\[(.+?),.+?\]/gi, '$1'],
+            [/\[r_.+?\]\[ch_(.+?)\]/gi, '$1'],
+            [/\[ch_(.+?)\]/gi, '$1'],
+            [/<ruby\s*=\s*.*?>(.*?)<\/ruby>/gi, '$1'],
+            [/<ruby>.*?<rb>(.*?)<\/rb>.*?<\/ruby>/gi, '$1'],
+            [/\[ruby text\s*=\s*.*?\]/gi, ''],
+        ];
+        const cleanRuby = (text) => {
+            let out = text;
+            for (const [re, rp] of RUBY_RULES) out = out.replace(re, rp);
+            return out;
+        };
+
+        // 标点（TextHelper.py 的三个标点集合）
+        const RE_CJK_PUNCT = /[\u3001-\u303F\uFF01-\uFF0F\uFF1A-\uFF1F\uFF3B-\uFF40\uFF5B-\uFF65\uFFE0-\uFFEE]/;
+        const RE_LATIN_PUNCT = /[\u0021-\u002F\u003A-\u0040\u005B-\u0060\u007B-\u007E\u2000-\u206F\u2E00-\u2E7F]/;
+        const RE_SPECIAL_PUNCT = /[\u00B7\u30FB\u2665]/;
+        const isPunctuation = (char) => RE_CJK_PUNCT.test(char) || RE_LATIN_PUNCT.test(char) || RE_SPECIAL_PUNCT.test(char);
+
+        // 按标点切分（TextHelper.split_by_punctuation）
+        const splitByPunctuation = (text, splitBySpace) => {
+            const result = [];
+            let current = [];
+            for (const char of text) {
+                if (isPunctuation(char) || (splitBySpace && (char === ' ' || char === '\u3000'))) {
+                    if (current.length > 0) {
+                        result.push(current.join(''));
+                        current = [];
+                    }
+                } else {
+                    current.push(char);
+                }
+            }
+            if (current.length > 0) result.push(current.join(''));
+            return result.filter((s) => s);
+        };
+
+        // 显示宽度（TextHelper.get_display_lenght：东亚宽字符按 2 计）
+        const RE_WIDE_CHAR = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]|[\u{20000}-\u{3FFFD}]/u;
+        const displayLength = (text) => {
+            let len = 0;
+            for (const char of text) len += RE_WIDE_CHAR.test(char) ? 2 : 1;
+            return len;
+        };
+
+        // 语言判断（TextBase 的字符集合，用于 LanguageFilter）
+        const LANG_MATCHERS = {
+            ZH: /[\u4E00-\u9FFF\u3400-\u4DBF]/,
+            JA: /[\u3040-\u309F\u30A0-\u30FF\u31F0-\u31FF\uFF65-\uFF9F\u4E00-\u9FFF\u3400-\u4DBF]/,
+            KO: /[\u1100-\u11FF\uA960-\uA97F\uD7B0-\uD7FF\uAC00-\uD7AF\u3130-\u318F]/,
+            _LATIN: /[A-Za-z\u00C0-\u024F]/,
+        };
+        const languageFilter = (text, sourceLanguage) => {
+            const re = LANG_MATCHERS[sourceLanguage] || LANG_MATCHERS._LATIN;
+            return re.test(text);  // true = 保留
+        };
+
+        // 规则过滤（RuleFilter.py，返回 true = 过滤掉）
+        const RULE_PREFIX = ['mapdata/', 'se/', 'bgs', '0=', 'bgm/', 'ficon/'];
+        const RULE_SUFFIX = ['.mp3', '.wav', '.ogg', 'mid', '.png', '.jpg', '.jpeg', '.gif', '.psd', '.webp', '.heif', '.heic', '.avi', '.mp4', '.webm', '.txt', '.7z', '.gz', '.rar', '.zip', '.json', '.sav', '.mps', '.ttf', '.otf', '.woff'];
+        const RULE_ALL = [/^EV\d+$/i, /^DejaVu Sans$/i, /^Opendyslexic$/i, /^\{#file_time\}$/i];
+        const ruleFilter = (src) => {
+            const flags = [];
+            for (const raw of src.split(/\r?\n/)) {
+                const line = raw.trim().toLowerCase();
+                if (line.trim() === '') { flags.push(true); continue; }
+                if (Array.from(line).every((c) => /\s/.test(c) || /\d/.test(c) || isPunctuation(c))) { flags.push(true); continue; }
+                if (RULE_PREFIX.some((v) => line.startsWith(v))) { flags.push(true); continue; }
+                if (RULE_SUFFIX.some((v) => line.endsWith(v))) { flags.push(true); continue; }
+                if (RULE_ALL.some((re) => re.test(line))) { flags.push(true); continue; }
+                flags.push(false);
+            }
+            if (flags.length === 0) return false;
+            return flags.every((v) => v === true);
+        };
+
+        // ---------- JSONLINE 解析（ResponseDecoder.py + json_repair 的轻量替代） ----------
+
+        const tryParseObject = (text) => {
+            try {
+                const obj = JSON.parse(text);
+                return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : null;
+            } catch (e) {
+                return null;
+            }
+        };
+
+        // 单行 JSON 修复：围栏/前后闲聊/尾逗号/单引号/未闭合字符串
+        const repairJsonLine = (rawLine) => {
+            let s = (rawLine || '').trim();
+            if (!s || s.startsWith('```')) return null;
+            s = s.replace(/[;,]\s*$/, '');
+            const a = s.indexOf('{');
+            const b = s.lastIndexOf('}');
+            let body;
+            let partial = false;
+            if (a < 0) return null;
+            if (b <= a) {
+                // 没有闭合括号（断流），从 { 截到行尾后补齐
+                body = s.slice(a);
+                partial = true;
+            } else {
+                body = s.slice(a, b + 1);
+            }
+
+            let obj = tryParseObject(body);
+            if (obj) return { obj, partial };
+
+            // 单引号版本（当整行没有双引号时）
+            if (!body.includes('"')) {
+                let t = body.replace(/'/g, '"').replace(/,\s*([}\]])/g, '$1');
+                if (!t.endsWith('}')) { t += '}'; partial = true; }
+                obj = tryParseObject(t);
+                if (obj) return { obj, partial };
+            }
+
+            // 去掉尾逗号
+            let t2 = body.replace(/,\s*([}\]])/g, '$1');
+            if (!t2.endsWith('}')) { t2 += '}'; partial = true; }
+            obj = tryParseObject(t2);
+            if (obj) return { obj, partial };
+
+            // 未闭合字符串：补齐引号与括号
+            let t3 = t2;
+            const quotes = (t3.match(/(?<!\\)"/g) || []).length;
+            if (quotes % 2 === 1) { t3 += '"'; }
+            if (!t3.endsWith('}')) t3 += '}';
+            obj = tryParseObject(t3);
+            if (obj) return { obj, partial: true };
+
+            return null;
+        };
+
+        // 剥离思考段（TaskRequester 的 reasoning_content / <think> 处理）
+        const splitThink = (content) => {
+            const text = typeof content === 'string' ? content : '';
+            const idx = text.lastIndexOf('</think>');
+            if (idx >= 0) {
+                return {
+                    think: text.slice(0, idx).replace(/<think>/gi, '').trim(),
+                    result: text.slice(idx + '</think>'.length).trim(),
+                };
+            }
+            return { think: '', result: text };
+        };
+
+        // 解析回复（逐行 JSONLINE）
+        const parseResponse = (content) => {
+            const { think, result } = splitThink(content);
+            const entries = [];
+            for (const line of result.split(/\r?\n/)) {
+                const parsed = repairJsonLine(line);
+                if (!parsed) continue;
+                const obj = parsed.obj;
+                if (typeof obj.src !== 'string' || !('dst' in obj)) continue;
+                entries.push({
+                    src: obj.src,
+                    dst: typeof obj.dst === 'string' ? obj.dst : '',
+                    type: typeof obj.type === 'string' ? obj.type : (typeof obj.info === 'string' ? obj.info : ''),
+                    partial: parsed.partial === true,
+                });
+            }
+            return { think, entries };
+        };
+
+        // ---------- 提示词（resource/prompt/zh/{prefix,base,suffix}.txt） ----------
+
+        const PROMPT_PREFIX = '任务目标是从文本片段中提取指定类型的术语表，并将其翻译为{target_language}。';
+        const PROMPT_BASE = [
+            '任务要求：',
+            '1、严格遵循任务要求，不回避不淡化不省略任何文本',
+            '2、确保术语的独特性，常见的、已有约定俗成翻译方式的词语无需列入术语表',
+            '3、确保术语的边界正确，术语文本中无需包含常见的称呼、称谓、称号、职位、头衔等',
+            '4、确保术语的类型属于以下类型之一：男性人名、女性人名、未知性别人名、地名、家族、组织、特殊物品、特殊生物、其他',
+        ].join('\n');
+        const PROMPT_SUFFIX = '使用JSONLINE在代码块中输出结果，无需额外说明或解释：\n```jsonline\n{"src":"<原文>","dst":"<译文>","type":"<类型>"}\n```';
+
+        const buildPrompt = ({ chunkText, targetLanguage = '中文' }) =>
+            PROMPT_PREFIX.replace('{target_language}', targetLanguage) + '\n' + PROMPT_BASE + '\n' + PROMPT_SUFFIX + '\n文本片段：\n' + chunkText;
+
+        const buildMessages = (opts) => [{ role: 'user', content: buildPrompt(opts) }];
+
+        // ---------- 审计（再次筛选）：让模型挑出"不该进术语表"的条目 ----------
+        // 只输出"要删的"，默认全部保留 —— 模型漏答/格式坏了/请求失败，最坏结果都是"没清理"
+
+        const AUDIT_RULES = [
+            '你是术语表审核员。下面是一份从日文轻小说正文里提取出来的术语表，每行一个 JSON：',
+            'src = 原文，dst = 译文，type = 类型，count = 该词在全书正文中出现的行数。',
+            '',
+            '术语表的作用是约束译名前后一致。凡是「读一遍就不需要统一译法」的词，都属于多余的条目。',
+            '请只挑出**不该进术语表**的条目，符合以下任一条即应删除：',
+            '1. 描述性短语：不是固定称呼，而是一句描述（例：「道化師のイラストが入っているペン」）。',
+            '2. 通用名词：日常物品、普通设施、普通职业、泛称组织等（例：「教室」「バスケ部」「銅管楽器」）。',
+            '3. 一次性的专名：count ≤ 2，且只是顺带提及的现实站名、线路、行政区、店名、商品名、活动名，或只出现一次、之后不再出现的场所（例：「代々木駅」「藤沢市」「マッシロイヌコラボのプリン」）。',
+            '4. 称呼、头衔、量词、寒暄、拟声词，以及没有实际意义的单字母/单符号条目（例：「さん」「先輩」「おはよう」「O」）。',
+            '5. 明显的提取错误：半截词、错位切分、把普通句子或动词片段当术语（例：「入れ」「という」）。',
+            '6. 复合词不拆：由助词（の/が/を/に）把几个普通词连起来的描述性短语，不是固定的专名（例：「闇の神のマント」「道化師のイラストが入っているペン」「マッシロイヌコラボのプリン」）。但已经是固定地名的保留（例：「虹の橋」「江の島」）。',
+            '7. 称呼控制：人名 + 敬称（さん/様/殿/嬢/氏）的组合（例：「アルテさん」）——术语表不该规定正文里怎么称呼；除非它就是这个角色的固定叫法。整体就是一个昵称的（例：「なるちゃん」「ゆっちゃん」）不算。',
+            '8. 整句/过长：整句话被当成条目，含句读（。！？、）或长到像一句话的短语。',
+            '',
+            '必须保留，不得删除：',
+            '① 人名（含昵称、代号、只出现一两次的配角）；',
+            '② 承担剧情功能的地名、组织、家族、特殊物品、特殊生物（故事舞台、反复出现或与情节有关）；',
+            '③ count ≥ 5 的条目（第 4 条里的单字母/单符号除外）；',
+            '④ 类型为「男性人名 / 女性人名 / 未知性别人名 / 家族 / 特殊物品 / 特殊生物」的条目，除非它明显属于第 5~8 条。',
+            '',
+            '一条同时像"该删"和"该留"时，一律保留 —— 漏删的代价远小于误删（误删会让这个译名在正文里前后不一致）。',
+            '不要评价译文好坏，不要改写译文，不要新增条目。',
+        ].join('\n');
+
+        const buildAuditPrompt = ({ entries, context }) => {
+            const lines = [];
+            if (context && context.title) {
+                lines.push(`作品：${context.title}`);
+                if (context.snippet) lines.push(`开头节选：${context.snippet}`);
+                lines.push('');
+            }
+            lines.push(AUDIT_RULES);
+            lines.push('');
+            lines.push('待审核的术语表（JSONLINE）：');
+            (entries || []).forEach((e) => lines.push(JSON.stringify({
+                src: e.src,
+                dst: e.dst,
+                type: e.type || '',
+                count: typeof e.count === 'number' ? e.count : 0,
+            })));
+            lines.push('');
+            lines.push('输出要求：JSONLINE，只输出要删的条目，一行一条，不要任何其他内容：');
+            lines.push('```jsonline');
+            lines.push('{"src":"<与输入完全一致的原文>","why":"<1-5 的编号>","note":"<10 字内理由>"}');
+            lines.push('```');
+            return lines.join('\n');
+        };
+
+        // 审计输出没有 dst，所以不能复用 parseResponse（那个只认带 dst 的行）
+        const parseAuditResponse = (text) => {
+            const { result } = splitThink(text || '');
+            const marks = new Map();
+            let count = 0;
+            for (const line of result.split(/\r?\n/)) {
+                const parsed = repairJsonLine(line);
+                if (!parsed) continue;
+                const obj = parsed.obj;
+                if (typeof obj.src !== 'string' || obj.src.trim() === '') continue;
+                if (!('why' in obj) && !('note' in obj)) continue;
+                count += 1;
+                marks.set(obj.src.trim(), {
+                    why: String(obj.why === undefined ? '' : obj.why).trim(),
+                    note: String(obj.note === undefined ? '' : obj.note).trim(),
+                });
+            }
+            return { marks, count };
+        };
+
+        // 分批送审；任何一批失败就跳过那一批（fail-open，不影响其他批次与任务状态）
+        // concurrency > 1 时多批并行发出（几千条时别让用户干等十几分钟）；
+        // 真正的限流/轮换仍由调用方的 requester 负责，这里只是不把批次串起来
+        const auditGlossary = async ({ entries, call, context, batchSize = 300, concurrency = 1, onProgress, shouldStop }) => {
+            const marks = new Map();
+            const list = (entries || []).filter((e) => e && e.src);
+            const size = Math.max(1, Number(batchSize) || 300);
+            const batches = Math.max(1, Math.ceil(list.length / size));
+            const lanes = Math.max(1, Math.min(Number(concurrency) || 1, batches));
+            let unmatched = 0;
+            let sent = 0;
+            let done = 0;
+            let next = 0;
+            const failed = [];
+            const worker = async () => {
+                for (;;) {
+                    if (shouldStop && shouldStop()) return;
+                    const i = next;
+                    if (i >= batches) return;
+                    next += 1;
+                    const batch = list.slice(i * size, (i + 1) * size);
+                    if (batch.length === 0) continue;
+                    const no = ++sent;
+                    // phase: start = 这一批开始发；done = 这一批有结果了（成功或失败都算），供界面算进度
+                    const emit = (phase) => {
+                        if (!onProgress) return;
+                        try { onProgress({ batch: no, batches, size: batch.length, done, phase }); } catch (e) { }
+                    };
+                    emit('start');
+                    let content = '';
+                    try {
+                        const res = await call([{ role: 'user', content: buildAuditPrompt({ entries: batch, context }) }]);
+                        if (!res || res.ok === false) throw new Error((res && res.error) || '请求失败');
+                        content = res.content || '';
+                        if (content.trim() === '') throw new Error('空响应');
+                    } catch (e) {
+                        failed.push(String((e && e.message) || e));
+                        done += 1;
+                        emit('done');
+                        continue;
+                    }
+                    try {
+                        const bySrc = new Map(batch.map((e) => [e.src, e]));
+                        const byTrimmed = new Map(batch.map((e) => [String(e.src).trim(), e]));
+                        parseAuditResponse(content).marks.forEach((mark, src) => {
+                            const hit = bySrc.get(src) || byTrimmed.get(src);
+                            if (hit) marks.set(hit.src, mark);
+                            else unmatched += 1;
+                        });
+                    } catch (e) {
+                        failed.push(String((e && e.message) || e));
+                    }
+                    done += 1;
+                    emit('done');
+                }
+            };
+            await Promise.all(Array.from({ length: lanes }, () => worker()));
+            return { marks, unmatched, batches: sent, failed: failed.length ? failed.join('；') : '' };
+        };
+
+        // ---------- 分块（CacheManager.generate_item_chunks 的语义） ----------
+
+        const splitLines = (text) => (text || '').split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== '');
+
+        // 生成分块：lineLimit 避免大量短句挤爆行数
+        const makeChunks = (lines, budgetChars) => {
+            const lineLimit = Math.max(8, Math.floor(budgetChars / 16));
+            const chunks = [];
+            let chunk = [];
+            let lineCount = 0;
+            let charCount = 0;
+            for (const line of lines) {
+                const lineChars = line.length;
+                if (chunk.length === 0) {
+                    // 首条不判超限，避免超长行死循环
+                } else if (lineCount + 1 > lineLimit || charCount + lineChars > budgetChars) {
+                    chunks.push({ lines: chunk, text: chunk.join('\n') });
+                    chunk = [];
+                    lineCount = 0;
+                    charCount = 0;
+                }
+                chunk.push(line);
+                lineCount += 1;
+                charCount += lineChars;
+            }
+            if (chunk.length > 0) chunks.push({ lines: chunk, text: chunk.join('\n') });
+            return chunks.map((c, index) => ({ index, ...c }));
+        };
+
+        // ---------- 提取结果后处理（NERAnalyzer.save_ouput 的流水线） ----------
+
+        const BLACKLIST_INFO = new Set(['其它', '其他', 'other', 'others']);
+
+        // 句读：src 里出现这些基本就是「整句被当成术语」（站点指南：整句除非触发 sakura 退化，翻完必须删）
+        const SENT_PUNCT = /[。．！？…‥、，；：]/;
+        // 人名 + 敬称（さん/様/殿/嬢/氏）。注意「なるちゃん」这种整体就是昵称的不算
+        const HONORIFIC_TAIL = /^(.*?)(さん|様|殿|嬢|氏)$/;
+        // 「可疑」标记用的更宽一档：ちゃん/君/先生/先輩 这些也标上（只提示、不删，让人自己看一眼）
+        const HONORIFIC_SUSPECT = /^(.*?)(さん|様|ちゃん|君|くん|先生|先輩|殿|嬢|氏|サン)$/;
+        // 助词连接 = 更像短语而不是专名（「虹の橋」这种 3 字短名不在此列，交给审计判断）
+        const PARTICLE_CHARS = /[のがをに]/;
+
+        // 上一次 postProcess 丢掉了什么（通知 / 日志用）
+        let lastPostDrop = { punct: 0, honorific: 0 };
+
+        const checkEntry = (src, info) => {
+            if (displayLength(src) > 32) return false;
+            if (BLACKLIST_INFO.has((info || '').trim().toLowerCase())) return false;
+            return true;
+        };
+
+        // 「可疑」标记（只提示，不删）：最容易违反《术语表使用指南》的几种形态
+        const suspectReasons = (src) => {
+            const s = String(src || '');
+            const chars = Array.from(s).length;
+            const reasons = [];
+            if (SENT_PUNCT.test(s)) reasons.push('含标点');
+            if (chars >= 13) reasons.push('过长');
+            if (chars >= 6 && PARTICLE_CHARS.test(s)) reasons.push('像短语');
+            const m = HONORIFIC_SUSPECT.exec(s);
+            if (m && Array.from(m[1]).length >= 2) reasons.push('带敬称');
+            return reasons;
+        };
+
+        const findBest = (src, choices) => {
+            const dstCount = {};
+            const dstChoices = [];
+            const infoCount = {};
+            const infoChoices = [];
+            for (const choice of choices) {
+                if (!(choice.dst in dstCount)) { dstCount[choice.dst] = 0; dstChoices.push(choice.dst); }
+                dstCount[choice.dst] += 1;
+                if (!(choice.info in infoCount)) { infoCount[choice.info] = 0; infoChoices.push(choice.info); }
+                infoCount[choice.info] += 1;
+            }
+            const dst = dstChoices.reduce((best, v) => (dstCount[v] > dstCount[best] ? v : best), dstChoices[0]);
+            const info = infoChoices.reduce((best, v) => (infoCount[v] > infoCount[best] ? v : best), infoChoices[0]);
+            return {
+                src,
+                dst,
+                type: info,
+                info,
+                dst_choices: dstChoices,
+                info_choices: infoChoices,
+                partial: choices.some((c) => c.partial === true),
+            };
+        };
+
+        // 统计出现次数并附上下文（NERAnalyzer.search_for_context，含掩码防子串误配）
+        // 加速：给「相邻字符对 → 出现的行下标」建倒排表，只有含这个词的行才可能命中。
+        // 为什么安全：掩码只是把已匹配的字符换成 #，既不增删字符、也不改动行数与下标，
+        // 所以「某个词在掩码后的行里出现」一定意味着「它在原文里也出现」→ 建表时必定收录过这一行（超集，不漏）。
+        // 单字词（很少见）不走表，照旧扫全文；表按 lines 数组缓存，同一本书只建一次。
+        const lineIndexCache = new WeakMap();
+        const buildLineIndex = (lines) => {
+            const byPair = new Map();
+            lines.forEach((line, i) => {
+                for (let k = 0; k + 1 < line.length; k += 1) {
+                    const key = line.slice(k, k + 2);
+                    const list = byPair.get(key);
+                    // 行下标递增地扫进来，桶里只需比最后一个，天然去重
+                    if (list) { if (list[list.length - 1] !== i) list.push(i); }
+                    else byPair.set(key, [i]);
+                }
+            });
+            return byPair;
+        };
+        const lineIndexFor = (lines) => {
+            let index = lineIndexCache.get(lines);
+            if (!index) { index = buildLineIndex(lines); lineIndexCache.set(lines, index); }
+            return index;
+        };
+        const searchForContext = (glossary, lines) => {
+            const pool = lines.slice();
+            const ordered = glossary.slice().sort((a, b) => b.src.length - a.src.length);
+            const byPair = lineIndexFor(lines);
+            for (const entry of ordered) {
+                const src = entry.src || '';
+                const bucket = src.length >= 2 ? byPair.get(src.slice(0, 2)) : null;
+                const hits = new Set();
+                if (bucket) { for (const i of bucket) { if (pool[i].includes(src)) hits.add(i); } }
+                else { pool.forEach((line, i) => { if (line.includes(src)) hits.add(i); }); }
+                const contexts = [...new Set([...hits].map((i) => lines[i]))].sort((a, b) => b.length - a.length);
+                entry.context = contexts;
+                entry.count = contexts.length;
+                hits.forEach((i) => { pool[i] = pool[i].split(src).join('#'.repeat(src.length)); });
+            }
+            return ordered.sort((a, b) => b.count - a.count);
+        };
+
+        // 两个行数组是否逐行一致（分块缓存命中校验用）
+        const linesMatch = (a, b) => Array.isArray(a) && Array.isArray(b)
+            && a.length === b.length && a.every((v, i) => v === b[i]);
+
+        // 分块缓存记录 → 还没被任何成功块覆盖过的行（多重集差集，保持原文顺序；同一行出现多次时各自计数）
+        const uncoveredLines = (allLines, records) => {
+            const covered = new Map();
+            (records || []).forEach((rec) => {
+                const list = (rec && rec.lines) || [];
+                list.forEach((line) => covered.set(line, (covered.get(line) || 0) + 1));
+            });
+            const rest = [];
+            (allLines || []).forEach((line) => {
+                const n = covered.get(line) || 0;
+                if (n > 0) covered.set(line, n - 1);
+                else rest.push(line);
+            });
+            return rest;
+        };
+
+        // 汇总原始条目 -> 最终术语表（save_ouput 的过滤/投票/去重/计数）
+        // 顺带做两件零 token 的清洗（对齐站点《术语表使用指南》）：整句直接丢、人名+敬称在裸名也成条目时丢掉
+        const postProcess = (entries, allLines) => {
+            const group = {};
+            let dropPunct = 0;
+            for (const raw of entries) {
+                let src = normalize(cleanRuby((raw.src || '').trim()));
+                let dst = normalize(cleanRuby((raw.dst || '').trim()));
+                const info = cleanRuby((raw.type || raw.info || '').trim());
+                if (SENT_PUNCT.test(src)) { dropPunct += 1; continue; }
+                const srcs = splitByPunctuation(src, true);
+                const dsts = splitByPunctuation(dst, true);
+                const pairs = (srcs.length !== dsts.length || srcs.length === 0)
+                    ? [[src, dst]]
+                    : srcs.map((s, i) => [s, dsts[i]]);
+                for (const [s0, d0] of pairs) {
+                    const s = (s0 || '').trim();
+                    const d = (d0 || '').trim();
+                    if (s === '' || d === '') continue;
+                    if (s === d && info === '') continue;
+                    if (!checkEntry(s, info)) continue;
+                    if (!group[s]) group[s] = [];
+                    group[s].push({ src: s, dst: d, info, partial: raw.partial === true });
+                }
+            }
+            let glossary = Object.keys(group).map((src) => findBest(src, group[src]));
+            // 去重（同 src 保留最后一个）
+            const dedup = new Map();
+            glossary.forEach((v) => dedup.set(v.src, v));
+            glossary = [...dedup.values()];
+            // 人名 + 敬称：裸名也在这张表里时丢掉带敬称的那条（指南：除非不得已不要控制称呼）
+            // 裸名不存在则保留原样（由「再次筛选」打标，用户自己决定）
+            const bySrc = new Set(glossary.map((v) => v.src));
+            let dropHonorific = 0;
+            glossary = glossary.filter((v) => {
+                const m = HONORIFIC_TAIL.exec(v.src);
+                if (m && Array.from(m[1]).length >= 2 && bySrc.has(m[1])) { dropHonorific += 1; return false; }
+                return true;
+            });
+            glossary = searchForContext(glossary, allLines);
+            glossary = glossary.filter((v) => v.count > 0);
+            lastPostDrop = { punct: dropPunct, honorific: dropHonorific };
+            return glossary;
+        };
+
+        // ---------- 限流（TaskLimiter.py 的令牌桶） ----------
+
+        class TaskLimiter {
+            constructor(rps, rpm) {
+                this.rps = Number(rps) || 0;
+                this.rpm = Number(rpm) || 0;
+                const candidates = [];
+                if (this.rps > 0) candidates.push(this.rps);
+                if (this.rpm > 0) candidates.push(this.rpm / 60);
+                this.rate = candidates.length > 0 ? Math.min(...candidates) : 0;
+                this.maxTokens = this.rate;
+                this.tokens = this.rate;
+                this.last = Date.now();
+            }
+
+            async wait() {
+                if (this.rate <= 0) return;
+                const now = Date.now();
+                this.tokens = Math.min(this.maxTokens, this.tokens + ((now - this.last) / 1000) * this.rate);
+                this.last = now;
+                if (this.tokens < 1) {
+                    const waitMs = ((1 - this.tokens) / this.rate) * 1000;
+                    await new Promise((r) => setTimeout(r, Math.max(0, waitMs)));
+                    this.tokens = 1;
+                    this.last = Date.now();
+                }
+                this.tokens -= 1;
+            }
+        }
+
+        // ---------- 请求层（TaskRequester.py：worker 轮转 + 模型怪癖 + 超时） ----------
+
+        const RE_O_SERIES = /o\d($|-)/i;
+        const RE_QWEN3 = /qwen3/i;
+
+        const buildChatUrl = (endpoint) => {
+            const url = new URL(endpoint);
+            if (url.pathname.endsWith('/chat/completions')) return url.href;
+            if (url.pathname === '/' || url.pathname === '') url.pathname = '/v1/chat/completions';
+            else if (url.pathname.endsWith('/v1') || url.pathname.endsWith('/v1/')) url.pathname = url.pathname.replace(/\/$/, '') + '/chat/completions';
+            else url.pathname = url.pathname.replace(/\/$/, '') + '/chat/completions';
+            return url.href;
+        };
+
+        // workers: [{ id, model, endpoint, key }]
+        const createRequester = (workers, options = {}) => {
+            const timeoutMs = options.timeoutMs || 300000;
+            const temperature = options.temperature === undefined ? 0.3 : options.temperature;
+            const thinking = options.thinking === true;
+            const fetchImpl = options.fetchImpl || ((...args) => fetch(...args));
+            let index = -1;
+            const cooldown = new Map();  // workerId -> ts
+
+            const cycle = () => {
+                for (let i = 0; i < workers.length; i++) {
+                    index = (index + 1) % workers.length;
+                    const w = workers[index];
+                    const until = cooldown.get(w.id) || 0;
+                    if (Date.now() >= until) return w;
+                }
+                // 全部冷却中 -> 用第一个
+                return workers[0];
+            };
+
+            const markFail = (worker) => {
+                worker._fails = (worker._fails || 0) + 1;
+                if (worker._fails >= 2) cooldown.set(worker.id, Date.now() + 60000);
+            };
+            const markOk = (worker) => { worker._fails = 0; cooldown.delete(worker.id); };
+
+            // 回调：{ ok, content, think, error, retryAfterMs, workerId }
+            const call = async (messages, override = {}) => {
+                if (!workers.length) return { ok: false, error: '没有可用的翻译器' };
+                const worker = override.worker || cycle();
+                const model = worker.model;
+                const msgs = messages.map((m) => ({ ...m }));
+
+                const body = {
+                    model,
+                    messages: msgs,
+                    temperature,
+                };
+
+                // 输出上限：设了才发（默认 0 = 不发送，交给上游默认值）。
+                // 思考型模型（deepseek 新版 / o 系列）会把思考算进 max_tokens，固定给 8192 时
+                // 思考吃满预算、正文为空（finish_reason=length）——站点自己的翻译也不发这个字段
+                const maxTokens = Number(options.maxTokens) || 0;
+                if (maxTokens > 0) {
+                    // OpenAI O 系列 / api.openai.com：改用 max_completion_tokens
+                    if ((worker.endpoint || '').startsWith('https://api.openai.com') || RE_O_SERIES.test(model || '')) {
+                        body.max_completion_tokens = maxTokens;
+                    } else {
+                        body.max_tokens = maxTokens;
+                    }
+                }
+                // qwen3：关闭思考时追加 /no_think
+                if (RE_QWEN3.test(model || '') && thinking !== true) {
+                    const last = msgs[msgs.length - 1];
+                    if (last && !String(last.content).includes('/no_think')) last.content += '\n/no_think';
+                }
+
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), timeoutMs);
+                try {
+                    const res = await fetchImpl(buildChatUrl(worker.endpoint), {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': 'Bearer ' + (worker.key || 'no_key_required'),
+                            'Accept': 'application/json',
+                        },
+                        body: JSON.stringify(body),
+                        signal: controller.signal,
+                    });
+                    if (!res.ok) {
+                        let bodyText = '';
+                        try { bodyText = String(await res.text()).slice(0, 2000); } catch (e) { }
+                        let retryAfterMs = 0;
+                        const header = res.headers.get('retry-after');
+                        if (header && !Number.isNaN(Number(header))) retryAfterMs = Math.max(1, Math.min(300, Number(header))) * 1000;
+                        if (retryAfterMs === 0) {
+                            const m = /retry[-\s]?after[\s:=]*(\d+(?:\.\d+)?)/i.exec(bodyText);
+                            if (m) retryAfterMs = Math.min(300, Number(m[1])) * 1000;
+                        }
+                        // 上游被别的任务占用 / 限流：给出的等待往往短于任务本身耗时，加个下限
+                        if (/busy|cooldown|rate.?limit/i.test(bodyText)) retryAfterMs = Math.max(retryAfterMs, 30000);
+                        else if (retryAfterMs === 0 && (res.status === 429 || res.status === 503)) retryAfterMs = 30000;
+                        markFail(worker);
+                        // 带上上游返回的正文片段（401/402/404 这些只能靠它分辨原因）
+                        const detail = bodyText.replace(/\s+/g, ' ').trim().slice(0, 180);
+                        return { ok: false, status: res.status, error: `HTTP ${res.status}${detail ? '：' + detail : ''}`, retryAfterMs, workerId: worker.id };
+                    }
+                    const data = await res.json();
+                    const message = (data.choices && data.choices[0] && data.choices[0].message) || {};
+                    const finishReason = (data.choices && data.choices[0] && data.choices[0].finish_reason) || '';
+                    const reasoningLen = typeof message.reasoning_content === 'string' ? message.reasoning_content.length : 0;
+                    if (reasoningLen > 0) {
+                        const { result } = splitThink(message.content || '');
+                        markOk(worker);
+                        return { ok: true, content: result !== '' ? result : (message.content || ''), think: message.reasoning_content, finishReason, reasoningLen, workerId: worker.id };
+                    }
+                    markOk(worker);
+                    return { ok: true, content: message.content || '', finishReason, reasoningLen, workerId: worker.id };
+                } catch (e) {
+                    markFail(worker);
+                    const aborted = e && (e.name === 'AbortError' || /abort/i.test(String(e.message || e)));
+                    // 超时被放弃时，上游可能仍在处理这个任务：按超时预算的一部分冷却，避免立刻撞上"占用中"
+                    const retryAfterMs = aborted ? Math.min(300000, Math.max(15000, timeoutMs / 4)) : 10000;
+                    return { ok: false, error: aborted ? '请求超时' : String((e && e.message) || e), retryAfterMs, workerId: worker.id };
+                } finally {
+                    clearTimeout(timer);
+                }
+            };
+
+            return { call };
+        };
+
+        // ---------- 任务编排（NERAnalyzer.start 的轮次收敛） ----------
+
+        // runJob({ lines, callLLM, options, onProgress, shouldStop, cache })
+        //   callLLM(messages) -> { ok, content, error, retryAfterMs }
+        //   cache: { namespace, get(key), put(key, value) } —— 分块结果缓存，用于刷新后续跑
+        //   返回 { glossary, chunksDone, chunksFailed, rounds }
+        const runJob = async ({ lines, callLLM, options = {}, onProgress, shouldStop, cache }) => {
+            const budget = options.budgetChars || 3000;
+            const maxRounds = options.maxRounds || 3;
+            const concurrency = Math.max(1, options.concurrency || 2);
+            const limiter = new TaskLimiter(options.rps || concurrency, options.rpm || 0);
+            const allEntries = [];
+            const processedLines = [];
+            let pending = lines.slice();
+            let chunksDone = 0;
+            let chunksFailed = 0;
+            let round = 0;
+            GlossaryLog.info('提取开始', { lines: lines.length, maxRounds, budget, concurrency, rpm: options.rpm || 0, cache: !!cache });
+
+            // 失败后的全局冷却（上游限流 / 被放弃的任务可能仍在上游运行）
+            let cooldownUntil = 0;
+            const waitCooldown = async () => {
+                while (Date.now() < cooldownUntil) {
+                    if (shouldStop && shouldStop()) return false;
+                    await new Promise((r) => setTimeout(r, Math.min(500, cooldownUntil - Date.now())));
+                }
+                return true;
+            };
+
+            const report = (extra) => onProgress && onProgress({
+                round, maxRounds, chunksDone, chunksFailed,
+                pendingLines: pending.length, totalLines: lines.length,
+                coveredLines: processedLines.length, ...extra,
+            });
+
+            while (pending.length > 0 && round < maxRounds) {
+                if (shouldStop && shouldStop()) break;
+                // 第 1、2 轮用同一个预算（瞬时失败原样再来一次，能不拆就不拆），第 3 轮起才减半
+                const roundBudget = Math.max(200, Math.floor(budget / Math.pow(2, Math.max(0, round - 1))));
+                const chunks = makeChunks(pending, roundBudget);
+                const failedLines = [];
+                const attempted = new Set();
+                let cursor = 0;
+
+                report({ phase: 'round-start', totalChunks: chunks.length });
+                GlossaryLog.info(`第 ${round + 1}/${maxRounds} 轮开始`, { chunks: chunks.length, budget: roundBudget, pendingLines: pending.length });
+
+                const worker = async () => {
+                    while (true) {
+                        if (shouldStop && shouldStop()) return;
+                        const myIndex = cursor;
+                        cursor += 1;
+                        if (myIndex >= chunks.length) return;
+                        const chunk = chunks[myIndex];
+                        attempted.add(myIndex);
+                        const cacheKey = cache && cache.namespace ? `${cache.namespace}/r${round}/c${chunk.index}` : null;
+
+                        // 命中缓存：直接复用该块结果（刷新/重开页面后续跑的核心）
+                        // 键里只有「轮次 + 序号」，不含分块预算：改了分块字数或轮次预算映射后，
+                        // 同一个键会对应到不同的块内容 → 命中也要核对行，错位的记录按未命中处理
+                        if (cacheKey) {
+                            const hit = await cache.get(cacheKey).catch(() => undefined);
+                            if (hit && Array.isArray(hit.entries) && linesMatch(hit.lines, chunk.lines)) {
+                                allEntries.push(...hit.entries);
+                                processedLines.push(...chunk.lines);
+                                chunksDone += 1;
+                                GlossaryLog.debug('缓存命中', { round: round + 1, chunk: chunk.index, lines: chunk.lines.length });
+                                report({ phase: 'chunk-cached', chunkIndex: chunk.index });
+                                continue;
+                            }
+                        }
+
+                        const chunkT0 = Date.now();
+                        await limiter.wait();
+                        if (!(await waitCooldown())) { failedLines.push(...chunk.lines); return; }
+                        const messages = buildMessages({ chunkText: chunk.text, targetLanguage: options.targetLanguage || '中文' });
+                        let result;
+                        try {
+                            result = await callLLM(messages);
+                        } catch (e) {
+                            result = { ok: false, error: String((e && e.message) || e) };
+                        }
+                        // 上游限流降级时可能返回 200 但内容为空：按失败处理，否则整块会被标记完成却提取不到任何术语
+                        const contentOk = result && result.ok && String(result.content || '').trim() !== '';
+                        if (contentOk) {
+                            const parsed = parseResponse(result.content || '');
+                            for (const entry of parsed.entries) allEntries.push(entry);
+                            processedLines.push(...chunk.lines);
+                            chunksDone += 1;
+                            GlossaryLog.debug('块完成', {
+                                round: round + 1, chunk: chunk.index, worker: result && result.workerId,
+                                ms: Date.now() - chunkT0, entries: parsed.entries.length, chars: chunk.text.length,
+                            });
+                            if (cacheKey) await cache.put(cacheKey, { entries: parsed.entries, lines: chunk.lines, at: Date.now() }).catch(() => { });
+                        } else {
+                            failedLines.push(...chunk.lines);
+                            chunksFailed += 1;
+                            if (result && result.retryAfterMs) {
+                                cooldownUntil = Math.max(cooldownUntil, Date.now() + result.retryAfterMs);
+                                report({ phase: 'cooldown', waitMs: result.retryAfterMs });
+                            }
+                            const reason = result && result.ok
+                                ? `上游返回空内容（finish_reason=${(result && result.finishReason) || '?'}，思考 ${(result && result.reasoningLen) || 0} 字${result && result.finishReason === 'length' ? '，输出预算被思考吃满：把「输出上限」设 0（不发送）或调大' : ''}）`
+                                : ((result && result.error) || '未知错误');
+                            GlossaryLog.warn('chunk failed: ' + reason, {
+                                round: round + 1, chunk: chunk.index, worker: result && result.workerId,
+                                ms: Date.now() - chunkT0, cooldownMs: (result && result.retryAfterMs) || 0,
+                            });
+                        }
+                        report({ phase: 'chunk-done', chunkIndex: chunk.index });
+                    }
+                };
+
+                await Promise.all(Array.from({ length: Math.min(concurrency, chunks.length) }, () => worker()));
+
+                // 停止时会有块完全没轮到（worker 在取块前就退出了）：这些行也要还给 pending，
+                // 否则「待 N 行」会显示成 0，看起来像是全都处理完了
+                for (let i = 0; i < chunks.length; i += 1) {
+                    if (!attempted.has(i)) failedLines.push(...chunks[i].lines);
+                }
+                pending = failedLines;
+                round += 1;
+            }
+
+            const glossary = postProcess(allEntries, processedLines);
+            report({ phase: 'done' });
+            GlossaryLog.info('提取结束', {
+                entries: glossary.length, chunksDone, chunksFailed, rounds: round,
+                pendingLines: pending.length, processedLines: processedLines.length, dropped: { ...lastPostDrop },
+            });
+            return { glossary, chunksDone, chunksFailed, rounds: round, pendingLines: pending.length, processedLines, dropped: { ...lastPostDrop } };
+        };
+
+        // 导出
+        return {
+            // 文本工具
+            normalize, cleanRuby, isPunctuation, splitByPunctuation, displayLength,
+            languageFilter, ruleFilter, splitLines, makeChunks,
+            // 解析
+            repairJsonLine, splitThink, parseResponse,
+            // 提示词
+            PROMPT_PREFIX, PROMPT_BASE, PROMPT_SUFFIX, buildPrompt, buildMessages,
+            // 审计（再次筛选）
+            AUDIT_RULES, buildAuditPrompt, parseAuditResponse, auditGlossary,
+            // 后处理
+            postProcess, findBest, searchForContext, linesMatch, uncoveredLines,
+            suspectReasons, postDrop: () => ({ ...lastPostDrop }),
+            // 请求 / 编排
+            TaskLimiter, buildChatUrl, createRequester, runJob,
+        };
+    })();
+    // ==GlossaryEngine-END==
+
+    // -----------------------------------
+    // Glossary DB (IndexedDB: ntr-glossary，存队列/分块结果/快照)
+    // -----------------------------------
+    // ==GlossaryDB-START==
+    const GlossaryDB = (() => {
+        const DB_NAME = 'ntr-glossary';
+        const VERSION = 1;
+        let dbPromise = null;
+
+        const open = () => {
+            if (dbPromise) return dbPromise;
+            dbPromise = new Promise((resolve, reject) => {
+                const req = indexedDB.open(DB_NAME, VERSION);
+                req.onupgradeneeded = () => {
+                    const db = req.result;
+                    if (!db.objectStoreNames.contains('jobs')) db.createObjectStore('jobs', { keyPath: 'id' });
+                    if (!db.objectStoreNames.contains('chunks')) db.createObjectStore('chunks', { keyPath: 'id' });
+                    if (!db.objectStoreNames.contains('snapshots')) db.createObjectStore('snapshots', { keyPath: 'id' });
+                };
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            });
+            return dbPromise;
+        };
+
+        const run = async (store, mode, fn) => {
+            const db = await open();
+            return new Promise((resolve, reject) => {
+                const t = db.transaction(store, mode);
+                const s = t.objectStore(store);
+                let request;
+                try {
+                    request = fn(s);
+                } catch (e) {
+                    reject(e);
+                    return;
+                }
+                t.oncomplete = () => resolve(request ? request.result : undefined);
+                t.onerror = () => reject(t.error);
+                t.onabort = () => reject(t.error);
+            });
+        };
+
+        // 请求持久化存储，避免被浏览器按配额回收
+        const requestPersist = async () => {
+            try {
+                if (navigator.storage && navigator.storage.persist) return await navigator.storage.persist();
+            } catch (e) { }
+            return false;
+        };
+
+        return {
+            put: (store, value) => run(store, 'readwrite', (s) => s.put(value)),
+            get: (store, key) => run(store, 'readonly', (s) => s.get(key)),
+            getAll: (store) => run(store, 'readonly', (s) => s.getAll()),
+            delete: (store, key) => run(store, 'readwrite', (s) => s.delete(key)),
+            clear: (store) => run(store, 'readwrite', (s) => s.clear()),
+            requestPersist,
+        };
+    })();
+    // ==GlossaryDB-END==
+
+    // -----------------------------------
+    // Glossary Targets (网页小说 / 本地卷 的术语表读写)
+    // -----------------------------------
+    const GlossaryTargets = (() => {
+        const openVolumesDB = () => new Promise((resolve, reject) => {
+            // 与站点 stores/local/LocalVolumeDao.ts 相同：DB volumes v2
+            const req = indexedDB.open('volumes', 2);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+
+        const reqPromise = (request) => new Promise((resolve, reject) => {
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+
+        const targetKey = (target) => {
+            if (target.kind === 'web') return `web:${target.providerId}/${target.novelId}`;
+            if (target.kind === 'wenku') return `wenku:${target.novelId}`;
+            if (target.kind === 'local') return `local:${target.volumeId}`;
+            return 'unknown';
+        };
+
+        const describe = (target) => {
+            if (target.kind === 'web') return `网页小说 ${target.providerId}/${target.novelId}`;
+            if (target.kind === 'wenku') return `文库小说 ${target.novelId}`;
+            if (target.kind === 'local') return `本地卷 ${target.volumeId}`;
+            return '未知目标';
+        };
+
+        // 读取现有术语表
+        const loadGlossary = async (target) => {
+            if (target.kind === 'web') {
+                const res = await script.fetch(`${window.location.origin}/api/novel/${target.providerId}/${target.novelId}`);
+                if (!res.ok) throw new Error(`读取术语表失败: HTTP ${res.status}`);
+                const data = await res.json();
+                return data.glossary || {};
+            }
+            if (target.kind === 'wenku') {
+                const res = await script.fetch(`${window.location.origin}/api/wenku/${target.novelId}`);
+                if (!res.ok) throw new Error(`读取术语表失败: HTTP ${res.status}`);
+                const data = await res.json();
+                return data.glossary || {};
+            }
+            if (target.kind === 'local') {
+                const db = await openVolumesDB();
+                const meta = await reqPromise(db.transaction('metadata', 'readonly').objectStore('metadata').get(target.volumeId));
+                if (meta === undefined) throw new Error('本地卷不存在');
+                return meta.glossary || {};
+            }
+            throw new Error('未知目标');
+        };
+
+        // 写入术语表（网页端为全量替换语义，必须自行合并；本地卷更新 glossaryId）
+        const saveGlossary = async (target, glossary) => {
+            if (target.kind === 'web' || target.kind === 'wenku') {
+                const url = target.kind === 'web'
+                    ? `${window.location.origin}/api/novel/${target.providerId}/${target.novelId}/glossary`
+                    : `${window.location.origin}/api/wenku/${target.novelId}/glossary`;
+                const res = await script.fetch(url, true, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(glossary),
+                });
+                if (!res.ok) throw new Error(`写入失败: HTTP ${res.status}`);
+                return { refresh: false };
+            }
+            if (target.kind === 'local') {
+                const db = await openVolumesDB();
+                const tx = db.transaction('metadata', 'readwrite');
+                const store = tx.objectStore('metadata');
+                const meta = await reqPromise(store.get(target.volumeId));
+                if (meta === undefined) throw new Error('本地卷不存在');
+                meta.glossary = glossary;
+                // 与站点 LocalVolumeRepository.updateGlossary 一致：更换 glossaryId 以标记过期
+                meta.glossaryId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+                await reqPromise(store.put(meta));
+                await new Promise((resolve) => { tx.oncomplete = resolve; tx.onerror = resolve; });
+                return { refresh: true };
+            }
+            throw new Error('未知目标');
+        };
+
+        // 快照：每次写入前把「写入前」的术语表存成一个版本，用于回滚
+        const SNAPSHOT_KEEP = 20;
+
+        const snapshotMatch = (record, key) => !!record && (record.key === key || (record.key === undefined && record.id === key));
+
+        // 每个目标只保留最近 SNAPSHOT_KEEP 个版本
+        const pruneSnapshots = async (key) => {
+            const all = await GlossaryDB.getAll('snapshots');
+            const mine = (all || []).filter((r) => snapshotMatch(r, key));
+            if (mine.length <= SNAPSHOT_KEEP) return;
+            mine.sort((a, b) => (b.createAt || 0) - (a.createAt || 0));
+            for (const record of mine.slice(SNAPSHOT_KEEP)) {
+                await GlossaryDB.delete('snapshots', record.id);
+            }
+        };
+
+        const takeSnapshot = async (target, glossary, note) => {
+            const key = targetKey(target);
+            const createAt = Date.now();
+            const record = { id: `${key}#${createAt}`, key, target, glossary, note: note || '', createAt };
+            await GlossaryDB.put('snapshots', record);
+            await pruneSnapshots(key);
+            return record;
+        };
+
+        // 版本列表（新→旧）。兼容早期单条快照记录（id 就是 targetKey、没有 key 字段）
+        const listSnapshots = async (target) => {
+            const key = targetKey(target);
+            const all = await GlossaryDB.getAll('snapshots');
+            return (all || [])
+                .filter((r) => snapshotMatch(r, key))
+                .sort((a, b) => (b.createAt || 0) - (a.createAt || 0));
+        };
+
+        // 兼容旧接口：取最近一个版本
+        const getSnapshot = async (target) => (await listSnapshots(target))[0];
+
+        const rollback = async (target, snapshotId) => {
+            const snap = snapshotId
+                ? await GlossaryDB.get('snapshots', snapshotId)
+                : await getSnapshot(target);
+            if (!snap) throw new Error('没有可用的快照');
+            const current = await loadGlossary(target);
+            await takeSnapshot(target, current, '回滚前自动快照');
+            await saveGlossary(target, snap.glossary);
+            return snap;
+        };
+
+        // 本地卷：读取全文（chapter store 按 toc 顺序拼接段落）
+        const loadLocalVolumeText = async (volumeId) => {
+            const db = await openVolumesDB();
+            const meta = await reqPromise(db.transaction('metadata', 'readonly').objectStore('metadata').get(volumeId));
+            if (meta === undefined) throw new Error('本地卷不存在');
+            const chapters = await reqPromise(db.transaction('chapter', 'readonly').objectStore('chapter').index('byVolumeId').getAll(volumeId));
+            // 章节记录的 chapterId 编码在 id 里（`${volumeId}/${chapterId}`），记录本身没有 chapterId 字段
+            const byId = new Map((chapters || []).map((c) => [String(c.id).slice(volumeId.length + 1), c]));
+            let ordered = meta.toc && meta.toc.length > 0
+                ? meta.toc.map((it) => byId.get(String(it.chapterId))).filter(Boolean)
+                : (chapters || []);
+            if (ordered.length === 0) ordered = chapters || [];
+            const text = ordered.map((c) => (c.paragraphs || []).join('\n')).join('\n');
+            return { meta, text };
+        };
+
+        const listLocalVolumes = async () => {
+            const db = await openVolumesDB();
+            const metas = await reqPromise(db.transaction('metadata', 'readonly').objectStore('metadata').getAll());
+            return (metas || []).sort((a, b) => (b.createAt || 0) - (a.createAt || 0)).map((m) => ({
+                id: m.id,
+                createAt: m.createAt,
+                favoriedId: m.favoredId,
+                glossaryCount: Object.keys(m.glossary || {}).length,
+                chapters: (m.toc || []).length,
+            }));
+        };
+
+        return { targetKey, describe, loadGlossary, saveGlossary, takeSnapshot, listSnapshots, getSnapshot, rollback, loadLocalVolumeText, listLocalVolumes };
+    })();
+
+    // -----------------------------------
+    // Glossary UI (预览-合并-diff 弹层 + 进度浮窗)
+    // -----------------------------------
+    // ==GlossaryUI-START==
+    const GlossaryUI = (() => {
+        const CSS_ID = 'ntr-glossary-css';
+        // 「次数过滤」的阈值记忆（弹层跨模块共用，所以不挂在某个模块的设置里）
+        const COUNT_MIN_KEY = 'ntr-glossary-count-min';
+        const readCountMin = () => {
+            try {
+                const v = Number(localStorage.getItem(COUNT_MIN_KEY));
+                return Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+            } catch (e) { return 0; }
+        };
+        const saveCountMin = (v) => {
+            try {
+                if (v > 0) localStorage.setItem(COUNT_MIN_KEY, String(v));
+                else localStorage.removeItem(COUNT_MIN_KEY);
+            } catch (e) { }
+        };
+        // 审计判废类别的可读名字（提示词里的编号 → 展示文案）
+        const AUDIT_CATEGORY = {
+            '1': '描述性短语',
+            '2': '通用名词',
+            '3': '一次性专名',
+            '4': '称呼/符号',
+            '5': '提取错误',
+        };
+        const AUDIT_BATCH_SIZE = 300;   // 每个审计请求最多带多少条（条数 ÷ 这个值 = 请求数）
+        const auditTitle = (audit) => {
+            if (!audit) return '';
+            const cat = AUDIT_CATEGORY[String(audit.why || '').trim()] || `第 ${audit.why} 类`;
+            return audit.note ? `${cat}：${audit.note}` : cat;
+        };
+        const ensureStyles = () => {
+            if (document.getElementById(CSS_ID)) return;
+            const style = document.createElement('style');
+            style.id = CSS_ID;
+            style.textContent = `
+.ntr-g-overlay { position: fixed; inset: 0; z-index: 999999; background: rgba(0,0,0,0.72); display: flex; align-items: center; justify-content: center; font-family: Arial, "Microsoft YaHei", sans-serif; }
+.ntr-g-overlay .ntr-g-card { background: #1E1E1E; color: #CCC; width: min(1180px, 96vw); height: min(88vh, 900px); border: 1px solid #333; border-radius: 10px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 8px 40px rgba(0,0,0,0.6); }
+.ntr-g-overlay .ntr-g-head { padding: 10px 14px; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.ntr-g-overlay .ntr-g-title { font-size: 15px; color: #EEE; font-weight: bold; }
+.ntr-g-overlay .ntr-g-stats { font-size: 12px; color: #999; }
+.ntr-g-overlay .ntr-g-eta { margin-left: auto; color: #9CC7A8; }
+.ntr-g-overlay .ntr-g-toolbar { padding: 8px 14px; border-bottom: 1px solid #2a2a2a; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; }
+.ntr-g-overlay .ntr-g-tab { padding: 3px 10px; border: 1px solid #3a3a3a; border-radius: 12px; cursor: pointer; color: #AAA; background: #262626; }
+.ntr-g-overlay .ntr-g-tab.active { background: #2E5A2E; border-color: #4a8a4a; color: #DFD; }
+.ntr-g-overlay input[type=text], .ntr-g-overlay input[type=number] { background: #232323; border: 1px solid #3a3a3a; color: #CCC; border-radius: 4px; padding: 3px 8px; }
+.ntr-g-overlay .ntr-g-body { flex: 1; overflow: auto; }
+.ntr-g-overlay table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ntr-g-overlay th { position: sticky; top: 0; background: #292929; color: #BBB; text-align: left; padding: 6px 8px; border-bottom: 1px solid #3a3a3a; z-index: 1; }
+.ntr-g-overlay td { padding: 4px 8px; border-bottom: 1px solid #242424; vertical-align: middle; }
+.ntr-g-overlay tr.status-add td:first-child { box-shadow: inset 3px 0 0 #3f9f3f; }
+.ntr-g-overlay tr.status-conflict td:first-child { box-shadow: inset 3px 0 0 #d0a020; }
+.ntr-g-overlay tr.status-same td:first-child { box-shadow: inset 3px 0 0 #555; }
+.ntr-g-overlay tr.status-existing td:first-child { box-shadow: inset 3px 0 0 #3860a0; }
+.ntr-g-overlay .ntr-g-badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #333; color: #CCC; white-space: nowrap; }
+.ntr-g-overlay .ntr-g-badge.add { background: #2E5A2E; color: #CFC; }
+.ntr-g-overlay .ntr-g-badge.conflict { background: #5A4A1E; color: #FEC; }
+.ntr-g-overlay .ntr-g-badge.same { background: #333; }
+.ntr-g-overlay .ntr-g-badge.existing { background: #24384F; color: #CDF; }
+.ntr-g-overlay .ntr-g-badge.partial { background: #5A2E2E; color: #FCC; }
+.ntr-g-overlay .ntr-g-foot { padding: 10px 14px; border-top: 1px solid #333; display: flex; gap: 10px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+.ntr-g-overlay .ntr-g-btn { background: #2f2f2f; color: #DDD; border: 1px solid #444; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+.ntr-g-overlay .ntr-g-btn:hover { background: #3a3a3a; }
+.ntr-g-overlay .ntr-g-btn.primary { background: #2E5A2E; border-color: #4a8a4a; color: #EFE; }
+.ntr-g-overlay .ntr-g-btn.primary:hover { background: #386b38; }
+.ntr-g-overlay .ntr-g-btn.danger { background: #5A2E2E; border-color: #8a4a4a; }
+.ntr-g-overlay .ntr-g-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.ntr-g-overlay .ntr-g-warn { font-size: 12px; color: #E8C46A; flex: 1; }
+.ntr-g-overlay th.ntr-g-sortable { cursor: pointer; user-select: none; }
+.ntr-g-overlay th.ntr-g-sortable:hover { color: #EEE; background: #313131; }
+.ntr-g-overlay .ntr-g-sort-mark { margin-left: 4px; color: #7ab87a; font-size: 10px; }
+.ntr-g-overlay .ntr-g-types { padding: 6px 14px; border-bottom: 1px solid #2a2a2a; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; color: #AAA; }
+.ntr-g-overlay .ntr-g-types-lead { color: #888; margin-right: 2px; }
+.ntr-g-overlay .ntr-g-type-item { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; background: #262626; border: 1px solid #3a3a3a; border-radius: 12px; padding: 2px 9px; }
+.ntr-g-overlay .ntr-g-type-item:hover { background: #303030; }
+.ntr-g-overlay .ntr-g-type-item input { margin: 0; }
+.ntr-g-overlay .ntr-g-tab-eof { margin-left: 0; }
+.ntr-g-overlay .ntr-g-filter-btn.on { border-color: #7ab87a; color: #CFC; }
+.ntr-g-overlay .ntr-g-popover { position: absolute; top: calc(100% + 6px); right: 0; z-index: 5; width: 360px; background: #232323; border: 1px solid #3d3d3d; border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.55); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.ntr-g-overlay .ntr-g-pop-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: #BBB; }
+.ntr-g-overlay .ntr-g-pop-row input[type=number] { width: 62px; }
+.ntr-g-overlay .ntr-g-pop-hint { font-size: 11px; color: #888; }
+.ntr-g-overlay .ntr-g-pop-sep { height: 1px; background: #3a3a3a; margin: 2px 0; }
+.ntr-g-overlay .ntr-g-pop-title { font-size: 11px; color: #888; }
+.ntr-g-overlay tr.ntr-g-row-filtered td { opacity: 0.42; }
+.ntr-g-overlay .ntr-g-badge.lowcount { background: #333; color: #999; }
+.ntr-g-overlay .ntr-g-badge.audit { background: #4A3A1E; color: #F5D08A; }
+.ntr-g-overlay .ntr-g-badge.suspect { background: #24384F; color: #BFD8FF; }
+#ntr-glossary-status { position: fixed; right: 20px; top: 70px; z-index: 999998; background: #1E1E1E; color: #CCC; border: 1px solid #333; border-radius: 8px; padding: 10px 14px; font-family: Arial, "Microsoft YaHei", sans-serif; font-size: 12px; width: 320px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+#ntr-glossary-status .ntr-gs-line { margin-bottom: 6px; }
+#ntr-glossary-status .ntr-gs-bar { height: 6px; background: #333; border-radius: 3px; overflow: hidden; margin: 6px 0; }
+#ntr-glossary-status .ntr-gs-bar > div { height: 100%; background: #4a8a4a; width: 0%; transition: width 0.2s; }
+`;
+            document.head.appendChild(style);
+        };
+
+        // 对比现有术语表，生成行与统计
+        // suspect：命中《术语表使用指南》里那几类形态（过长/像短语/带敬称/含标点）的标记，只提示不删
+        const computeDiff = (entries, existing) => {
+            const rows = entries.map((entry) => {
+                const has = Object.prototype.hasOwnProperty.call(existing, entry.src);
+                let status = 'add';
+                if (has && existing[entry.src] === entry.dst) status = 'same';
+                else if (has) status = 'conflict';
+                const suspect = GlossaryEngine.suspectReasons(entry.src);
+                return { ...entry, existing: has ? existing[entry.src] : undefined, status, suspect };
+            });
+            const covered = new Set(entries.map((e) => e.src));
+            Object.keys(existing).forEach((src) => {
+                if (!covered.has(src)) rows.push({ src, dst: existing[src], type: '', count: 0, status: 'existing' });
+            });
+            const order = { add: 0, conflict: 1, same: 2, existing: 3 };
+            rows.sort((a, b) => (order[a.status] - order[b.status]) || (b.count - a.count));
+            const stats = {
+                total: entries.length,
+                add: rows.filter((r) => r.status === 'add').length,
+                conflict: rows.filter((r) => r.status === 'conflict').length,
+                same: rows.filter((r) => r.status === 'same').length,
+                existing: rows.filter((r) => r.status === 'existing').length,
+            };
+            return { rows, stats };
+        };
+
+        const fmtText = (glossary) => Object.keys(glossary).map((k) => `${k} => ${glossary[k]}`).join('\n');
+        const fmtJson = (glossary) => JSON.stringify(glossary, null, 2);
+
+        const copyText = async (text) => {
+            try {
+                await navigator.clipboard.writeText(text);
+                NotificationUtils.showSuccess('已复制到剪贴板');
+            } catch (e) {
+                // 剪贴板不可用时退回 textarea 选择
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                document.body.appendChild(ta);
+                ta.select();
+                try { document.execCommand('copy'); NotificationUtils.showSuccess('已复制到剪贴板'); }
+                catch (err) { NotificationUtils.showError('复制失败'); }
+                ta.remove();
+            }
+        };
+
+        const downloadText = (filename, text) => {
+            const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 500);
+        };
+
+        // 进度浮窗：返回 { update(text, ratio), close() }
+        const status = (titleText, { onStop } = {}) => {
+            ensureStyles();
+            let box = document.getElementById('ntr-glossary-status');
+            if (box) box.remove();
+            box = document.createElement('div');
+            box.id = 'ntr-glossary-status';
+            const title = document.createElement('div');
+            title.className = 'ntr-gs-line';
+            title.style.color = '#EEE';
+            title.textContent = titleText;
+            const line = document.createElement('div');
+            line.className = 'ntr-gs-line';
+            line.textContent = '准备中…';
+            const bar = document.createElement('div');
+            bar.className = 'ntr-gs-bar';
+            const fill = document.createElement('div');
+            bar.appendChild(fill);
+            box.appendChild(title);
+            box.appendChild(line);
+            box.appendChild(bar);
+            if (onStop) {
+                const btn = document.createElement('button');
+                btn.className = 'ntr-g-btn';
+                btn.textContent = '停止';
+                btn.style.marginTop = '4px';
+                btn.onclick = () => { onStop(); btn.disabled = true; btn.textContent = '正在停止…'; };
+                box.appendChild(btn);
+            }
+            document.body.appendChild(box);
+            return {
+                update: (text, ratio) => {
+                    line.textContent = text;
+                    if (ratio !== undefined) fill.style.width = Math.max(0, Math.min(100, ratio * 100)) + '%';
+                },
+                close: () => box.remove(),
+            };
+        };
+
+        // 预览-合并-diff 弹层
+        // options: { title, target, entries, existing, mode: 'preview'|'merge'|'restore', onWrite(glossary, rows), onRestore(), enableImport, confirmRestore, auditConcurrency }
+        // restore 模式：entries = 目标版本的术语表，existing = 当前术语表；新增/覆盖/删除 就是回滚的影响面
+        // auditConcurrency：审计分几批并行发（只影响提示文案，真正的并行在 auditGlossary 里）
+        const open = ({ title, target, entries, existing, mode = 'preview', onWrite, onRestore, enableImport = false, confirmRestore = true, onAudit, auditConcurrency = 1 }) => {
+            ensureStyles();
+            const old = document.getElementById('ntr-glossary-overlay');
+            if (old) old.remove();
+
+            const state = {
+                filter: 'all',
+                query: '',
+                selected: new Set(),
+                dsts: {},
+                conflictPolicy: 'keep',   // keep = 保留现有；override = 采用新提取
+                source: '',               // 从文件载入时记录文件名
+                sortKey: '',              // '' = 原始顺序；否则 src/dst/count/type/existing/status
+                sortDir: 1,               // 1 = 升序，-1 = 降序
+                countMin: readCountMin(), // 次数过滤：0 = 不过滤（localStorage 记忆）
+                showFiltered: false,      // 显示被次数过滤掉的行（灰色、不可勾选）
+                auditBusy: false,         // 正在跑「再次筛选」
+                auditNote: '',            // 上次筛选的结果提示
+                history: [],              // 撤销栈：{selected:Set, audits:Map} 快照（上限 30）
+                auditBaseline: null,      // 审计开始前的快照（撤销清洗用）
+            };
+            let rows = [];
+            let stats = { total: 0, add: 0, conflict: 0, same: 0, existing: 0 };
+            let rebuildTypes = () => { };   // 类型复选框那行（DOM 建好后才有实现）
+            // 次数过滤：只作用于真实提取出来的条目（有 count 的新增/冲突/相同）。
+            // 「仅已有」行与 restore 模式（快照没有次数，count 一律是 0）不参与过滤，否则会被静默藏掉。
+            const isLowCount = (row) => mode !== 'restore' && state.countMin > 0
+                && row.status !== 'existing' && typeof row.count === 'number' && row.count < state.countMin;
+            const lowCountRows = () => rows.filter(isLowCount);
+            const auditRows = () => rows.filter((row) => row.audit);
+
+            // ---- 撤销：勾选 + 标记 的快照栈（任何改动前压栈，上限 30 步） ----
+            const snapshot = () => ({
+                selected: new Set(state.selected),
+                audits: new Map(rows.filter((row) => row.audit).map((row) => [row._index, row.audit])),
+            });
+            const pushHistory = () => {
+                state.history.push(snapshot());
+                if (state.history.length > 30) state.history.shift();
+            };
+            const restoreSnapshot = (snap) => {
+                state.selected = new Set(snap.selected);
+                rows.forEach((row) => {
+                    if (snap.audits.has(row._index)) row.audit = snap.audits.get(row._index);
+                    else delete row.audit;
+                });
+            };
+            const undo = () => {
+                const snap = state.history.pop();
+                if (!snap) return false;
+                restoreSnapshot(snap);
+                return true;
+            };
+            const setEntries = (list) => {
+                const diff = computeDiff(list, existing);
+                rows = diff.rows;
+                stats = diff.stats;
+                state.selected.clear();
+                state.dsts = {};
+                rows.forEach((row, i) => {
+                    row._index = i;
+                    state.dsts[i] = row.dst;
+                    // 默认勾上「新增」；带「建议删」标记的不默认勾选（先打标、写入由用户确认）
+                    if (mode === 'merge' && row.status === 'add' && !row.partial && !row.audit) state.selected.add(i);
+                });
+                rebuildTypes();
+            };
+            setEntries(entries);
+
+            const overlay = document.createElement('div');
+            overlay.id = 'ntr-glossary-overlay';
+            overlay.className = 'ntr-g-overlay';
+
+            const card = document.createElement('div');
+            card.className = 'ntr-g-card';
+            overlay.appendChild(card);
+
+            // 头部
+            const head = document.createElement('div');
+            head.className = 'ntr-g-head';
+            const titleEl = document.createElement('div');
+            titleEl.className = 'ntr-g-title';
+            titleEl.textContent = title;
+            const statsEl = document.createElement('div');
+            statsEl.className = 'ntr-g-stats';
+            head.appendChild(titleEl);
+            head.appendChild(statsEl);
+            card.appendChild(head);
+
+            // 工具条
+            const toolbar = document.createElement('div');
+            toolbar.className = 'ntr-g-toolbar';
+            const tabDefs = mode === 'restore'
+                ? [['all', '全部'], ['add', '新增'], ['conflict', '覆盖'], ['same', '相同'], ['existing', '将删除']]
+                : [['all', '全部'], ['add', '新增'], ['conflict', '冲突'], ['same', '相同'], ['existing', '仅已有']];
+            const tabEls = {};
+            tabDefs.forEach(([key, label]) => {
+                const tab = document.createElement('span');
+                tab.className = 'ntr-g-tab' + (key === 'all' ? ' active' : '');
+                tab.textContent = label;
+                tab.onclick = () => {
+                    state.filter = key;
+                    Object.keys(tabEls).forEach((k) => tabEls[k].classList.toggle('active', k === key));
+                    render();
+                };
+                tabEls[key] = tab;
+                toolbar.appendChild(tab);
+            });
+            // 「建议删」页签：审计打过标才出现
+            let auditTab = null;
+            if (mode !== 'restore') {
+                auditTab = document.createElement('span');
+                auditTab.className = 'ntr-g-tab';
+                auditTab.id = 'ntr-g-audit-tab';
+                auditTab.style.display = 'none';
+                auditTab.textContent = '建议删 (0)';
+                auditTab.onclick = () => {
+                    state.filter = 'audit';
+                    Object.keys(tabEls).forEach((k) => tabEls[k].classList.toggle('active', k === 'audit'));
+                    render();
+                };
+                tabEls.audit = auditTab;
+                toolbar.appendChild(auditTab);
+            }
+            // 「可疑」页签：命中指南里那几类形态的条目（只提示，不自动删）；
+            // 纯新增的条目里也有（比如一次性的长短语），先看一眼再决定写不写
+            let suspectTab = null;
+            if (mode !== 'restore') {
+                suspectTab = document.createElement('span');
+                suspectTab.className = 'ntr-g-tab';
+                suspectTab.id = 'ntr-g-suspect-tab';
+                suspectTab.style.display = 'none';
+                suspectTab.textContent = '可疑 (0)';
+                suspectTab.title = '命中《术语表使用指南》里那几类形态（过长 / 像短语 / 带敬称 / 含标点）——只打标记，不删除、不改勾选';
+                suspectTab.onclick = () => {
+                    state.filter = 'suspect';
+                    Object.keys(tabEls).forEach((k) => tabEls[k].classList.toggle('active', k === 'suspect'));
+                    render();
+                };
+                tabEls.suspect = suspectTab;
+                toolbar.appendChild(suspectTab);
+            }
+            const searchInput = document.createElement('input');
+            searchInput.type = 'text';
+            searchInput.placeholder = '搜索 src / dst…';
+            searchInput.style.marginLeft = 'auto';
+            searchInput.style.width = '220px';
+            searchInput.oninput = () => { state.query = searchInput.value.trim(); render(); };
+            toolbar.appendChild(searchInput);
+
+            if (enableImport) {
+                const btnPick = document.createElement('button');
+                btnPick.className = 'ntr-g-btn';
+                btnPick.id = 'ntr-g-pick-file';
+                btnPick.textContent = '选择 JSON 文件';
+                btnPick.title = '支持 KWG 导出的 output.json（对象数组）/ output_autonovel.json（扁平 JSON）/ “原文 => 译文” 文本；也可以把文件直接拖进这个窗口';
+                btnPick.onclick = () => pickFile();
+                toolbar.appendChild(btnPick);
+            }
+
+            if (mode === 'merge') {
+                const selectAdd = document.createElement('button');
+                selectAdd.className = 'ntr-g-btn';
+                selectAdd.textContent = '全选新增/冲突';
+                selectAdd.onclick = () => { pushHistory(); selectableRows().forEach((r) => { if (r.status === 'add' || r.status === 'conflict') state.selected.add(r._index); }); render(); };
+                const selectNone = document.createElement('button');
+                selectNone.className = 'ntr-g-btn';
+                selectNone.textContent = '全不选';
+                selectNone.onclick = () => { pushHistory(); selectableRows().forEach((r) => state.selected.delete(r._index)); render(); };
+                const conflictBtn = document.createElement('button');
+                conflictBtn.className = 'ntr-g-btn';
+                conflictBtn.id = 'ntr-g-conflict-btn';
+                const syncConflictBtn = () => {
+                    // 标签直接写清「现在是什么状态」（之前只写两个选项来回换，容易看糊）
+                    conflictBtn.textContent = state.conflictPolicy === 'keep'
+                        ? '冲突：现在「保留现有」（点击改用新提取）'
+                        : '冲突：现在「采用新提取」（点击改回保留现有）';
+                    conflictBtn.title = state.conflictPolicy === 'keep'
+                        ? '冲突条目不写入（保留站点现有译文）；点一下改成写入新提取的译文'
+                        : '冲突条目会写入新提取的译文（需勾选）；点一下改成保留站点现有译文';
+                };
+                conflictBtn.onclick = () => {
+                    state.conflictPolicy = state.conflictPolicy === 'keep' ? 'override' : 'keep';
+                    // 策略切换时同步勾选：采用新提取 -> 勾上全部冲突行；保留现有 -> 取消勾选
+                    rows.forEach((row) => {
+                        if (row.status !== 'conflict') return;
+                        if (state.conflictPolicy === 'override') state.selected.add(row._index);
+                        else state.selected.delete(row._index);
+                    });
+                    syncConflictBtn();
+                    render();
+                };
+                syncConflictBtn();
+                toolbar.appendChild(selectAdd);
+                toolbar.appendChild(selectNone);
+                toolbar.appendChild(conflictBtn);
+            }
+
+            // ---------- 「筛选 ▾」浮出面板：次数过滤 / 再次筛选 / 撤销 ----------
+            let btnFilter = null;
+            let popover = null;
+            let syncFilterPanel = () => { };
+            if (mode !== 'restore') {
+                toolbar.style.position = 'relative';
+                btnFilter = document.createElement('button');
+                btnFilter.className = 'ntr-g-btn';
+                btnFilter.id = 'ntr-g-filter-btn';
+                toolbar.appendChild(btnFilter);
+
+                popover = document.createElement('div');
+                popover.className = 'ntr-g-popover';
+                popover.id = 'ntr-g-filter-popover';
+                popover.style.display = 'none';
+                toolbar.appendChild(popover);
+
+                const setPopoverOpen = (open_) => {
+                    popover.style.display = open_ ? 'flex' : 'none';
+                    syncFilterPanel();
+                };
+                const popHint = document.createElement('div');
+                popHint.className = 'ntr-g-pop-hint';
+                const popCountRow = document.createElement('div');
+                popCountRow.className = 'ntr-g-pop-row';
+                const labCount = document.createElement('span');
+                labCount.textContent = '次数 ≥';
+                labCount.title = '按出现次数（全文行数）过滤：低于该值的条目不显示、不写入；0 = 不过滤';
+                const countInput = document.createElement('input');
+                countInput.type = 'number';
+                countInput.id = 'ntr-g-count-min';
+                countInput.min = '0';
+                countInput.step = '1';
+                countInput.value = String(state.countMin);
+                countInput.title = labCount.title;
+                countInput.onchange = () => {
+                    const v = Math.max(0, Math.floor(Number(countInput.value) || 0));
+                    countInput.value = String(v);
+                    state.countMin = v;
+                    saveCountMin(v);
+                    render();
+                };
+                const showFilteredCb = document.createElement('input');
+                showFilteredCb.type = 'checkbox';
+                showFilteredCb.id = 'ntr-g-show-filtered';
+                const showFilteredLabel = document.createElement('label');
+                showFilteredLabel.style.cssText = 'display:inline-flex;align-items:center;gap:4px;cursor:pointer;';
+                const showFilteredTxt = document.createElement('span');
+                showFilteredLabel.appendChild(showFilteredCb);
+                showFilteredLabel.appendChild(showFilteredTxt);
+                showFilteredCb.onchange = () => { state.showFiltered = showFilteredCb.checked; render(); };
+                popCountRow.appendChild(labCount);
+                popCountRow.appendChild(countInput);
+                popCountRow.appendChild(showFilteredLabel);
+                popover.appendChild(popCountRow);
+                popover.appendChild(popHint);
+
+                // 再次筛选（LLM 审计）：只打标签，删不删由用户决定
+                const popSep1 = document.createElement('div');
+                popSep1.className = 'ntr-g-pop-sep';
+                popover.appendChild(popSep1);
+                const popAuditTitle = document.createElement('div');
+                popAuditTitle.className = 'ntr-g-pop-title';
+                popAuditTitle.textContent = '再次筛选（把结果发给模型挑出多余的条目，只打标签，不删数据）';
+                const auditBtn = document.createElement('button');
+                auditBtn.className = 'ntr-g-btn';
+                auditBtn.id = 'ntr-g-audit-btn';
+                auditBtn.onclick = () => {
+                    runAudit().catch((e) => NotificationUtils.showError(`筛选失败：${(e && e.message) || e}`));
+                };
+                const auditActions = document.createElement('div');
+                auditActions.className = 'ntr-g-pop-row';
+                const auditPickNone = document.createElement('button');
+                auditPickNone.className = 'ntr-g-btn';
+                auditPickNone.id = 'ntr-g-audit-none';
+                auditPickNone.onclick = () => {
+                    pushHistory();
+                    auditRows().forEach((r) => state.selected.delete(r._index));
+                    render();
+                };
+                const auditPickAll = document.createElement('button');
+                auditPickAll.className = 'ntr-g-btn';
+                auditPickAll.id = 'ntr-g-audit-all';
+                auditPickAll.onclick = () => {
+                    pushHistory();
+                    auditRows().forEach((r) => { if (r.status !== 'existing') state.selected.add(r._index); });
+                    render();
+                };
+                auditActions.appendChild(auditPickNone);
+                auditActions.appendChild(auditPickAll);
+                popover.appendChild(popAuditTitle);
+                popover.appendChild(auditBtn);
+                popover.appendChild(auditActions);
+                const auditNoteEl = document.createElement('div');
+                auditNoteEl.className = 'ntr-g-pop-hint';
+                auditNoteEl.id = 'ntr-g-audit-note';
+                popover.appendChild(auditNoteEl);
+
+                // 撤销
+                const popSep2 = document.createElement('div');
+                popSep2.className = 'ntr-g-pop-sep';
+                const undoRow = document.createElement('div');
+                undoRow.className = 'ntr-g-pop-row';
+                const undoBtn = document.createElement('button');
+                undoBtn.className = 'ntr-g-btn';
+                undoBtn.id = 'ntr-g-undo-btn';
+                undoBtn.textContent = '↩ 撤销上一步';
+                undoBtn.title = '回退最近一次勾选/标记改动（最多 30 步）';
+                undoBtn.onclick = () => { if (undo()) render(); };
+                const undoAuditBtn = document.createElement('button');
+                undoAuditBtn.className = 'ntr-g-btn';
+                undoAuditBtn.id = 'ntr-g-undo-audit-btn';
+                undoAuditBtn.textContent = '撤销清洗';
+                undoAuditBtn.title = '清掉「建议删」标记，并把勾选恢复成筛选前的样子';
+                undoAuditBtn.onclick = () => {
+                    pushHistory();
+                    if (state.auditBaseline) restoreSnapshot(state.auditBaseline);
+                    else rows.forEach((row) => delete row.audit);
+                    state.auditBaseline = null;
+                    state.auditNote = '已撤销清洗：标记已清除，勾选已恢复';
+                    render();
+                };
+                undoRow.appendChild(undoBtn);
+                undoRow.appendChild(undoAuditBtn);
+                popover.appendChild(popSep2);
+                popover.appendChild(undoRow);
+
+                btnFilter.onclick = () => setPopoverOpen(popover.style.display === 'none');
+                const closePopover = (e) => {
+                    if (!overlay.isConnected) { document.removeEventListener('mousedown', closePopover); return; }
+                    if (popover.style.display === 'none') return;
+                    if (popover.contains(e.target) || btnFilter.contains(e.target)) return;
+                    setPopoverOpen(false);
+                };
+                const onKeydown = (e) => {
+                    if (!overlay.isConnected) { document.removeEventListener('keydown', onKeydown); return; }
+                    if (e.key === 'Escape' && popover.style.display !== 'none') setPopoverOpen(false);
+                };
+                document.addEventListener('mousedown', closePopover);
+                document.addEventListener('keydown', onKeydown);
+
+                syncFilterPanel = () => {
+                    const low = lowCountRows();
+                    const noCount = rows.filter((r) => typeof r.count !== 'number').length;
+                    const marks = auditRows();
+                    const auditable = rows.filter((r) => r.status !== 'existing').length;
+                    const batches = Math.max(1, Math.ceil(auditable / AUDIT_BATCH_SIZE));
+                    // 按钮
+                    btnFilter.textContent = (popover.style.display === 'none' ? '筛选 ▾' : '筛选 ▴') + (state.countMin > 0 ? ' ●' : '');
+                    btnFilter.classList.toggle('on', state.countMin > 0);
+                    btnFilter.title = state.countMin > 0
+                        ? `次数≥${state.countMin}：已隐藏 ${low.length} 行（不写入、不导出）`
+                        : '次数过滤 / 再次筛选 / 撤销';
+                    // 面板
+                    showFilteredTxt.textContent = `显示被过滤的（${low.length}）`;
+                    showFilteredCb.disabled = state.countMin === 0;
+                    const hintParts = [];
+                    hintParts.push(state.countMin > 0 ? `已隐藏 ${low.length} 条（次数 < ${state.countMin}）` : '当前未按次数过滤');
+                    if (noCount > 0) hintParts.push(`${noCount} 条无次数信息，不参与过滤`);
+                    popHint.textContent = hintParts.join('；');
+                    auditBtn.disabled = !onAudit || state.auditBusy;
+                    auditBtn.textContent = state.auditBusy
+                        ? '筛选中…'
+                        : `再次筛选术语表（${batches} 个请求）`;
+                    auditBtn.title = onAudit
+                        ? `把 ${auditable} 条发给模型判废，只打「建议删」标签，不删除任何条目（失败则保持原样）`
+                        : '当前入口没有可用的翻译器，无法筛选';
+                    auditActions.style.display = marks.length > 0 ? 'flex' : 'none';
+                    auditPickNone.textContent = `取消勾选建议删 (${marks.length})`;
+                    auditPickAll.textContent = `勾选建议删 (${marks.length})`;
+                    auditNoteEl.textContent = state.auditNote || '';
+                    auditNoteEl.style.display = state.auditNote ? 'block' : 'none';
+                    undoBtn.disabled = state.history.length === 0;
+                    undoBtn.title = state.history.length > 0 ? `回退最近一次改动（可退 ${state.history.length} 步）` : '没有可撤销的改动';
+                    undoAuditBtn.style.display = marks.length > 0 ? 'inline-block' : 'none';
+                    if (auditTab) {
+                        auditTab.style.display = marks.length > 0 ? 'inline-block' : 'none';
+                        auditTab.textContent = `建议删 (${marks.length})`;
+                    }
+                };
+            }
+
+            card.appendChild(toolbar);
+
+            // 类型复选框那一行（勾选/取消该类型在当前页签+搜索下可见的所有行）
+            const typesBar = document.createElement('div');
+            typesBar.className = 'ntr-g-types';
+            typesBar.id = 'ntr-g-types';
+            card.appendChild(typesBar);
+            const typeChecks = new Map();   // type -> { cb, count }
+            const rowSelectable = (row) => row.status === 'add' || row.status === 'conflict' || row.status === 'same';
+            const syncTypeChecks = () => {
+                typeChecks.forEach((info, type) => {
+                    const visible = selectableRows().filter((r) => (r.type || '') === type);
+                    const sel = visible.filter((r) => state.selected.has(r._index)).length;
+                    info.cb.checked = visible.length > 0 && sel === visible.length;
+                    info.cb.indeterminate = sel > 0 && sel < visible.length;
+                    // 当前页签/搜索/次数过滤把该类型收窄时，显示「可见/总数」而不是只显示总数
+                    const name = type || '（无类型）';
+                    info.txt.textContent = visible.length === info.count ? `${name} ${info.count}` : `${name} ${visible.length}/${info.count}`;
+                });
+            };
+            const buildTypeChecks = () => {
+                typesBar.innerHTML = '';
+                typeChecks.clear();
+                if (mode !== 'merge') return;
+                const counts = new Map();
+                rows.forEach((row) => {
+                    if (row.status === 'existing') return;      // 仅已有的行没有类型
+                    const t = row.type || '';
+                    counts.set(t, (counts.get(t) || 0) + 1);
+                });
+                if (counts.size === 0) return;
+                const lead = document.createElement('span');
+                lead.className = 'ntr-g-types-lead';
+                lead.textContent = '类型：';
+                typesBar.appendChild(lead);
+                Array.from(counts.entries())
+                    .sort((a, b) => (b[1] - a[1]) || String(a[0]).localeCompare(String(b[0]), 'ja'))
+                    .forEach(([type, count]) => {
+                        const item = document.createElement('label');
+                        item.className = 'ntr-g-type-item';
+                        item.title = `勾选/取消「${type || '（无类型）'}」的条目（只影响当前页签/搜索下可见的行）`;
+                        const cb = document.createElement('input');
+                        cb.type = 'checkbox';
+                        cb.dataset.type = type;
+                        const txt = document.createElement('span');
+                        txt.textContent = `${type || '（无类型）'} ${count}`;
+                        cb.onchange = () => {
+                            pushHistory();
+                            selectableRows().forEach((r) => {
+                                if ((r.type || '') !== type) return;
+                                if (cb.checked) state.selected.add(r._index);
+                                else state.selected.delete(r._index);
+                            });
+                            render();
+                        };
+                        item.appendChild(cb);
+                        item.appendChild(txt);
+                        typesBar.appendChild(item);
+                        typeChecks.set(type, { cb, txt, count });
+                    });
+                const allBtn = document.createElement('button');
+                allBtn.className = 'ntr-g-btn';
+                allBtn.textContent = '各类型全选';
+                allBtn.onclick = () => { pushHistory(); selectableRows().forEach((r) => { if (rowSelectable(r)) state.selected.add(r._index); }); render(); };
+                const noneBtn = document.createElement('button');
+                noneBtn.className = 'ntr-g-btn';
+                noneBtn.textContent = '各类型全不选';
+                noneBtn.onclick = () => { pushHistory(); selectableRows().forEach((r) => state.selected.delete(r._index)); render(); };
+                typesBar.appendChild(allBtn);
+                typesBar.appendChild(noneBtn);
+            };
+            rebuildTypes = buildTypeChecks;
+            buildTypeChecks();
+
+            // 表格
+            const body = document.createElement('div');
+            body.className = 'ntr-g-body';
+            const table = document.createElement('table');
+            const thead = document.createElement('thead');
+            // 快照是纯术语表（没有 次数/类型），restore 模式不显示这两列
+            const headCb = document.createElement('input');
+            headCb.type = 'checkbox';
+            const columnDefs = [
+                ...(mode === 'merge' ? [{ key: '', label: '', width: '34px', node: headCb }] : []),
+                { key: 'src', label: '原文', width: '26%' },
+                { key: 'dst', label: mode === 'restore' ? '版本译文' : '提取译文', width: '22%' },
+                ...(mode === 'restore' ? [] : [{ key: 'count', label: '次数', width: '60px' }, { key: 'type', label: '类型', width: '110px' }]),
+                { key: 'existing', label: mode === 'restore' ? '当前译文' : '现有译文', width: mode === 'restore' ? '30%' : '22%' },
+                { key: 'status', label: '状态', width: '90px' },
+            ];
+            const sortMarks = {};
+            const headRow = document.createElement('tr');
+            columnDefs.forEach((def) => {
+                const th = document.createElement('th');
+                th.style.width = def.width;
+                if (def.node) {
+                    th.appendChild(def.node);
+                } else {
+                    const label = document.createElement('span');
+                    label.textContent = def.label;
+                    th.appendChild(label);
+                    const mark = document.createElement('span');
+                    mark.className = 'ntr-g-sort-mark';
+                    th.appendChild(mark);
+                    th.classList.add('ntr-g-sortable');
+                    th.title = `点击按「${def.label}」排序（再点一次反向）；点第三次回到原始顺序`;
+                    th.onclick = () => {
+                        if (state.sortKey !== def.key) { state.sortKey = def.key; state.sortDir = 1; }
+                        else if (state.sortDir === 1) { state.sortDir = -1; }
+                        else { state.sortKey = ''; state.sortDir = 1; }
+                        render();
+                    };
+                    sortMarks[def.key] = mark;
+                }
+                headRow.appendChild(th);
+            });
+            thead.appendChild(headRow);
+            const tbody = document.createElement('tbody');
+            table.appendChild(thead);
+            table.appendChild(tbody);
+            body.appendChild(table);
+            card.appendChild(body);
+
+            // 底部
+            const foot = document.createElement('div');
+            foot.className = 'ntr-g-foot';
+            const warn = document.createElement('div');
+            warn.className = 'ntr-g-warn';
+            const btnCopy = document.createElement('button');
+            btnCopy.className = 'ntr-g-btn';
+            btnCopy.textContent = '复制 JSON';
+            const btnDownload = document.createElement('button');
+            btnDownload.className = 'ntr-g-btn';
+            btnDownload.textContent = '下载 JSON';
+            const btnClose = document.createElement('button');
+            btnClose.className = 'ntr-g-btn';
+            btnClose.textContent = '关闭';
+            btnClose.onclick = () => overlay.remove();
+            foot.appendChild(warn);
+            foot.appendChild(btnCopy);
+            foot.appendChild(btnDownload);
+            if (mode === 'merge') {
+                const btnWrite = document.createElement('button');
+                btnWrite.className = 'ntr-g-btn primary';
+                btnWrite.textContent = '合并写入';
+                btnWrite.onclick = async () => {
+                    const picked = buildResultRows();
+                    if (picked.length === 0) {
+                        NotificationUtils.showWarning('没有勾选任何条目');
+                        return;
+                    }
+                    if (!confirm(`将写入 ${picked.length} 条术语到：${GlossaryTargets.describe(target)}\n\n注意：术语表变更会使已翻译章节标记为过期（需重翻）。\n确定写入吗？`)) return;
+                    btnWrite.disabled = true;
+                    try {
+                        await onWrite(picked, rows);
+                        NotificationUtils.showSuccess(`已写入 ${picked.length} 条术语`);
+                        overlay.remove();
+                    } catch (e) {
+                        NotificationUtils.showError(`写入失败：${e.message || e}`);
+                        btnWrite.disabled = false;
+                    }
+                };
+                foot.appendChild(btnWrite);
+            }
+            if (mode === 'restore') {
+                const btnRestore = document.createElement('button');
+                btnRestore.className = 'ntr-g-btn danger';
+                btnRestore.id = 'ntr-g-restore';
+                btnRestore.textContent = '回滚到此版本';
+                btnRestore.onclick = async () => {
+                    const msg = `确认把 ${GlossaryTargets.describe(target)} 的术语表回滚到该版本？\n\n`
+                        + `将新增 ${stats.add} 条、覆盖 ${stats.conflict} 条、删除 ${stats.existing} 条。\n`
+                        + '注意：回滚会导致已翻译章节被标记为过期（需重翻）。';
+                    if (confirmRestore && !confirm(msg)) return;
+                    btnRestore.disabled = true;
+                    try {
+                        await onRestore();
+                        overlay.remove();
+                    } catch (e) {
+                        NotificationUtils.showError(`回滚失败：${e.message || e}`);
+                        btnRestore.disabled = false;
+                    }
+                };
+                foot.appendChild(btnRestore);
+            }
+            foot.appendChild(btnClose);
+            card.appendChild(foot);
+
+            const sortValue = (row, key) => {
+                if (key === 'src') return String(row.src || '');
+                if (key === 'dst') return String(state.dsts[row._index] !== undefined ? state.dsts[row._index] : (row.dst || ''));
+                if (key === 'count') return Number(row.count) || 0;
+                if (key === 'type') return String(row.type || '');
+                if (key === 'existing') {
+                    if (mode === 'restore' && row.status === 'existing') return String(row.dst || '');
+                    return row.existing === undefined ? '' : String(row.existing);
+                }
+                if (key === 'status') return ({ add: 0, conflict: 1, same: 2, existing: 3 })[row.status];
+                return row._index;
+            };
+            const visibleRows = () => {
+                const list = rows.filter((row) => {
+                    if (state.filter === 'audit') { if (!row.audit) return false; }
+                    else if (state.filter === 'suspect') { if (!(row.suspect && row.suspect.length)) return false; }
+                    else if (state.filter !== 'all' && row.status !== state.filter) return false;
+                    if (state.query) {
+                        const q = state.query.toLowerCase();
+                        if (!(row.src.toLowerCase().includes(q) || String(row.dst).toLowerCase().includes(q))) return false;
+                    }
+                    // 次数过滤：默认藏起来；勾了「显示被过滤的」才出现（灰色、不可勾选）
+                    if (!state.showFiltered && isLowCount(row)) return false;
+                    return true;
+                });
+                if (!state.sortKey) return list;
+                const key = state.sortKey;
+                const dir = state.sortDir === -1 ? -1 : 1;
+                return list.slice().sort((a, b) => {
+                    const va = sortValue(a, key);
+                    const vb = sortValue(b, key);
+                    let cmp = (typeof va === 'number' && typeof vb === 'number')
+                        ? va - vb
+                        : String(va).localeCompare(String(vb), 'ja');
+                    if (cmp === 0) cmp = a._index - b._index;   // 同值保持原顺序
+                    return cmp * dir;
+                });
+            };
+
+            // 可勾选 = 可见且没被次数过滤掉（批量勾选、类型计数都用这个）
+            const selectableRows = () => visibleRows().filter((row) => !isLowCount(row));
+
+            const buildResultRows = () => {
+                const picked = [];
+                rows.forEach((row) => {
+                    if (row.status === 'existing') return;
+                    if (row.status === 'same') return;
+                    if (row.status === 'conflict' && state.conflictPolicy === 'keep') return;
+                    if (isLowCount(row)) return;   // 被次数过滤掉的不写入（双保险）
+                    if (!state.selected.has(row._index)) return;
+                    const dst = (state.dsts[row._index] || '').trim();
+                    if (dst === '') return;
+                    picked.push({ src: row.src, dst, type: row.type, status: row.status });
+                });
+                return picked;
+            };
+
+            const copyGlossary = () => {
+                const g = {};
+                rows.forEach((row) => {
+                    if (row.status === 'existing') return;
+                    if (row.status === 'same') { g[row.src] = row.dst; return; }
+                    if (row.status === 'conflict' && state.conflictPolicy === 'keep') { g[row.src] = row.existing; return; }
+                    if (isLowCount(row)) return;   // 复制/下载出来的就是表里看到的内容
+                    const dst = (state.dsts[row._index] || '').trim();
+                    if (dst !== '') g[row.src] = dst;
+                });
+                return g;
+            };
+
+            // 再次筛选（LLM 审计）：只打标签，删不删问用户
+            const runAudit = async () => {
+                if (!onAudit || state.auditBusy) return;
+                const targets = rows.filter((row) => row.status !== 'existing');
+                if (targets.length === 0) { NotificationUtils.showWarning('没有可筛选的条目'); return; }
+                const batches = Math.max(1, Math.ceil(targets.length / AUDIT_BATCH_SIZE));
+                const lanes = Math.max(1, Math.min(Number(auditConcurrency) || 1, batches));
+                const par = lanes > 1 ? `，按「并发 ${lanes}」并行` : '';
+                if (!confirm(`把 ${targets.length} 条术语发给模型筛一遍（${batches} 个请求${par}）？\n\n只会打「建议删」标签，不删除任何条目；筛完你再决定要不要取消勾选。`)) return;
+                state.auditBaseline = snapshot();
+                state.auditBusy = true;
+                state.auditNote = `筛选中…（已完成 0/${batches} 批）`;
+                render();
+                try {
+                    const res = await onAudit(targets, {
+                        onProgress: (p) => {
+                            const d = Number.isFinite(p.done) ? p.done : Math.min(p.batch, p.batches);
+                            state.auditNote = `筛选中…（已完成 ${d}/${p.batches} 批）`;
+                            syncFilterPanel();
+                        },
+                    }) || {};
+                    const marks = res.marks instanceof Map ? res.marks : new Map();
+                    let applied = 0;
+                    rows.forEach((row) => {
+                        if (row.status === 'existing') return;
+                        if (marks.has(row.src)) { row.audit = marks.get(row.src); applied += 1; }
+                        else delete row.audit;
+                    });
+                    const extra = [];
+                    if (res.unmatched) extra.push(`${res.unmatched} 条未能匹配`);
+                    if (res.failed) extra.push(`部分批次失败：${res.failed}`);
+                    state.auditNote = applied > 0
+                        ? `筛选完成：${applied} 条建议删${extra.length ? `（${extra.join('；')}）` : ''}`
+                        : (res.failed ? `筛选失败：${res.failed}（未做任何改动）` : '筛选完成：没有发现多余条目');
+                    state.auditBusy = false;
+                    render();
+                    if (applied > 0) {
+                        const pct = Math.round((applied / targets.length) * 100);
+                        const doUncheck = confirm(`筛选完成：${applied} / ${targets.length} 条疑似多余（${pct}%）。\n\n要把它们取消勾选吗？\n（只打标签不影响写入；事后可以用面板里的「撤销清洗」或「↩ 撤销上一步」回来）`);
+                        if (doUncheck) {
+                            pushHistory();
+                            auditRows().forEach((row) => state.selected.delete(row._index));
+                            state.auditNote += '；已取消勾选';
+                        } else {
+                            state.auditNote += '；只打标签';
+                        }
+                        render();
+                    }
+                } catch (e) {
+                    if (state.auditBaseline) restoreSnapshot(state.auditBaseline);
+                    state.auditBusy = false;
+                    state.auditNote = `筛选失败：${(e && e.message) || e}（未做任何改动）`;
+                    render();
+                    throw e;
+                }
+            };
+
+            const render = () => {
+                const auditCount = auditRows().length;
+                const suspectCount = rows.filter((r) => r.suspect && r.suspect.length).length;
+                if (suspectTab) {
+                    suspectTab.style.display = suspectCount > 0 ? '' : 'none';
+                    suspectTab.textContent = `可疑 (${suspectCount})`;
+                }
+                statsEl.textContent = (mode === 'restore'
+                    ? `版本 ${stats.total} 条 | 新增 ${stats.add} | 覆盖 ${stats.conflict} | 相同 ${stats.same} | 将删除 ${stats.existing}`
+                    : (state.source ? `来源 ${state.source} | ` : '')
+                        + `提取 ${stats.total} 条 | 新增 ${stats.add} | 冲突 ${stats.conflict} | 相同 ${stats.same} | 现有 ${stats.existing}`)
+                    + (auditCount > 0 ? ` | 建议删 ${auditCount}` : '');
+                tbody.innerHTML = '';
+                Object.keys(sortMarks).forEach((k) => {
+                    sortMarks[k].textContent = state.sortKey === k ? (state.sortDir === -1 ? '▼' : '▲') : '';
+                });
+                const list = visibleRows();
+                const limit = 800;
+                list.slice(0, limit).forEach((row) => {
+                    const tr = document.createElement('tr');
+                    const low = isLowCount(row);
+                    tr.className = 'status-' + row.status + (low ? ' ntr-g-row-filtered' : '');
+                    if (mode === 'merge') {
+                        const td = document.createElement('td');
+                        const cb = document.createElement('input');
+                        cb.type = 'checkbox';
+                        // 被次数过滤的行显示成"未勾选 + 禁用"：它无论如何都不会被写入
+                        cb.checked = !low && state.selected.has(row._index);
+                        if (low) {
+                            cb.disabled = true;
+                            cb.title = `次数 ${row.count} < ${state.countMin}：被次数过滤，不写入`;
+                        }
+                        cb.onchange = () => {
+                            pushHistory();
+                            if (cb.checked) state.selected.add(row._index);
+                            else state.selected.delete(row._index);
+                        };
+                        td.appendChild(cb);
+                        tr.appendChild(td);
+                    }
+                    const tdSrc = document.createElement('td');
+                    tdSrc.textContent = row.src;
+                    tdSrc.title = (row.context && row.context[0]) || '';
+                    const tdDst = document.createElement('td');
+                    if (mode === 'merge' && row.status !== 'existing') {
+                        const input = document.createElement('input');
+                        input.type = 'text';
+                        input.value = state.dsts[row._index] || '';
+                        input.style.width = '95%';
+                        input.oninput = () => { state.dsts[row._index] = input.value; };
+                        tdDst.appendChild(input);
+                    } else if (mode === 'restore') {
+                        // 「将删除」行：版本里没有这条，值只在「当前译文」列展示
+                        tdDst.textContent = row.status === 'existing' ? '—' : row.dst;
+                    } else {
+                        tdDst.textContent = row.dst;
+                    }
+                    const tdCount = document.createElement('td');
+                    tdCount.textContent = row.count;
+                    const tdType = document.createElement('td');
+                    tdType.textContent = row.type || '';
+                    const tdExisting = document.createElement('td');
+                    if (mode === 'restore') {
+                        tdExisting.textContent = row.status === 'existing'
+                            ? row.dst
+                            : (row.existing === undefined ? '—' : row.existing);
+                    } else {
+                        tdExisting.textContent = row.existing === undefined ? '—' : row.existing;
+                    }
+                    const tdStatus = document.createElement('td');
+                    const badge = document.createElement('span');
+                    const labelMap = mode === 'restore'
+                        ? { add: '新增', conflict: '覆盖', same: '相同', existing: '将删除' }
+                        : { add: '新增', conflict: '冲突', same: '相同', existing: '仅已有' };
+                    badge.className = 'ntr-g-badge ' + row.status;
+                    badge.textContent = labelMap[row.status] || row.status;
+                    tdStatus.appendChild(badge);
+                    if (row.audit) {
+                        const ab = document.createElement('span');
+                        ab.className = 'ntr-g-badge audit';
+                        ab.textContent = '建议删';
+                        ab.style.marginLeft = '4px';
+                        ab.title = `模型建议删：${auditTitle(row.audit)}`;
+                        tdStatus.appendChild(ab);
+                    }
+                    if (row.suspect && row.suspect.length) {
+                        const sb = document.createElement('span');
+                        sb.className = 'ntr-g-badge suspect';
+                        sb.textContent = '可疑';
+                        sb.style.marginLeft = '4px';
+                        sb.title = `按《术语表使用指南》值得看一眼：${row.suspect.join(' / ')}`;
+                        tdStatus.appendChild(sb);
+                    }
+                    if (low) {
+                        const lb = document.createElement('span');
+                        lb.className = 'ntr-g-badge lowcount';
+                        lb.textContent = '低次';
+                        lb.style.marginLeft = '4px';
+                        lb.title = `出现 ${row.count} 次 < ${state.countMin}：被次数过滤，不写入`;
+                        tdStatus.appendChild(lb);
+                    }
+                    if (row.partial) {
+                        const pb = document.createElement('span');
+                        pb.className = 'ntr-g-badge partial';
+                        pb.textContent = '截断';
+                        pb.style.marginLeft = '4px';
+                        tdStatus.appendChild(pb);
+                    }
+                    tr.appendChild(tdSrc);
+                    tr.appendChild(tdDst);
+                    if (mode !== 'restore') {
+                        tr.appendChild(tdCount);
+                        tr.appendChild(tdType);
+                    }
+                    tr.appendChild(tdExisting);
+                    tr.appendChild(tdStatus);
+                    tbody.appendChild(tr);
+                });
+                if (list.length > limit) {
+                    const tr = document.createElement('tr');
+                    const td = document.createElement('td');
+                    td.colSpan = 7;
+                    td.textContent = `另有 ${list.length - limit} 条未显示（请用搜索/筛选缩小范围）`;
+                    td.style.color = '#888';
+                    tr.appendChild(td);
+                    tbody.appendChild(tr);
+                }
+                if (mode === 'merge') {
+                    const picked = buildResultRows();
+                    const willExpire = stats.add + stats.conflict;
+                    const filteredNote = state.countMin > 0 ? `（已按次数≥${state.countMin} 过滤 ${lowCountRows().length} 条）` : '';
+                    warn.innerHTML = (rows.length === 0 && enableImport)
+                        ? '还没有条目：点右上角「选择 JSON 文件」，或把 .json 文件直接拖进这个窗口。'
+                        : `写入预估：${picked.length} 条${filteredNote}；术语表变更后，已翻译章节将被标记为过期（涉及新增/冲突 ${willExpire} 条）。`;
+                } else if (mode === 'restore') {
+                    warn.textContent = (stats.add + stats.conflict + stats.existing) === 0
+                        ? '该版本与当前术语表没有差异，回滚不会产生任何变更。'
+                        : `回滚预估：新增 ${stats.add} 条、覆盖 ${stats.conflict} 条、删除 ${stats.existing} 条；`
+                            + `回滚后已翻译章节将被标记为过期（涉及变更 ${stats.add + stats.conflict + stats.existing} 条）。`;
+                } else {
+                    warn.textContent = '预览模式：不会写入任何数据（合并写入将在后续版本启用）。';
+                }
+                if (mode === 'merge') {
+                    const headCb = thead.querySelector('input[type=checkbox]');
+                    if (headCb) {
+                        headCb.onchange = () => {
+                            pushHistory();
+                            selectableRows().forEach((r) => {
+                                if (headCb.checked) state.selected.add(r._index);
+                                else state.selected.delete(r._index);
+                            });
+                            render();
+                        };
+                        const vis = selectableRows();
+                        const selCount = vis.filter((r) => state.selected.has(r._index)).length;
+                        headCb.checked = vis.length > 0 && selCount === vis.length;
+                        headCb.indeterminate = selCount > 0 && selCount < vis.length;
+                    }
+                    syncTypeChecks();
+                }
+                syncFilterPanel();
+            };
+
+            // 从文件载入（选择按钮与拖拽共用这一段；解析走和文本框/剪贴板同一个 parseGlossaryEntries）
+            const applyImportedText = (text, label) => {
+                const imported = parseGlossaryEntries(text);
+                if (imported.length === 0) {
+                    NotificationUtils.showWarning(`${label} 里没有解析到术语（支持 KWG output.json 数组 / 扁平 JSON / 原文 => 译文 行）`);
+                    return;
+                }
+                state.source = label || '';
+                state.filter = 'all';
+                state.query = '';
+                searchInput.value = '';
+                Object.keys(tabEls).forEach((k) => tabEls[k].classList.toggle('active', k === 'all'));
+                setEntries(imported);
+                // 标题里的条数是打开弹层时算的，换来源（选文件/拖拽）后要跟着更新
+                titleEl.textContent = title.replace(/（\d+ 条）$/, `（${imported.length} 条）`);
+                render();
+                NotificationUtils.showSuccess(`已从 ${label} 载入 ${imported.length} 条术语`);
+            };
+
+            const pickFile = () => {
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.json,.txt,application/json,text/plain';
+                input.onchange = async () => {
+                    const file = input.files && input.files[0];
+                    if (!file) return;
+                    try {
+                        applyImportedText(await file.text(), file.name);
+                    } catch (err) {
+                        NotificationUtils.showError(`读取文件失败：${err.message || err}`);
+                    }
+                };
+                input.click();
+            };
+
+            if (enableImport) {
+                const setDropHint = (on) => {
+                    card.style.outline = on ? '2px dashed #6ee7b7' : '';
+                    card.style.outlineOffset = on ? '-6px' : '';
+                };
+                card.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; setDropHint(true); });
+                card.addEventListener('dragleave', (e) => { if (e.target === card) setDropHint(false); });
+                card.addEventListener('drop', async (e) => {
+                    e.preventDefault();
+                    setDropHint(false);
+                    const file = e.dataTransfer.files && e.dataTransfer.files[0];
+                    if (!file) return;
+                    try {
+                        applyImportedText(await file.text(), file.name);
+                    } catch (err) {
+                        NotificationUtils.showError(`读取文件失败：${err.message || err}`);
+                    }
+                });
+            }
+
+            btnCopy.onclick = () => copyText(fmtText(copyGlossary()));
+            btnDownload.onclick = () => downloadText(`glossary.${Date.now()}.json`, fmtJson(copyGlossary()));
+
+            render();
+            document.body.appendChild(overlay);
+            return { overlay, render };
+        };
+
+        // 简易选择器（本地卷列表等）
+        const pick = ({ title, options, renderOption }) => new Promise((resolve) => {
+            ensureStyles();
+            const overlay = document.createElement('div');
+            overlay.id = 'ntr-glossary-overlay';
+            overlay.className = 'ntr-g-overlay';
+            const card = document.createElement('div');
+            card.className = 'ntr-g-card';
+            card.style.height = 'auto';
+            card.style.maxHeight = '80vh';
+            card.style.width = 'min(680px, 94vw)';
+            const head = document.createElement('div');
+            head.className = 'ntr-g-head';
+            head.innerHTML = `<div class="ntr-g-title">${title}</div>`;
+            const body = document.createElement('div');
+            body.className = 'ntr-g-body';
+            body.style.padding = '10px 14px';
+            (options || []).forEach((opt) => {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #262626;';
+                const label = document.createElement('div');
+                label.style.cssText = 'flex:1;font-size:13px;';
+                label.textContent = renderOption ? renderOption(opt) : String(opt);
+                const btn = document.createElement('button');
+                btn.className = 'ntr-g-btn';
+                btn.textContent = '选择';
+                btn.onclick = () => { overlay.remove(); resolve(opt); };
+                row.appendChild(label);
+                row.appendChild(btn);
+                body.appendChild(row);
+            });
+            if (!options || options.length === 0) {
+                body.innerHTML = '<div style="color:#888;font-size:13px;">没有可选条目</div>';
+            }
+            const foot = document.createElement('div');
+            foot.className = 'ntr-g-foot';
+            const btnCancel = document.createElement('button');
+            btnCancel.className = 'ntr-g-btn';
+            btnCancel.textContent = '取消';
+            btnCancel.onclick = () => { overlay.remove(); resolve(undefined); };
+            foot.appendChild(btnCancel);
+            card.appendChild(head);
+            card.appendChild(body);
+            card.appendChild(foot);
+            overlay.appendChild(card);
+            document.body.appendChild(overlay);
+        });
+
+        return { open, status, pick, computeDiff, fmtText, fmtJson, copyText, downloadText };
+    })();
+    // ==GlossaryUI-END==
+
+    // -----------------------------------
+    // Glossary Queue (持久化任务队列：IDB jobs + chunks 分块缓存，刷新后可续跑)
+    // -----------------------------------
+    const GlossaryQueue = (() => {
+        let scriptRef = null;
+        let loopActive = false;
+        let stopRequested = false;
+        let runningJobId = null;
+        let panelRefresh = null;
+        let glanceHook = null;   // 面板上「术语队列」行的速览角标（队列:X | 运行中:Y）
+        // 进度预计：每个任务最近的完成时刻（只存内存，刷新后靠 job.progress 里的时间戳兜底）
+        const rateTrack = new Map();   // jobId -> { round, base, samples: [{t, done}] }
+
+        // 纯函数（便于单测）：progress = job.progress，samples = 最近几次 chunk-done 的时刻
+        const etaFor = (progress, samples, now = Date.now()) => {
+            if (!progress) return null;
+            const total = Number(progress.totalChunks) || 0;
+            const base = Number(progress.chunksBase) || 0;
+            const done = Math.max(0, (Number(progress.chunksDone) || 0) - base);
+            if (total <= 0 || done >= total) return null;
+            const list = (samples || []).filter((s) => s && typeof s.t === 'number' && typeof s.done === 'number');
+            let perMin = 0;
+            if (list.length >= 2) {
+                const dt = (list[list.length - 1].t - list[0].t) / 60000;
+                const dd = list[list.length - 1].done - list[0].done;
+                if (dt > 0.05 && dd > 0) perMin = dd / dt;
+            } else if (progress.roundStartedAt) {
+                const dt = (now - progress.roundStartedAt) / 60000;
+                const since = Math.max(0, (Number(progress.chunksDone) || 0) - Math.max(base, Number(progress.timerBase) || 0));
+                if (dt > 0.15 && since > 0) perMin = since / dt;
+            }
+            return { perMin, etaMs: perMin > 0 ? ((total - done) / perMin) * 60000 : null, done, total };
+        };
+        const fmtEta = (ms) => {
+            if (ms === null || ms === undefined) return '';
+            const min = Math.round(ms / 60000);
+            if (min < 1) return '不到 1 分';
+            if (min < 60) return `${min} 分`;
+            return `${Math.floor(min / 60)} 小时 ${min % 60} 分`;
+        };
+
+        const notify = () => {
+            if (panelRefresh) { try { panelRefresh(); } catch (e) { } }
+            if (glanceHook) { try { glanceHook(); } catch (e) { } }
+        };
+
+        // ---------- 设置读取 ----------
+        const readSettings = (moduleName, defaults) => {
+            const mod = scriptRef && scriptRef.configuration.modules.find((m) => m.name === moduleName);
+            const settings = (mod && mod.settings) || [];
+            const out = {};
+            Object.keys(defaults).forEach((key) => {
+                const found = settings.find((s) => s.name === key);
+                out[key] = found === undefined || found.value === '' || found.value === undefined ? defaults[key] : found.value;
+            });
+            return out;
+        };
+
+        // 提取参数（复用“AI提取术语表”模块的设置；入队时快照进 job.options）
+        const extractSettings = () => {
+            const o = readSettings('AI提取术语表', {
+                '原文语言': 'JA',
+                '分块字数': 3000,
+                '输出上限': 0,
+                '最大轮数': 3,
+                '并发': 2,
+                'RPM': 0,
+                '逾时(秒)': 300,
+                '行数上限': 0,
+                '翻译器': '',
+                '使用临时端点': false,
+                '临时端点': '',
+                '临时模型': '',
+                '临时Key': '',
+            });
+            return {
+                sourceLanguage: o['原文语言'],
+                budgetChars: Math.max(200, Number(o['分块字数']) || 3000),
+                maxTokens: Math.max(0, Number(o['输出上限']) || 0),
+                maxRounds: Math.max(1, Number(o['最大轮数']) || 3),
+                concurrency: Math.max(1, Number(o['并发']) || 2),
+                rpm: Math.max(0, Number(o['RPM']) || 0),
+                timeoutMs: Math.max(5, Number(o['逾时(秒)']) || 300) * 1000,
+                maxLines: Number(o['行数上限']) || 0,
+                workerId: o['翻译器'] || '',
+                testEndpoint: o['使用临时端点'] ? (o['临时端点'] || '') : '',
+                testModel: o['临时模型'] || '',
+                testKey: o['临时Key'] || '',
+            };
+        };
+
+        // 运行类参数（并发/RPM/逾时）不走入队快照：每次执行都实时读「术语队列」设置里的覆盖
+        // （右键「术语队列」→ 设置；0=跟随），没有覆盖时用「AI提取术语表」的当前值 ——
+        // 长队列中途提速/放宽超时不用重新入队，已添加未跑完的任务下一次开跑即生效。
+        // 分块字数/最大轮数/行数上限/翻译器仍是入队时固定的那份
+        // （分块字数是分块缓存的键序依据，中途改会让旧缓存按序号错位复用）
+        const jobRuntime = (options) => {
+            const live = extractSettings();
+            const base = options || live;
+            const qs = queueSettings();
+            const qConc = Math.max(0, Number(qs['并发(0=跟随)']) || 0);
+            const qRpm = Math.max(0, Number(qs['RPM(0=跟随)']) || 0);
+            const qTimeoutS = Math.max(0, Number(qs['逾时(秒,0=跟随)']) || 0);
+            return {
+                ...base,
+                concurrency: qConc > 0 ? qConc : live.concurrency,
+                rpm: qRpm > 0 ? qRpm : live.rpm,
+                timeoutMs: qTimeoutS > 0 ? qTimeoutS * 1000 : live.timeoutMs,
+            };
+        };
+
+        // 入队用的设置：和 extractSettings 一样读「AI提取术语表」，
+        // 但若队列面板指定了「运行翻译器」，用指定值覆盖 workerId（面板设置总是领先于条目自带的）
+        const extractSettingsWithRuntime = () => {
+            const base = extractSettings();
+            const ovr = readQueueRuntime();
+            if (!ovr.workerId) return base;   // 跟随 AI 提取术语表 → 不动
+            return { ...base, workerId: ovr.workerId };
+        };
+
+        const queueSettings = () => readSettings('术语队列', {
+            '自动续跑': true,
+            '自动确认纯新增': false,
+            '保留已完成': 5,
+            '收藏添加上限': 30,
+            '并发(0=跟随)': 0,
+            'RPM(0=跟随)': 0,
+            '逾时(秒,0=跟随)': 0,
+        });
+
+        // 队列面板的「运行翻译器」覆盖：独立 localStorage 键，避免和「AI提取术语表」设置耦合
+        // （默认跟随：workerId=''）。panel 改动会立即重写所有 pending 任务的 options.workerId
+        // ——已经开始跑的（progress 已写 / running）按既有快照走，不再被覆盖
+        const QUEUE_RUNTIME_KEY = 'ntr-queue-runtime';
+        const readQueueRuntime = () => {
+            try {
+                const raw = localStorage.getItem(QUEUE_RUNTIME_KEY);
+                const o = raw ? JSON.parse(raw) : {};
+                return { workerId: typeof o.workerId === 'string' ? o.workerId : '' };
+            } catch (e) { return { workerId: '' }; }
+        };
+        const writeQueueRuntime = async (patch) => {
+            const cur = readQueueRuntime();
+            const next = { ...cur, ...patch };
+            localStorage.setItem(QUEUE_RUNTIME_KEY, JSON.stringify(next));
+            // 改了面板选项 → 把所有"未跑完"的任务的 options.workerId 立刻对齐
+            // 判定未跑完：state==='pending' / running / review / failed，且 progress.covered < progress.totalLines
+            // （done：已写入完成，不动；已经覆盖全部的：剩下的 0 行，切了也没意义）
+            const targetWorker = next.workerId;
+            const live = extractSettings().workerId || '';
+            const all = await list();
+            for (const j of all) {
+                if (!isJobOverridable(j)) continue;
+                let changed = false;
+                if (targetWorker) {
+                    if (j.options.workerId !== targetWorker) { j.options.workerId = targetWorker; changed = true; }
+                } else {
+                    // 跟随 AI 提取术语表 → 清掉选项，让 executeJob 实时读
+                    if ('workerId' in j.options && j.options.workerId !== live) { delete j.options.workerId; changed = true; }
+                }
+                if (changed) { await put(j); }
+            }
+            notify();
+        };
+        // "未跑完"判定：覆盖所有还可能再发请求的任务（写入完成的 done 永远不动）
+        const isJobOverridable = (j) => {
+            if (j.state === 'done') return false;
+            if (j.state === 'pending') return true;
+            const p = j.progress || {};
+            if (!p.totalLines) return true;     // 没进度信息（fresh job）按可覆盖
+            return Number(p.covered || 0) < Number(p.totalLines);
+        };
+
+        const resolveWorkers = async (options) => {
+            if (options.testEndpoint) {
+                if (!options.testModel) return [];   // 用临时端点时必须填模型
+                return [{ id: '临时端点', model: options.testModel, endpoint: options.testEndpoint, key: options.testKey || 'no_key_required' }];
+            }
+            return readWorkspaceGptWorkers()
+                .filter((w) => !options.workerId || w.id === options.workerId)
+                .filter((w) => w.endpoint && w.model)
+                .map((w) => ({ id: w.id, model: w.model, endpoint: w.endpoint, key: w.key }));
+        };
+
+        // ---------- 再次筛选（审计）：对已有结果跑一轮，把标记写回 job.entries ----------
+        // 正在「再次筛选」的任务（内存态：审计跑在页面里、刷新即丢，和审计本身同生命周期）
+        // → 面板徽章显示「待筛选」、该行「筛选」按钮禁用；结束（含报错）即恢复
+        const auditingIds = new Set();
+        const auditJob = async (id, { onProgress } = {}) => {
+            if (auditingIds.has(id)) throw new Error('该任务正在筛选中');
+            const job = await get(id);
+            if (!job) throw new Error('任务不存在');
+            if (!job.entries || job.entries.length === 0) throw new Error('任务还没有可以筛选的条目');
+            auditingIds.add(id);
+            notify();
+            try {
+                const options = jobRuntime(job.options);
+                const workers = await resolveWorkers(options);
+                if (!workers.length) throw new Error('没有可用的翻译器：任务入队时的「翻译器 / 临时端点」现在解析不到 worker');
+                const requester = GlossaryEngine.createRequester(workers, {
+                    timeoutMs: options.timeoutMs,
+                    rpm: options.rpm,
+                    maxTokens: 0,          // 审计同样不发送输出上限
+                    temperature: 0,
+                });
+                const res = await GlossaryEngine.auditGlossary({
+                    entries: job.entries,
+                    call: (messages) => requester.call(messages),
+                    context: { title: job.title || '' },
+                    concurrency: options.concurrency,   // 实时读「并发」（jobRuntime）
+                    onProgress,
+                });
+                GlossaryLog.info('再次筛选完成', {
+                    id: job.id, entries: job.entries.length, batches: res.batches,
+                    marks: res.marks.size, unmatched: res.unmatched, failed: res.failed || null,
+                    concurrency: options.concurrency,
+                });
+                job.entries.forEach((e) => { delete e.audit; });   // 重跑就整批换新标记
+                res.marks.forEach((mark, src) => {
+                    const hit = job.entries.find((e) => e.src === src);
+                    if (hit) hit.audit = mark;
+                });
+                job.auditAt = Date.now();
+                await put(job);
+                return res;
+            } finally {
+                auditingIds.delete(id);
+                notify();
+            }
+        };
+
+        // ---------- 任务 CRUD ----------
+        const list = async () => (await GlossaryDB.getAll('jobs')).sort((a, b) => a.createAt - b.createAt);
+        const get = (id) => GlossaryDB.get('jobs', id);
+        // 面板速览角标用：队列（待处理）/ 运行中 / 待确认
+        const counts = async () => {
+            const jobs = await list();
+            return {
+                queued: jobs.filter((j) => j.state === 'pending').length,
+                running: jobs.filter((j) => j.state === 'running').length,
+                review: jobs.filter((j) => j.state === 'review').length,
+            };
+        };
+        // 用户删掉的任务不许"复活"：跑着的任务会在每个分块结束时 put 回写，
+        // 如果这期间用户点了「删除」，旧写法会把记录重新写回 IDB（还带着 running 状态，
+        // 刷新页面又被「自动续跑」接管）——所以删除后要记住 id 并让后续 put 变成空操作
+        const deletedIds = new Set();
+        const put = (job) => {
+            if (deletedIds.has(job.id)) return Promise.resolve();
+            job.updateAt = Date.now();
+            return GlossaryDB.put('jobs', job);
+        };
+
+        const purgeChunks = async (jobId) => {
+            const chunks = await GlossaryDB.getAll('chunks');
+            const prefix = 'job:' + jobId;
+            for (const c of chunks) {
+                if (String(c.id).startsWith(prefix)) await GlossaryDB.delete('chunks', c.id);
+            }
+        };
+
+        // 该任务已成功跑过的分块缓存记录（含各自覆盖的正文行）
+        // 用途：①「重试」只补没覆盖过的行；②行覆盖率（已覆盖 / 总行数）
+        const jobChunkRecords = async (jobId) => {
+            const chunks = await GlossaryDB.getAll('chunks');
+            const prefix = 'job:' + jobId + '/';
+            return chunks.filter((c) => String(c.id).startsWith(prefix));
+        };
+
+        const remove = async (id) => {
+            deletedIds.add(id);
+            if (runningJobId === id) stopRequested = true;   // 正在跑的：停在当前分块，别再往下走
+            await GlossaryDB.delete('jobs', id);
+            await purgeChunks(id);
+            notify();
+        };
+
+        const addJobs = async (targets, options) => {
+            const created = [];
+            for (const target of targets) {
+                const job = {
+                    id: 'job_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7),
+                    kind: target.kind,
+                    target,
+                    title: target.title || GlossaryTargets.describe(target),
+                    state: 'pending',
+                    createAt: Date.now(),
+                    updateAt: Date.now(),
+                    options,
+                    entries: null,
+                    resultCount: 0,
+                    progress: null,
+                    error: null,
+                };
+                await GlossaryDB.put('jobs', job);
+                created.push(job);
+            }
+            notify();
+            return created;
+        };
+
+        // ---------- 执行单个任务 ----------
+        const executeJob = async (job) => {
+            runningJobId = job.id;
+            const jobT0 = Date.now();
+            try {
+                // 兜底：面板设置有"运行翻译器"时，任务未跑完（pending / running / review / failed 但还有没覆盖到的行）
+                // 在跑这一刻也要用面板指定的 worker（写回 IDB 以便审计/日志里看到的是真实生效值）；
+                // 已覆盖完成的任务已经发过请求了，缓存全有，不会再发，切了也没意义 → 不动
+                const ovr = readQueueRuntime();
+                if (ovr.workerId && isJobOverridable(job) && job.options.workerId !== ovr.workerId) {
+                    job.options = { ...job.options, workerId: ovr.workerId };
+                    await put(job);
+                }
+
+                job.state = 'running';
+                job.error = null;
+                await put(job); notify();
+                GlossaryLog.info('任务开始', { id: job.id, title: job.title, target: job.target });
+
+                const options = jobRuntime(job.options);
+                const workers = await resolveWorkers(options);
+                if (workers.length === 0) {
+                    const wanted = (options.workerId || '').trim();
+                    throw new Error(wanted
+                        ? `没有可用的翻译器「${wanted}」（工作区里可能已删除或没填端点；可改选「全部（自动轮换）」）`
+                        : '没有可用的翻译器（工作区 GPT，或「临时端点 + 临时模型」）');
+                }
+
+                let lastSyncAt = 0;
+                const { text } = await loadGlossarySourceText(job.target, (msg) => {
+                    job.progress = { ...(job.progress || {}), sync: msg };
+                    if (Date.now() - lastSyncAt > 1000) {
+                        lastSyncAt = Date.now();
+                        put(job);
+                        notify();
+                    }
+                });
+                let lines = GlossaryEngine.splitLines(text)
+                    .filter((line) => GlossaryEngine.languageFilter(line, options.sourceLanguage))
+                    .filter((line) => !GlossaryEngine.ruleFilter(line));
+                if (options.maxLines > 0) lines = lines.slice(0, options.maxLines);
+                if (lines.length === 0) throw new Error('正文为空');
+
+                // 只补未覆盖的行：已经成功跑过的块（分块缓存记录）覆盖过的行不再重发
+                // （但要保证已有结果在手上，否则会丢掉那部分条目 → 那种情况退化成整本重跑）
+                const records = await jobChunkRecords(job.id);
+                const prevEntries = job.entries || [];
+                const pendingAll = prevEntries.length > 0 ? GlossaryEngine.uncoveredLines(lines, records) : lines;
+                const coveredBase = lines.length - pendingAll.length;
+                // 补跑时块序号不再对应"书里的位置"：缓存键换到 /fill 子命名空间，
+                // 免得覆盖掉整本那轮留下的记录（命中仍要过 linesMatch 核对，双保险）
+                const cacheNamespace = 'job:' + job.id + (pendingAll.length < lines.length ? '/fill' : '');
+                // 这次是"整本重来"还是"只补没覆盖的行"：整本跑会把整本缓存重写一遍
+                // （决定 job.everFailed 是刷新还是延续："重跑到底还会不会发请求"看它）
+                const isFullRun = pendingAll.length === lines.length;
+                if (pendingAll.length === 0) {
+                    job.state = 'review';
+                    job.error = null;
+                    job.progress = { ...(job.progress || {}), covered: lines.length, uncovered: 0, totalLines: lines.length, runLines: 0, sync: null };
+                    await put(job); notify();
+                    NotificationUtils.showSuccess(`《${job.title}》没有未处理的正文行（${lines.length} 行全部已覆盖）`);
+                    return;
+                }
+
+                job.progress = {
+                    round: 0, maxRounds: options.maxRounds, chunksDone: 0, chunksFailed: 0,
+                    pendingLines: pendingAll.length, runLines: pendingAll.length, totalLines: lines.length,
+                    coveredBase, covered: coveredBase, uncovered: lines.length - coveredBase,
+                };
+                if (isFullRun) job.everFailed = false;   // 整本缓存即将重写，历史失败标记作废
+                await put(job); notify();
+
+                const requester = GlossaryEngine.createRequester(workers, { timeoutMs: options.timeoutMs, rps: options.concurrency, rpm: options.rpm, maxTokens: options.maxTokens });
+                let lastWrite = 0;
+                const result = await GlossaryEngine.runJob({
+                    lines: pendingAll,
+                    callLLM: (messages) => requester.call(messages),
+                    options: {
+                        budgetChars: options.budgetChars,
+                        maxRounds: options.maxRounds,
+                        concurrency: options.concurrency,
+                        targetLanguage: '中文',
+                    },
+                    shouldStop: () => stopRequested,
+                    cache: {
+                        namespace: cacheNamespace,
+                        get: (key) => GlossaryDB.get('chunks', key),
+                        // 任务被删掉后别再往 IDB 里写分块缓存（否则删除会留下孤儿记录）
+                        put: (key, value) => (deletedIds.has(job.id) ? Promise.resolve() : GlossaryDB.put('chunks', { id: key, ...value })),
+                    },
+                    onProgress: (p) => {
+                        const prev = job.progress || {};
+                        // 收尾报告里 round 已经 +1，别把它当成"换了新的一轮"
+                        const isDone = p.phase === 'done';
+                        const roundChanged = !isDone && prev.round !== p.round;
+                        // 缓存命中是瞬时的：不参与计时（否则速度会被算得虚高），但不算"没完成"
+                        const cachedReplay = p.phase === 'chunk-cached';
+                        const timerReset = !isDone && (cachedReplay || p.phase === 'round-start' || roundChanged);
+                        const roundStartedAt = timerReset ? Date.now() : (prev.roundStartedAt || Date.now());
+                        const timerBase = timerReset ? (p.chunksDone || 0) : (prev.timerBase || 0);
+                        const chunksBase = isDone ? (prev.chunksBase || 0)
+                            : ((p.phase === 'round-start' || roundChanged) ? (p.chunksDone || 0) : (prev.chunksBase || 0));
+                        // 行覆盖率：入队时用缓存记录算出的已覆盖基数 + 本轮成功块覆盖的行
+                        // （注意 p.coveredLines 只统计本次要跑的那些行，所以基数是分开加的）
+                        const coveredBase = Number(prev.coveredBase) || 0;
+                        const covered = Math.min(lines.length, coveredBase + (Number(p.coveredLines) || 0));
+                        job.progress = {
+                            round: p.round, maxRounds: p.maxRounds, chunksDone: p.chunksDone,
+                            chunksFailed: p.chunksFailed, pendingLines: p.pendingLines,
+                            totalLines: lines.length, runLines: prev.runLines || lines.length,
+                            coveredBase, covered, uncovered: lines.length - covered,
+                            totalChunks: p.totalChunks || prev.totalChunks || 0,
+                            chunksBase, timerBase, roundStartedAt,
+                        };
+                        // 速率采样：只留最近 5 个
+                        const track = rateTrack.get(job.id) || { round: p.round, samples: [] };
+                        if (track.round !== p.round || p.phase === 'round-start' || cachedReplay) {
+                            track.round = p.round;
+                            track.samples = [];
+                        }
+                        track.samples.push({ t: Date.now(), done: p.chunksDone || 0 });
+                        if (track.samples.length > 5) track.samples.shift();
+                        rateTrack.set(job.id, track);
+                        const now = Date.now();
+                        if (now - lastWrite > 800 || p.phase === 'done') {
+                            lastWrite = now;
+                            put(job).then(notify).catch(() => { });
+                        }
+                    },
+                });
+
+                // 只补未覆盖的行 → 结果要和已有条目合并：
+                // 已有 src 保留（那部分正文没重跑），新补的条目按全书正文重新计数
+                // （引擎只在"本次要跑的行"上统计次数，补跑会让次数偏小）
+                let merged = prevEntries.slice();
+                const added = result.glossary.filter((e) => !merged.some((prev) => prev.src === e.src));
+                if (added.length > 0) merged = merged.concat(added);
+                if (merged.length > 0) merged = GlossaryEngine.searchForContext(merged, lines);
+
+                job.entries = merged;
+                job.resultCount = merged.length;
+
+                const coveredAfter = Math.min(lines.length, coveredBase + (result.processedLines || []).length);
+                const uncoveredAfter = lines.length - coveredAfter;
+                job.progress = {
+                    ...job.progress,
+                    pendingLines: result.pendingLines,
+                    covered: coveredAfter, uncovered: uncoveredAfter, totalLines: lines.length,
+                };
+                // 「重跑会不会真的发请求」的历史标记：只要整本缓存可能不全（块失败过 / 有行始终没跑到），
+                // 以后的「重跑」就还有活干，必须给真按钮；补跑不刷新它（/fill 修不了整本命名空间的窟窿）
+                const hadFail = Number(job.progress.chunksFailed) > 0 || uncoveredAfter > 0;
+                job.everFailed = isFullRun ? hadFail : (job.everFailed === true || hadFail);
+
+                if (stopRequested) {
+                    job.state = 'pending';
+                    job.error = uncoveredAfter > 0
+                        ? `已停止（还剩 ${uncoveredAfter} 行没跑；已跑过的分块已缓存，可继续）`
+                        : '已停止（已跑过的分块已缓存，可继续）';
+                } else if (merged.length === 0) {
+                    job.state = 'failed';
+                    job.error = uncoveredAfter > 0 ? `${uncoveredAfter} 行全部提取失败` : '没有提取到术语';
+                } else {
+                    job.error = uncoveredAfter > 0 ? `${uncoveredAfter} 行未能提取（已保留其余结果）` : null;
+                    const qs = queueSettings();
+                    let autoWritten = false;
+                    if (qs['自动确认纯新增']) {
+                        const existing = await GlossaryTargets.loadGlossary(job.target);
+                        const { stats } = GlossaryUI.computeDiff(merged, existing);
+                        if (stats.conflict === 0 && stats.same === 0 && stats.add > 0) {
+                            const picked = merged.filter((e) => !e.partial).map((e) => ({ src: e.src, dst: e.dst, type: e.type }));
+                            if (picked.length > 0) {
+                                await writeGlossaryMerged(job.target, picked);
+                                autoWritten = true;
+                            }
+                        }
+                    }
+                    job.state = autoWritten ? 'done' : 'review';
+                }
+                await put(job); notify();
+                GlossaryLog.info('任务结束', {
+                    id: job.id, state: job.state, error: job.error || null,
+                    entries: (job.entries || []).length, resultCount: job.resultCount || 0,
+                    covered: job.progress && job.progress.covered, totalLines: job.progress && job.progress.totalLines,
+                    ms: Date.now() - jobT0,
+                });
+            } catch (e) {
+                job.state = 'failed';
+                job.error = String((e && e.message) || e);
+                await put(job); notify();
+                GlossaryLog.error('任务异常: ' + job.error, { id: job.id, title: job.title });
+            } finally {
+                runningJobId = null;
+                rateTrack.delete(job.id);   // 任务结束就不再显示"预计还需"
+            }
+        };
+
+        // ---------- 队列循环（串行执行） ----------
+        const runLoop = async () => {
+            if (loopActive) return;
+            loopActive = true;
+            stopRequested = false;
+            try {
+                while (!stopRequested) {
+                    const jobs = await list();
+                    const next = jobs.find((j) => j.state === 'pending' || j.state === 'running');
+                    if (!next) break;
+                    await executeJob(next);
+                }
+            } finally {
+                loopActive = false;
+                notify();
+            }
+        };
+
+        const stop = () => { stopRequested = true; notify(); };
+
+        // 重试/继续：保留分块缓存与已有条目，只补没覆盖过的行（不重发已成功的块）。
+        // 只把任务转回「待处理」——开跑由工具栏「开始/续跑」控制（重试与启动/暂停解耦；
+        // 队列正在跑时，转回的任务会被循环自然轮到）
+        const retry = async (id) => {
+            const job = await get(id);
+            if (!job) return;
+            job.state = 'pending';
+            job.error = null;
+            await put(job);
+            notify();
+        };
+
+        // 「重试」可用判据（行内「重试」按钮与工具栏「重试未完成」共用同一份逻辑，避免两处漂移）：
+        // 不是 running，且有没覆盖到的行；或 pending 但已经跑过（有 progress）。
+        // 刚入队、一行都没跑的 pending 不算（那是「开始/续跑」的活）
+        const jobLeftLines = (job) => {
+            const p = job.progress;
+            const totalLinesN = p && Number(p.totalLines) > 0 ? Number(p.totalLines) : 0;
+            const coveredN = p ? Number(p.covered) : NaN;
+            return (totalLinesN > 0 && Number.isFinite(coveredN))
+                ? Math.max(0, totalLinesN - coveredN)
+                : (p ? Number(p.pendingLines) || 0 : 0);
+        };
+        const isJobRetryable = (job) => job.state !== 'running' && (jobLeftLines(job) > 0 || (job.state === 'pending' && !!job.progress));
+
+        // 重跑：整本重新覆盖一遍（成功的分块走缓存不重发，失败过的那些才会重新请求）
+        // 与「重试」的区别：不保留已有条目和进度，结果整批重算（「建议删」标记也一并清掉）。
+        // 同样只转回「待处理」，开跑由「开始/续跑」控制
+        const rerun = async (id) => {
+            const job = await get(id);
+            if (!job) return;
+            job.entries = null;
+            job.resultCount = 0;
+            job.progress = null;
+            job.everFailed = false;
+            job.state = 'pending';
+            job.error = null;
+            await put(job);
+            notify();
+        };
+
+        // ---------- 续跑（页面加载时） ----------
+        const init = (scriptInstance) => {
+            scriptRef = scriptInstance;
+            GlossaryDB.requestPersist().catch(() => { });
+            setTimeout(async () => {
+                try {
+                    const jobs = await list();
+                    let dirty = false;
+                    for (const job of jobs) {
+                        if (job.state === 'running') { job.state = 'pending'; await put(job); dirty = true; }
+                    }
+                    const qs = queueSettings();
+                    if (qs['自动续跑'] && jobs.some((j) => j.state === 'pending')) {
+                        runLoop();
+                    } else if (dirty) {
+                        notify();
+                    }
+                } catch (e) { }
+            }, 2500);
+        };
+
+        // ---------- 备份导出 / 导入 ----------
+        const exportBackup = async () => {
+            const jobs = await list();
+            return {
+                version: 1,
+                exportedAt: Date.now(),
+                jobs: jobs.map((j) => ({ ...j, state: j.state === 'running' ? 'pending' : j.state })),
+            };
+        };
+
+        const importBackup = async (data) => {
+            if (!data || !Array.isArray(data.jobs)) throw new Error('备份格式不正确');
+            const existing = new Set((await list()).map((j) => j.id));
+            let added = 0;
+            for (const job of data.jobs) {
+                if (!job || !job.id || existing.has(job.id)) continue;
+                if (!job.target || !job.options) continue;
+                if (job.state === 'running') job.state = 'pending';
+                await GlossaryDB.put('jobs', job);
+                // 曾经的删除墓碑要清掉：否则这个 id 之后的 put() 会被静默忽略（进度/状态再也写不进去）
+                deletedIds.delete(job.id);
+                added += 1;
+            }
+            notify();
+            return added;
+        };
+
+        // ---------- 清理 ----------
+        const cleanup = async (keepDone) => {
+            const jobs = await list();
+            const done = jobs.filter((j) => j.state === 'done');
+            // 注意：保留数可以是 0（全部清理），不能用 `|| 5` 兜底
+            const parsed = Number(keepDone);
+            const keep = Number.isFinite(parsed) ? Math.max(0, parsed) : 5;
+            const toRemove = done.slice(0, Math.max(0, done.length - keep));
+            for (const job of toRemove) { await GlossaryDB.delete('jobs', job.id); await purgeChunks(job.id); }
+            notify();
+            return toRemove.length;
+        };
+
+        // ---------- 入队来源 ----------
+        const addCurrentPage = async () => {
+            // 只认当前这个小说页；别的页面让「加入收藏页 / 加入本地书架」来
+            // （以前在任何页面点它都会静默弹出"选择本地卷"，和按钮名字对不上）
+            if (!/^\/(novel|wenku)\//.test(window.location.pathname)) {
+                NotificationUtils.showWarning('「加入当前页」只在小说详情页（/novel/…）或文库页（/wenku/…）生效；批量加请用「加入收藏页 / 加入本地书架」');
+                return 0;
+            }
+            const target = await resolveGlossaryTarget();
+            if (!target) return 0;
+            const created = await addJobs([target], extractSettingsWithRuntime());
+            NotificationUtils.showSuccess(`已加入队列：${GlossaryTargets.describe(target)}`);
+            return created.length;
+        };
+
+        const addFavoriteWeb = async (limit) => {
+            if (!/^\/favorite\/web/.test(window.location.pathname)) {
+                NotificationUtils.showWarning('请在收藏页（/favorite/web）使用');
+                return 0;
+            }
+            const url = new URL(window.location.href);
+            const id = url.pathname.endsWith('/web') ? 'default' : url.pathname.split('/').pop();
+            const targets = [];
+            let page = 0;
+            while (targets.length < limit) {
+                const res = await script.fetch(`${url.origin}/api/user/favored-web/${id}?page=${page}&pageSize=90&sort=update`);
+                if (!res.ok) break;
+                const data = await res.json();
+                const items = data.items || [];
+                items.forEach((item) => {
+                    if (targets.length >= limit) return;
+                    targets.push({
+                        kind: 'web',
+                        providerId: item.providerId,
+                        novelId: item.novelId,
+                        title: item.titleZh || item.titleJp || item.novelId,
+                    });
+                });
+                if (items.length < 90) break;
+                page += 1;
+            }
+            if (targets.length === 0) {
+                NotificationUtils.showWarning('没有获取到收藏小说');
+                return 0;
+            }
+            await addJobs(targets, extractSettingsWithRuntime());
+            NotificationUtils.showSuccess(`已加入 ${targets.length} 本收藏小说`);
+            return targets.length;
+        };
+
+        const addLocalVolumes = async (onlyEmptyGlossary = true) => {
+            const volumes = await GlossaryTargets.listLocalVolumes();
+            const picked = onlyEmptyGlossary ? volumes.filter((v) => (v.glossaryCount || 0) === 0) : volumes;
+            if (picked.length === 0) {
+                NotificationUtils.showWarning('没有符合条件的本地卷');
+                return 0;
+            }
+            if (!confirm(`将 ${picked.length} 本本地卷加入队列？`)) return 0;
+            await addJobs(picked.map((v) => ({ kind: 'local', volumeId: v.id, title: v.id })), extractSettingsWithRuntime());
+            NotificationUtils.showSuccess(`已加入 ${picked.length} 本本地卷`);
+            return picked.length;
+        };
+
+        // ---------- 队列面板 ----------
+        const openPanel = () => {
+            // 触发样式注入
+            const warm = GlossaryUI.status('术语队列');
+            warm.close();
+            const old = document.getElementById('ntr-queue-overlay');
+            if (old) old.remove();
+
+            const overlay = document.createElement('div');
+            overlay.id = 'ntr-queue-overlay';
+            overlay.className = 'ntr-g-overlay';
+            const card = document.createElement('div');
+            card.className = 'ntr-g-card';
+            overlay.appendChild(card);
+
+            const head = document.createElement('div');
+            head.className = 'ntr-g-head';
+            const titleEl = document.createElement('div');
+            titleEl.className = 'ntr-g-title';
+            titleEl.textContent = '术语队列';
+            const statsEl = document.createElement('div');
+            statsEl.className = 'ntr-g-stats';
+            // 右侧的进度预计（块速度 + 预计还需多久）
+            const etaEl = document.createElement('div');
+            etaEl.className = 'ntr-g-stats ntr-g-eta';
+            etaEl.id = 'ntr-g-eta';
+            head.appendChild(titleEl);
+            head.appendChild(statsEl);
+            head.appendChild(etaEl);
+            card.appendChild(head);
+
+            const toolbar = document.createElement('div');
+            toolbar.className = 'ntr-g-toolbar';
+            const mkBtn = (label, fn) => {
+                const b = document.createElement('button');
+                b.className = 'ntr-g-btn';
+                b.textContent = label;
+                b.onclick = () => Promise.resolve(fn()).catch((e) => NotificationUtils.showError(String(e)));
+                toolbar.appendChild(b);
+                return b;
+            };
+            mkBtn('加入当前页', () => addCurrentPage());
+            mkBtn('加入收藏页', () => addFavoriteWeb(Number(queueSettings()['收藏添加上限']) || 30));
+            mkBtn('加入本地书架', () => addLocalVolumes());
+            // 这几个按钮的状态在 render() 里跟着队列刷新（跑动中/空闲/空队列各有对应）
+            const btnRun = mkBtn('开始/续跑', () => runLoop());
+            // 一键重试：把所有"没跑完"（行内会出现「重试」）的任务转回待处理；开跑仍由「开始/续跑」控制
+            const btnRetryAll = mkBtn('重试未完成', async () => {
+                const jobs = await list();
+                const targets = jobs.filter(isJobRetryable);
+                if (!targets.length) {
+                    NotificationUtils.showWarning('没有需要重试的任务：「待确认/失败」里还有没覆盖到的行、或跑过没跑完的才需要');
+                    return;
+                }
+                for (const j of targets) await retry(j.id);
+                NotificationUtils.showSuccess(`已把 ${targets.length} 个没跑完的任务转回待处理；队列没在跑的话，点「开始/续跑」开跑（成功的分块走缓存、不会重发）`);
+            });
+            const btnStop = mkBtn('停止', () => stop());
+            // 队列面板自己的"运行翻译器"下拉：默认值=跟随「AI提取术语表」的翻译器；
+            // 选中具体 worker 后，新入队任务 + 队列里 pending 任务的 options.workerId 会被它覆盖
+            // （已经开跑或带结果的，按既有快照走，不被覆盖）
+            const btnTranslator = mkBtn('运行翻译器 ▾', () => openTranslatorPopover());
+            const btnExport = mkBtn('汇出备份', async () => {
+                const data = await exportBackup();
+                GlossaryUI.downloadText(`ntr-glossary-queue.${Date.now()}.json`, JSON.stringify(data, null, 2));
+            });
+            const importPanelFile = () => {
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.json,application/json';
+                input.onchange = async () => {
+                    const file = input.files && input.files[0];
+                    if (!file) return;
+                    try {
+                        const data = JSON.parse(await file.text());
+                        const added = await importBackup(data);
+                        NotificationUtils.showSuccess(`已汇入 ${added} 个任务`);
+                        render();
+                    } catch (e) {
+                        NotificationUtils.showError(`汇入失败：${e.message}`);
+                    }
+                };
+                input.click();
+            };
+            mkBtn('汇入备份', () => importPanelFile());
+            const btnCleanup = mkBtn('清理已完成', async () => {
+                const n = await cleanup(queueSettings()['保留已完成']);
+                NotificationUtils.showSuccess(`已清理 ${n} 个`);
+            });
+            mkBtn('重新整理', () => render());
+            // 调试日志：warn/error 一直在记，开了「调试日志」设置才有 info 级；导出便于排查（贴给我看）
+            mkBtn('导出日志', async () => {
+                const stats = GlossaryLog.stats();
+                if (stats.kept === 0) {
+                    NotificationUtils.showWarning('日志是空的：先在「AI提取术语表」的设置里勾上「调试日志」再跑一次');
+                    return;
+                }
+                const head = [
+                    `# NTR ToolBox 日志（${new Date().toLocaleString()}）`,
+                    `# 调试日志：${stats.enabled ? '开' : '关（只留了警告/错误；要看全部请勾「调试日志」）'}`,
+                    `# 条数：${stats.kept}（其中警告/错误 ${stats.errors}）`,
+                    '',
+                ].join('\n');
+                GlossaryUI.downloadText(`ntr-toolbox-log.${Date.now()}.txt`, head + GlossaryLog.format());
+            });
+            card.appendChild(toolbar);
+
+            // 「运行翻译器」popover：选择哪个 worker，pending 任务立刻对齐；再次点同一按钮或点外部/Esc 关闭
+            let translatorPopover = null;
+            const closeTranslatorPopover = () => { if (translatorPopover) { translatorPopover.remove(); translatorPopover = null; btnTranslator.textContent = '运行翻译器 ▾'; } };
+            const openTranslatorPopover = () => {
+                if (translatorPopover) { closeTranslatorPopover(); return; }
+                const cur = readQueueRuntime().workerId;
+                const pop = document.createElement('div');
+                pop.className = 'ntr-g-popover';
+                pop.style.position = 'absolute';
+                pop.style.zIndex = '999999';
+                pop.style.minWidth = '240px';
+                pop.style.padding = '8px';
+                pop.style.background = '#1e1e22';
+                pop.style.border = '1px solid #444';
+                pop.style.borderRadius = '6px';
+                pop.style.boxShadow = '0 4px 14px rgba(0,0,0,0.4)';
+                const label = document.createElement('div');
+                label.textContent = '队列「运行翻译器」（只影响新入队 + 未跑的任务）';
+                label.style.fontSize = '12px';
+                label.style.color = '#aaa';
+                label.style.marginBottom = '6px';
+                pop.appendChild(label);
+                const select = document.createElement('select');
+                select.style.width = '100%';
+                select.style.padding = '4px';
+                select.style.background = '#2a2a30';
+                select.style.color = '#eee';
+                select.style.border = '1px solid #444';
+                select.style.borderRadius = '4px';
+                // 第一项 = 跟随 AI 提取术语表
+                const optFollow = document.createElement('option');
+                optFollow.value = '';
+                const liveWorker = extractSettings().workerId || '';
+                optFollow.textContent = `跟随 [「AI提取术语表」当前：${liveWorker || '全部（自动轮换）'}]`;
+                select.appendChild(optFollow);
+                workspaceTranslatorOptions().forEach((o) => {
+                    if (o.value === '') return;  // 第一项已加
+                    const opt = document.createElement('option');
+                    opt.value = o.value;
+                    opt.textContent = o.label;
+                    select.appendChild(opt);
+                });
+                select.value = cur;
+                select.onchange = async () => {
+                    await writeQueueRuntime({ workerId: select.value });
+                    closeTranslatorPopover();
+                    NotificationUtils.showSuccess(select.value ? `运行翻译器已切到「${select.value}」` : '运行翻译器已恢复为跟随');
+                };
+                pop.appendChild(select);
+                const hint = document.createElement('div');
+                hint.style.fontSize = '11px';
+                hint.style.color = '#888';
+                hint.style.marginTop = '6px';
+                hint.textContent = '已覆盖完成（done / 100%）的任务不动，其它立即对齐';
+                pop.appendChild(hint);
+                // 定位在按钮下方
+                const rect = btnTranslator.getBoundingClientRect();
+                pop.style.top = (window.scrollY + rect.bottom + 4) + 'px';
+                pop.style.left = (window.scrollX + rect.left) + 'px';
+                document.body.appendChild(pop);
+                translatorPopover = pop;
+                btnTranslator.textContent = '运行翻译器 ▴';
+                setTimeout(() => {
+                    const onOutside = (ev) => { if (!pop.contains(ev.target) && ev.target !== btnTranslator) { closeTranslatorPopover(); document.removeEventListener('click', onOutside); } };
+                    document.addEventListener('click', onOutside);
+                }, 0);
+            };
+
+            const body = document.createElement('div');
+            body.className = 'ntr-g-body';
+            const table = document.createElement('table');
+            table.innerHTML = '<thead><tr><th style="width:24%">目标</th><th style="width:70px">状态</th><th style="width:22%">进度</th><th style="width:60px">结果</th><th>备注</th><th style="width:200px">操作</th></tr></thead>';
+            const tbody = document.createElement('tbody');
+            table.appendChild(tbody);
+            body.appendChild(table);
+            card.appendChild(body);
+
+            const foot = document.createElement('div');
+            foot.className = 'ntr-g-foot';
+            const hint = document.createElement('div');
+            hint.className = 'ntr-g-warn';
+            hint.textContent = '并发/RPM/逾时：右键「术语队列」的设置里可覆盖（0=跟随「AI提取术语表」），执行时实时生效（下一次开跑/续跑；正在跑的不变）；分块字数·最大轮数·行数上限·翻译器 在入队时固定。队列串行执行；「待确认」的任务点“预览”走 预览-合并-diff 后再写入。刷新/重开页面会自动续跑。「重试」= 把任务转回「待处理」、只补没覆盖到的正文行；「重跑」= 转回「待处理」后整本重来一遍（成功的分块走缓存；只有曾经失败的块才会重新请求，全都在缓存里时它会提示而不是空跑）；「重试未完成」= 把所有没跑完的一次性转回「待处理」。重试/重跑只改任务状态，开跑统一由「开始/续跑」控制（队列正在跑时，转回的任务会被自动轮到）。队列面板的「运行翻译器 ▾」选定后，未跑完的任务（pending / running / 还有未覆盖行的 review·failed）立即对齐；已写入完成（done）的不动。';
+            const btnClose = document.createElement('button');
+            btnClose.className = 'ntr-g-btn';
+            btnClose.textContent = '关闭';
+            btnClose.onclick = () => { overlay.remove(); panelRefresh = null; };
+            foot.appendChild(hint);
+            foot.appendChild(btnClose);
+            card.appendChild(foot);
+
+            const stateLabels = {
+                pending: '待处理', running: '提取中', review: '待确认', done: '完成', failed: '失败', stopped: '已停止',
+            };
+
+            const render = async () => {
+                if (!document.body.contains(overlay)) { panelRefresh = null; return; }
+                const jobs = await list();
+                // 工具栏按钮跟着状态亮/灭：点不动比"点了没反应"清楚
+                const anyPending = jobs.some((j) => j.state === 'pending');
+                btnRun.disabled = loopActive || !anyPending;
+                btnRun.title = loopActive ? '队列正在跑（串行执行）'
+                    : (anyPending ? '把「待处理」的任务依次跑完（队列串行执行）' : '没有待处理的任务：先用左边的「加入」按钮排任务');
+                btnStop.disabled = !loopActive && !runningJobId;
+                btnStop.title = btnStop.disabled ? '当前没有任务在跑'
+                    : '停在当前分块之后；已跑过的分块都在缓存里，可以再「开始/续跑」接着来';
+                btnExport.disabled = jobs.length === 0;
+                btnExport.title = jobs.length === 0 ? '队列是空的，没有可导出的任务'
+                    : '导出全部任务（不含分块缓存；换浏览器导入后会从断点续跑）';
+                btnCleanup.disabled = !jobs.some((j) => j.state === 'done');
+                btnCleanup.title = btnCleanup.disabled ? '没有「完成」状态的任务可清理'
+                    : '按队列设置里的「保留已完成」清理掉多余的完成任务';
+                const retryableN = jobs.filter(isJobRetryable).length;
+                btnRetryAll.disabled = retryableN === 0;
+                btnRetryAll.title = retryableN === 0
+                    ? '没有需要重试的任务：要「待确认/失败」里还有没覆盖到的行、或跑过没跑完的'
+                    : `把 ${retryableN} 个没跑完的任务转回待处理（队列没在跑时点「开始/续跑」开跑；成功的分块走缓存、不会重发）`;
+                // 「运行翻译器」按钮：选了具体 worker 时显示出来
+                const ovr = readQueueRuntime().workerId;
+                btnTranslator.textContent = ovr ? `运行翻译器：${ovr} ▾` : '运行翻译器 ▾';
+                btnTranslator.title = ovr
+                    ? `当前覆盖：${ovr}（未跑完的任务立即对齐；写入完成（done）的不动）`
+                    : '当前跟随「AI提取术语表」的翻译器选择（点开后可临时换成某个 worker）';
+                statsEl.textContent = `共 ${jobs.length} | 待处理 ${jobs.filter((j) => j.state === 'pending').length} | 提取中 ${jobs.filter((j) => j.state === 'running').length} | 待确认 ${jobs.filter((j) => j.state === 'review').length} | 完成 ${jobs.filter((j) => j.state === 'done').length} | 失败 ${jobs.filter((j) => j.state === 'failed').length}`;
+                // 进度预计：只对正在跑的那个任务算（队列是串行的）
+                const runningJob = jobs.find((j) => j.state === 'running');
+                if (runningJob) {
+                    const p = runningJob.progress || {};
+                    const info = etaFor(p, (rateTrack.get(runningJob.id) || {}).samples);
+                    const bits = [];
+                    const roundTxt = `第 ${Math.min((Number(p.round) || 0) + 1, Number(p.maxRounds) || 1)} 轮 `;
+                    bits.push(`${roundTxt}${info ? info.done : (Number(p.chunksDone) || 0) - (Number(p.chunksBase) || 0)}/${p.totalChunks || '?'} 块`);
+                    if (info && info.perMin > 0) {
+                        bits.push(`${info.perMin.toFixed(1)} 块/分`);
+                        bits.push(`预计还需 ${fmtEta(info.etaMs)}`);
+                    } else if (info) {
+                        bits.push('速度计算中…');
+                    }
+                    const waiting = jobs.filter((j) => j.state === 'pending').length;
+                    if (waiting > 0) bits.push(`（还有 ${waiting} 个排队）`);
+                    const rt = jobRuntime(runningJob.options);
+                    bits.push(`并发 ${rt.concurrency}${rt.rpm > 0 ? ` · RPM ${rt.rpm}` : ''} · 逾时 ${Math.round(rt.timeoutMs / 1000)}s`);
+                    etaEl.textContent = bits.join(' · ');
+                } else {
+                    etaEl.textContent = '';
+                }
+                tbody.innerHTML = '';
+                jobs.forEach((job) => {
+                    const tr = document.createElement('tr');
+                    // 正在「再次筛选」的行：徽章显示「待筛选」（颜色跟「待确认」同族），而不是原状态
+                    const auditing = auditingIds.has(job.id);
+                    const tdTitle = document.createElement('td');
+                    tdTitle.textContent = job.title || GlossaryTargets.describe(job.target);
+                    tdTitle.title = GlossaryTargets.describe(job.target);
+                    const tdState = document.createElement('td');
+                    const badge = document.createElement('span');
+                    badge.className = 'ntr-g-badge ' + (auditing ? 'conflict' : (job.state === 'done' ? 'add' : (job.state === 'review' ? 'conflict' : (job.state === 'failed' ? 'partial' : 'same'))));
+                    badge.textContent = auditing ? '待筛选' : (stateLabels[job.state] || job.state);
+                    tdState.appendChild(badge);
+                    const tdProg = document.createElement('td');
+                    if (job.progress) {
+                        const p = job.progress;
+                        if (p.sync) {
+                            tdProg.textContent = p.sync;
+                        } else {
+                            // chunksDone/chunksFailed 是跨轮累计的"块次"（失败块在后面几轮重试成功后还会再计一次），
+                            // 所以进度看"本轮块数 + 行覆盖率"，累计失败单独标注，别让它看起来像"漏了多少块"
+                            const roundDone = Math.max(0, (Number(p.chunksDone) || 0) - (Number(p.chunksBase) || 0));
+                            const totalLines = Number(p.totalLines) || 0;
+                            const coveredN = Number(p.covered);
+                            const hasCoverage = totalLines > 0 && Number.isFinite(coveredN);
+                            const leftLines = hasCoverage ? Math.max(0, totalLines - coveredN) : (Number(p.pendingLines) || 0);
+                            const bits = [
+                                `已跑 ${Number(p.round) || 0}/${p.maxRounds} 轮`,
+                                `本轮 ${roundDone}/${p.totalChunks || '?'} 块`,
+                            ];
+                            bits.push(hasCoverage
+                                ? (leftLines > 0 ? `已覆盖 ${coveredN}/${totalLines} 行 · 待 ${leftLines}` : `已覆盖 ${totalLines}/${totalLines} 行`)
+                                : `待 ${p.pendingLines} 行`);
+                            if (Number(p.chunksFailed) > 0) bits.push(`曾有 ${p.chunksFailed} 块次失败`);
+                            tdProg.textContent = bits.join(' · ');
+                        }
+                    } else {
+                        tdProg.textContent = '—';
+                    }
+                    const tdResult = document.createElement('td');
+                    tdResult.textContent = job.resultCount || 0;
+                    const tdNote = document.createElement('td');
+                    tdNote.textContent = job.error || '';
+                    tdNote.style.color = job.error ? '#E8A96A' : '#888';
+                    const tdOps = document.createElement('td');
+                    const mkOp = (label, fn, title) => {
+                        const b = document.createElement('button');
+                        b.className = 'ntr-g-btn';
+                        b.textContent = label;
+                        if (title) b.title = title;
+                        b.style.padding = '2px 8px';
+                        b.style.marginRight = '4px';
+                        b.onclick = () => Promise.resolve(fn()).catch((e) => NotificationUtils.showError(String(e)));
+                        tdOps.appendChild(b);
+                        return b;
+                    };
+                    // 「预览」和「筛选」的条件保持一致：完成（写入过）的任务同样能打开看/再筛
+                    if ((job.state === 'review' || job.state === 'done') && job.entries && job.entries.length > 0) {
+                        mkOp('预览', () => openReview(job));
+                    }
+                    if ((job.state === 'review' || job.state === 'done') && job.entries && job.entries.length > 0) {
+                        const bFilter = mkOp('筛选', async () => {
+                            const n = job.entries.length;
+                            const conc = Math.max(1, Number(jobRuntime(job.options).concurrency) || 1);
+                            const par = conc > 1 ? `，按「并发 ${conc}」分批并行` : '';
+                            if (!confirm(`把这条任务的 ${n} 条术语发给模型筛一遍${par}？\n\n只会打「建议删」标签（可在「预览」里查看/撤销），不会删除或写入任何数据。`)) return;
+                            // 条数多时要跑好几分钟：给个进度浮窗（关掉浮窗不影响后台继续跑）
+                            const progress = GlossaryUI.status(`再次筛选 - ${job.title || ''}`, {});
+                            try {
+                                const res = await auditJob(job.id, {
+                                    onProgress: (p) => {
+                                        const d = Number.isFinite(p.done) ? p.done : 0;
+                                        progress.update(`筛选中：已完成 ${d}/${p.batches} 批（每批最多 300 条）`, p.batches ? d / p.batches : 0);
+                                    },
+                                });
+                                const msg = res.marks.size > 0
+                                    ? `筛选完成：${res.marks.size} 条建议删${res.unmatched ? `，${res.unmatched} 条未匹配` : ''}${res.failed ? `；部分批次失败：${res.failed}` : ''}`
+                                    : (res.failed ? `筛选失败：${res.failed}` : '筛选完成：没有发现多余条目');
+                                if (res.marks.size > 0 || !res.failed) NotificationUtils.showSuccess(msg);
+                                else NotificationUtils.showWarning(msg);
+                            } finally { progress.close(); }
+                        });
+                        if (auditing) {
+                            // 正在筛：按钮置灰，防止重复开跑（进度看浮窗；徽章已显示「待筛选」）
+                            bFilter.disabled = true;
+                            bFilter.style.opacity = '0.65';
+                            bFilter.title = '正在筛选…（关掉进度浮窗不影响后台继续跑）';
+                        }
+                    }
+                    // 「重试」= 转「待处理」，只补没覆盖到的正文行（已有条目/分块缓存都保留）
+                    // 「重跑」= 转「待处理」后整本重来一次（成功的分块走缓存，只有失败过的块重新请求；结果整批重算）
+                    const totalLinesN = job.progress && Number(job.progress.totalLines) > 0 ? Number(job.progress.totalLines) : 0;
+                    const coveredN = job.progress ? Number(job.progress.covered) : NaN;
+                    const leftLines = jobLeftLines(job);
+                    const running = job.state === 'running';
+                    const partial = leftLines > 0;
+                    // 可用判据与工具栏「重试未完成」共用（见 isJobRetryable）：跑过的、或还有没覆盖到的行。
+                    // 点击只把任务转回「待处理」；开跑由工具栏「开始/续跑」控制
+                    if (isJobRetryable(job)) {
+                        mkOp('重试', () => retry(job.id), leftLines > 0
+                            ? `重试：只补没覆盖到的 ${leftLines} 行（任务转「待处理」，点「开始/续跑」开跑）；已成功的分块走缓存、不会重发`
+                            : '重试：任务转「待处理」（点「开始/续跑」开跑）；已成功的分块走缓存、不会重发');
+                    }
+                    // 曾有失败（job.everFailed 是跨"重试/补跑"保留的历史标记：整本缓存可能不全
+                    // → 重跑仍有活干）。老任务没这个字段时退回看累计失败块次
+                    const anyFail = job.everFailed === true || Number(job.progress && job.progress.chunksFailed) > 0;
+                    // 置灰（"全都在缓存里"）只在缓存确实齐全时给：有完整的覆盖率数据 + 全部覆盖 + 零失败。
+                    // 否则像"取文/网络早期失败（Failed to fetch，还没有任何覆盖率数据）"这种，
+                    // 重跑是真有活干的，不能拿"不会发请求"的提示把它挡掉
+                    const cacheComplete = !!job.progress && totalLinesN > 0 && Number.isFinite(coveredN) && coveredN >= totalLinesN && !anyFail;
+                    if (!running && job.state !== 'pending'
+                        && (job.state === 'failed' || job.state === 'review' || job.state === 'done')
+                        && (!partial || job.state === 'failed')) {   // 失败的任务不该被"还有未覆盖行"挡住「重跑」
+                        // 置灰只给"结果已经正常"的任务（review/done）。失败的任务哪怕缓存齐全也得能真正重跑：
+                        // 失败原因可能正是"缓存回放后的结果"（比如零词条），重跑会先清掉它的分块缓存、全部重新请求
+                        if (cacheComplete && job.state !== 'failed') {
+                            // 全书都覆盖了、也没有失败过的块 → 重跑只会把缓存原样回放（不发请求、结果不变）
+                            const b = mkOp('重跑', () => {
+                                NotificationUtils.showWarning('全部分块都还在缓存里：重跑不会发任何请求、结果不会变（只会清掉「建议删」标记）。要强制重新请求，请先「删除」任务再重新入队。');
+                            }, '所有分块都已缓存：现在点重跑不会发任何请求（要强制重发请删掉任务重新入队）');
+                            b.style.opacity = '0.65';
+                        } else {
+                            mkOp('重跑', async () => {
+                                const n = (job.entries || []).length;
+                                const cf = Number(job.progress && job.progress.chunksFailed) || 0;
+                                const failNote = cf > 0 ? `\n曾有 ${cf} 块次失败，它们会重新请求。` : '';
+                                const forceNote = cacheComplete
+                                    ? '\n分块缓存虽然齐全，但结果是失败的——会先清掉它的分块缓存，全部重新请求（消耗 token，可能几分钟）。'
+                                    : '';
+                                const entryNote = n > 0
+                                    ? `\n已有 ${n} 条结果会整批重算（弹层里的「建议删」标记会清掉），写入前仍会在预览弹层里确认。`
+                                    : '\n这次会重新取文、从头提取；写入前仍会在预览弹层里确认。';
+                                if (!confirm(`重跑《${job.title}》？\n\n成功的分块走缓存、不会重发；只有失败过的块会重新请求（消耗 token，可能几分钟）。${failNote}${forceNote}${entryNote}\n确认后任务转回「待处理」：队列没在跑就点「开始/续跑」开跑。`)) return;
+                                if (cacheComplete) await purgeChunks(job.id);   // 缓存齐全但失败过 → 清掉缓存，强制全新请求
+                                await rerun(job.id);
+                            }, '整本重新覆盖一遍：成功的分块走缓存不重发，只有失败过的块会重新请求；结果整批重算');
+                        }
+                    }
+                    mkOp('删除', async () => {
+                        if (!confirm(`删除任务《${job.title}》？`)) return;
+                        await remove(job.id);
+                    });
+                    tr.appendChild(tdTitle);
+                    tr.appendChild(tdState);
+                    tr.appendChild(tdProg);
+                    tr.appendChild(tdResult);
+                    tr.appendChild(tdNote);
+                    tr.appendChild(tdOps);
+                    tbody.appendChild(tr);
+                });
+                if (jobs.length === 0) {
+                    const tr = document.createElement('tr');
+                    const td = document.createElement('td');
+                    td.colSpan = 6;
+                    td.textContent = '队列为空：用上面的按钮加入小说/本地卷';
+                    td.style.color = '#888';
+                    tr.appendChild(td);
+                    tbody.appendChild(tr);
+                }
+            };
+
+            document.body.appendChild(overlay);
+            panelRefresh = () => { render(); };
+            render();
+            // 面板打开时轮询刷新
+            const timer = setInterval(() => {
+                if (!document.body.contains(overlay)) { clearInterval(timer); return; }
+                render();
+            }, 1500);
+        };
+
+        // 打开某个任务的 预览-合并-diff（写入后标记完成）
+        const openReview = async (job) => {
+            const existing = await GlossaryTargets.loadGlossary(job.target);
+            GlossaryUI.open({
+                title: `队列预览 - ${job.title}（${(job.entries || []).length} 条）`,
+                target: job.target,
+                entries: job.entries || [],
+                existing,
+                mode: 'merge',
+                onWrite: async (picked) => {
+                    const result = await writeGlossaryMerged(job.target, picked);
+                    job.state = 'done';
+                    job.error = null;
+                    await put(job);
+                    notify();
+                    return result;
+                },
+                onAudit: (entries, { onProgress }) => auditJob(job.id, { onProgress }),
+                auditConcurrency: jobRuntime(job.options).concurrency,   // 和「筛选」按钮一样实时读「并发」
+            });
+        };
+
+        return {
+            init, list, get, put, remove, addJobs, retry, rerun, stop, runLoop, cleanup, counts,
+            exportBackup, importBackup, openPanel, openReview, executeJob, auditJob,
+            extractSettings, extractSettingsWithRuntime, jobRuntime, queueSettings, readQueueRuntime, writeQueueRuntime,
+            setGlanceHook: (fn) => { glanceHook = fn; },
+            etaFor, _rateSamples: (id) => (rateTrack.get(id) || {}).samples || [],
+            _state: () => ({ loopActive, stopRequested, runningJobId, auditingIds: [...auditingIds] }),
+        };
+    })();
+
+    // -----------------------------------
+    // Storage Utils
+    // -----------------------------------
+    class StorageUtils {
+        static sakura = location.hostname === 'n.novelia.cc' ? 'workspace-sakura' : 'sakura-workspace';
+        static gpt = location.hostname === 'n.novelia.cc' ? 'workspace-gpt' : 'workspace-gpt';
+        static updateUrl = [
+            'workspace/sakura',
+            'workspace/gpt'
+        ];
+
+        static async update() {
+            const storageKey = (window.location.pathname.includes('workspace/sakura') ? this.sakura : (window.location.pathname.includes('workspace/gpt') ? this.gpt : null));
+            if (!storageKey) return;
+
+            const data = await this._getData(storageKey);
+            await this._setData(storageKey, data);
+        }
+
+        static async _setData(key, data) {
+            localStorage.setItem(key, JSON.stringify(data));
+            window.dispatchEvent(new StorageEvent('storage', {
+                key: key,
+                newValue: JSON.stringify(data),
+                url: window.location.href,
+                storageArea: localStorage
+            }));
+        }
+
+        static async _getData(key) {
+            try {
+                let raw = localStorage.getItem(key);
+                if (raw) {
+                    const data = JSON.parse(raw);
+                    // 验证数据结构完整性
+                    if (!data.workers) data.workers = [];
+                    if (!data.jobs) data.jobs = [];
+                    if (!data.uncompletedJobs) data.uncompletedJobs = [];
+                    return data;
+                }
+            } catch (e) {
+                console.error('Failed to parse localStorage data for key:', key, e);
+                // 数据损坏时尝试修复或重置
+                try {
+                    localStorage.removeItem(key);
+                } catch (removeError) {
+                    console.error('Failed to remove corrupted data:', removeError);
+                }
+            }
+            return { workers: [], jobs: [], uncompletedJobs: [] };
+        }
+
+        static async addSakuraWorker(id, endpoint, amount = null, prevSegLength = 500, segLength = 500) {
+            const total = amount ?? -1;
+            let data = await this._getData(this.sakura);
+
+            function _dataInsert(id, endpoint, prevSegLength, segLength) {
+                const worker = { id, endpoint, prevSegLength, segLength };
+                const existingIndex = data.workers.findIndex(w => w.id === id);
+                if (existingIndex !== -1) {
+                    data.workers[existingIndex] = worker;
+                } else {
+                    data.workers.push(worker);
+                }
+            }
+            if (total == -1) {
+                _dataInsert(id, endpoint, prevSegLength, segLength);
+            } else {
+                for (let i = 1; i < total + 1; i++) {
+                    _dataInsert(id + i, endpoint, prevSegLength, segLength);
+                }
+            }
+            await this._setData(this.sakura, data);
+        }
+
+        static async addGPTWorker(id, model, endpoint, key, amount = null) {
+            const total = amount ?? -1;
+            let data = await this._getData(this.gpt);
+
+            function _dataInsert(id, model, endpoint, key) {
+                const worker = { id, type: 'api', model, endpoint, key };
+                const existingIndex = data.workers.findIndex(w => w.id === id);
+                if (existingIndex !== -1) {
+                    data.workers[existingIndex] = worker;
+                } else {
+                    data.workers.push(worker);
+                }
+            }
+            if (total == -1) {
+                _dataInsert(id, model, endpoint, key);
+            } else {
+                for (let i = 1; i < total + 1; i++) {
+                    _dataInsert(id + i, model, endpoint, key);
+                }
+            }
+            await this._setData(this.gpt, data);
+        }
+
+        static async removeWorker(key, id) {
+            let data = await this._getData(key);
+            data.workers = data.workers.filter(w => w.id !== id);
+            await this._setData(key, data);
+        }
+
+        static async removeAllWorkers(key, exclude = []) {
+            let data = await this._getData(key);
+            data.workers = data.workers.filter(w => exclude.includes(w.id));
+            await this._setData(key, data);
+        }
+
+        static async addJob(key, task, description, createAt = Date.now()) {
+            const job = { task, description, createAt };
+            let data = await this._getData(key);
+            data.jobs.push(job);
+            await this._setData(key, data);
+        }
+
+        static async addJobs(key, jobs = [], createAt = Date.now()) {
+            let data = await this._getData(key);
+            const existingTasks = new Set(data.jobs.map(job => job.task));
+            jobs.forEach(({ task, description }) => {
+                if (!existingTasks.has(task)) {
+                    const job = { task, description, createAt };
+                    data.jobs.push(job);
+                }
+            });
+            await this._setData(key, data);
+        }
+
+        static async getUncompletedJobs(key) {
+            return (await this._getData(key)).uncompletedJobs;
+        }
+    }
+
+    class NotificationUtils {
+        static _initContainer() {
+            if (!this._container) {
+                this._container = document.createElement('div');
+                this._container.className = 'ntr-notification-container';
+                document.body.appendChild(this._container);
+            }
+        }
+
+        static showSuccess(text) {
+            this._show(text, '✅');
+        }
+
+        static showWarning(text) {
+            this._show(text, '⚠️');
+        }
+
+        static showError(text) {
+            this._show(text, '❌');
+        }
+
+        static _show(msg, icon) {
+            this._initContainer();
+            const box = document.createElement('div');
+            box.className = 'ntr-notification-message';
+
+            const iconSpan = document.createElement('span');
+            iconSpan.className = 'ntr-icon';
+            iconSpan.textContent = icon;
+
+            const textNode = document.createTextNode(msg);
+
+            box.appendChild(iconSpan);
+            box.appendChild(textNode);
+            this._container.appendChild(box);
+
+            setTimeout(() => {
+                box.classList.add('fade-out');
+                setTimeout(() => box.remove(), 300);
+            }, 1000);
+        }
+    }
+
+
+    // -----------------------------------
+    // Main Toolbox
+    // -----------------------------------
+    class NTRToolBox {
+        constructor() {
+            this.configuration = this.loadConfiguration();
+            this.keepActiveSet = new Set();
+            this.headerMap = new Map();
+            this.glanceMap = new Map();       // 模块名 → 行尾速览角标元素
+            this._lastGlanceRun = 0;
+            this._glanceBusy = false;
+            this._pollTimer = null;
+            this.token = this.initToken();
+
+            this._lastKeepRun = 0;
+            this._lastVisRun = 0;
+            this._lastEndPoint = window.location.href;
+
+            this.buildGUI();
+            this.attachGlobalKeyBindings();
+            this.loadKeepStateAndStart();
+            this.scheduleNextPoll();
+        }
+
+        static cloneDefaultModules() {
+            return defaultModules.map(m => ({
+                ...m,
+                settings: m.settings ? m.settings.map(s => ({ ...s })) : [],
+                _lastRun: 0
+            }));
+        }
+
+        static DragHandler = class {
+            constructor(panel, title) {
+                this.panel = panel;
+                this.title = title;
+                this.dragging = false;
+                this.offsetX = 0;
+                this.offsetY = 0;
+                this.init();
+            }
+
+            init() {
+                this.title.addEventListener('mousedown', (e) => {
+                    if (e.button !== 0) return;
+                    // Disable transitions while dragging
+                    this.panel.style.transition = 'none';
+                    this.dragging = true;
+                    this.offsetX = e.clientX - this.panel.offsetLeft;
+                    this.offsetY = e.clientY - this.panel.offsetTop;
+                    e.preventDefault();
+                });
+
+                document.addEventListener('mousemove', (e) => {
+                    if (!this.dragging) return;
+                    const newLeft = e.clientX - this.offsetX;
+                    const newTop = e.clientY - this.offsetY;
+                    this.panel.style.left = newLeft + 'px';
+                    this.panel.style.top = newTop + 'px';
+                    this.clampPosition();
+                });
+
+                document.addEventListener('mouseup', () => {
+                    if (!this.dragging) return;
+                    this.dragging = false;
+                    // Re-enable transitions
+                    this.panel.style.transition = 'width 0.3s ease, height 0.3s ease, top 0.3s ease, left 0.3s ease';
+                    const rect = this.panel.getBoundingClientRect();
+                    let left = rect.left;
+                    let top = rect.top;
+                    left = Math.min(Math.max(left, 0), window.innerWidth - rect.width);
+                    top = Math.min(Math.max(top, 0), window.innerHeight - rect.height);
+                    this.panel.style.left = left + 'px';
+                    this.panel.style.top = top + 'px';
+                    localStorage.setItem('ntr-panel-position', JSON.stringify({
+                        left: this.panel.style.left,
+                        top: this.panel.style.top
+                    }));
+                });
+                // Touch events for mobile
+                this.title.addEventListener('touchstart', (e) => {
+                    // Disable transitions while dragging
+                    this.panel.style.transition = 'none';
+                    this.dragging = true;
+                    const touch = e.touches[0];
+                    this.offsetX = touch.clientX - this.panel.offsetLeft;
+                    this.offsetY = touch.clientY - this.panel.offsetTop;
+                    e.preventDefault();
+                }, { passive: false });
+
+                document.addEventListener('touchmove', (e) => {
+                    if (!this.dragging) return;
+                    const touch = e.touches[0];
+                    const newLeft = touch.clientX - this.offsetX;
+                    const newTop = touch.clientY - this.offsetY;
+                    this.panel.style.left = newLeft + 'px';
+                    this.panel.style.top = newTop + 'px';
+                    this.clampPosition();
+                    e.preventDefault();
+                }, { passive: false });
+
+                document.addEventListener('touchend', (e) => {
+                    if (!this.dragging) return;
+                    this.dragging = false;
+                    // Re-enable transitions
+                    this.panel.style.transition = 'width 0.3s ease, height 0.3s ease, top 0.3s ease, left 0.3s ease';
+                    const rect = this.panel.getBoundingClientRect();
+                    let left = rect.left;
+                    let top = rect.top;
+                    left = Math.min(Math.max(left, 0), window.innerWidth - rect.width);
+                    top = Math.min(Math.max(top, 0), window.innerHeight - rect.height);
+                    this.panel.style.left = left + 'px';
+                    this.panel.style.top = top + 'px';
+                    localStorage.setItem('ntr-panel-position', JSON.stringify({
+                        left: this.panel.style.left,
+                        top: this.panel.style.top
+                    }));
+                }, { passive: false });
+            }
+
+            clampPosition() {
+                const rect = this.panel.getBoundingClientRect();
+                let left = parseFloat(this.panel.style.left) || 0;
+                let top = parseFloat(this.panel.style.top) || 0;
+                const maxLeft = window.innerWidth - rect.width;
+                const maxTop = window.innerHeight - rect.height;
+                if (left < 0) left = 0;
+                if (top < 0) top = 0;
+                if (left > maxLeft) left = maxLeft;
+                if (top > maxTop) top = maxTop;
+                this.panel.style.left = left + 'px';
+                this.panel.style.top = top + 'px';
+            }
+        }
+
+        initToken() {
+            // 新版站点把会话写到 auth-v2（{token, adminMode}，短效 access token + refresh cookie 自动续期）；
+            // 旧键 auth 是历史格式（{profile:{token}}），早就停止更新、token 过期后是死值 ——
+            // 先读 auth-v2，读不到再回落 auth（老站点/老会话兼容）
+            try {
+                const v2 = localStorage.getItem('auth-v2');
+                if (v2) {
+                    const parsed = JSON.parse(v2);
+                    if (parsed && parsed.token) return parsed.token;
+                }
+            } catch (e) { }
+            try {
+                const auth = localStorage.getItem('auth');
+                if (auth) {
+                    const parsedInfo = JSON.parse(auth);
+                    if (parsedInfo && parsedInfo.profile && parsedInfo.profile.token) return parsedInfo.profile.token;
+                }
+            } catch (e) { }
+            return null;
+        }
+
+        loadConfiguration() {
+            let stored;
+            try {
+                stored = JSON.parse(localStorage.getItem(CONFIG_STORAGE_KEY));
+            } catch (e) { }
+            if (!stored || stored.version !== CONFIG_VERSION) {
+                const fresh = NTRToolBox.cloneDefaultModules();
+                return { version: CONFIG_VERSION, modules: fresh };
+            }
+            const loaded = NTRToolBox.cloneDefaultModules();
+            stored.modules.forEach(storedMod => {
+                const defMod = loaded.find(m => m.name === storedMod.name);
+                if (defMod) {
+                    for (const k in storedMod) {
+                        // settings 单独逐项合并；whitelist/needsTarget/settingGroups 都是代码逻辑（路由或结构会变），一律以代码为准
+                        if (k === 'settings' || k === 'whitelist' || k === 'needsTarget' || k === 'settingGroups') continue;
+                        if (
+                            defMod.hasOwnProperty(k) &&
+                            typeof defMod[k] === typeof storedMod[k] &&
+                            storedMod[k] !== undefined
+                        ) {
+                            defMod[k] = storedMod[k];
+                        }
+                    }
+                    // settings 按设置名逐项合并：保留默认里的新设置项（老配置升级不丢新功能），只取用户改过的「值」
+                    // （type/options 由代码定义：老配置里存着 type:'string' 会把代码改成的 select 顶回去）
+                    if (Array.isArray(storedMod.settings) && Array.isArray(defMod.settings)) {
+                        storedMod.settings.forEach(storedSetting => {
+                            const defSetting = defMod.settings.find(s => s.name === storedSetting.name);
+                            if (defSetting && 'value' in storedSetting) {
+                                defSetting.value = storedSetting.value;
+                            }
+                        });
+                        // 一次性迁移：以前「临时端点」填了就直接生效，现在由「使用临时端点」勾选控制
+                        // （老配置里没有这个开关，但填了端点 → 视为原本就在用临时端点，自动勾上）
+                        const hadSwitch = storedMod.settings.some(s => s.name === '使用临时端点');
+                        const switchSetting = defMod.settings.find(s => s.name === '使用临时端点');
+                        const endpointSetting = defMod.settings.find(s => s.name === '临时端点');
+                        if (!hadSwitch && switchSetting && endpointSetting && String(endpointSetting.value || '').trim() !== '') {
+                            switchSetting.value = true;
+                        }
+                    }
+                }
+            });
+            if (loaded.length !== defaultModules.length) {
+                const fresh = NTRToolBox.cloneDefaultModules();
+                localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify({ version: CONFIG_VERSION, modules: fresh }));
+                return { version: CONFIG_VERSION, modules: fresh };
+            } else {
+                const defNames = defaultModules.map(x => x.name).sort().join(',');
+                const storedNames = loaded.map(x => x.name).sort().join(',');
+                if (defNames !== storedNames) {
+                    const fresh = NTRToolBox.cloneDefaultModules();
+                    localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify({ version: CONFIG_VERSION, modules: fresh }));
+                    return { version: CONFIG_VERSION, modules: fresh };
+                }
+            }
+            // Reattach run
+            loaded.forEach(m => {
+                const found = defaultModules.find(d => d.name === m.name);
+                if (found && typeof found.run === 'function') {
+                    for (const p in found) {
+                        if (!m.hasOwnProperty(p)) {
+                            m[p] = found[p];
+                        }
+                    }
+                    m.run = found.run;
+                }
+            });
+            return { version: CONFIG_VERSION, modules: loaded };
+        }
+
+        saveConfiguration() {
+            localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(this.configuration));
+        }
+
+        buildGUI() {
+            this.panel = document.createElement('div');
+            this.panel.id = 'ntr-panel';
+
+            // restore from localStorage
+            const savedPos = localStorage.getItem('ntr-panel-position');
+            if (savedPos) {
+                try {
+                    const parsed = JSON.parse(savedPos);
+                    if (parsed.left && parsed.top) {
+                        this.panel.style.left = parsed.left;
+                        this.panel.style.top = parsed.top;
+                    }
+                } catch (e) { }
+            }
+
+            this.isMinimized = false;
+            this.titleBar = document.createElement('div');
+            this.titleBar.className = 'ntr-titlebar';
+            this.titleBar.innerHTML = 'NTR ToolBox ' + VERSION;
+
+            this.toggleSpan = document.createElement('span');
+            this.toggleSpan.style.float = 'right';
+            this.toggleSpan.textContent = '[-]';
+            this.titleBar.appendChild(this.toggleSpan);
+
+            this.panel.appendChild(this.titleBar);
+
+            this.panelBody = document.createElement('div');
+            this.panelBody.className = 'ntr-panel-body';
+            this.panel.appendChild(this.panelBody);
+
+            this.infoBar = document.createElement('div');
+            this.infoBar.className = 'ntr-info';
+            const leftInfo = document.createElement('span');
+            const rightInfo = document.createElement('span');
+            leftInfo.textContent = IS_MOBILE
+                ? '单击执行 | ⚙️设置'
+                : '左键执行/切换 | 右键设置';
+            rightInfo.textContent = 'Author: TheNano(百合仙人)';
+            this.infoBar.appendChild(leftInfo);
+            this.infoBar.appendChild(rightInfo);
+            this.panel.appendChild(this.infoBar);
+
+            document.body.appendChild(this.panel);
+
+            // 队列状态变化（加任务/开始跑/跑完）时立刻刷新行尾速览，不用等下一次轮询
+            GlossaryQueue.setGlanceHook(() => this.refreshQueueGlance(true));
+
+            // set up drag
+            this.dragHandler = new NTRToolBox.DragHandler(this.panel, this.titleBar);
+
+            this.buildModules();
+
+            setTimeout(() => {
+                this.expandedWidth = this.panel.offsetWidth;
+                this.expandedHeight = this.panel.offsetHeight;
+
+                const wasMin = this.isMinimized;
+                if (!wasMin) this.panel.classList.add('minimized');
+                const h0 = this.panel.offsetHeight;
+                if (!wasMin) this.panel.classList.remove('minimized');
+
+                this.minimizedWidth = this.panel.offsetWidth;
+                this.minimizedHeight = h0;
+            }, 150);
+
+            if (IS_MOBILE) {
+                // On mobile, single tap toggles minimized state.
+                this.titleBar.addEventListener('click', e => {
+                    if (!this.dragHandler.dragging) {
+                        e.preventDefault();
+                        this.setMinimizedState(!this.isMinimized);
+                    }
+                });
+            } else {
+                this.titleBar.addEventListener('contextmenu', e => {
+                    e.preventDefault();
+                    this.setMinimizedState(!this.isMinimized);
+                });
+            }
+        }
+
+        buildModules() {
+            this.panelBody.innerHTML = '';
+            this.headerMap.clear();
+            this.glanceMap.clear();
+
+            this.configuration.modules.forEach(mod => {
+                const container = document.createElement('div');
+                container.className = 'ntr-module-container';
+
+                const header = document.createElement('div');
+                header.className = 'ntr-module-header';
+
+                const nameSpan = document.createElement('span');
+                nameSpan.textContent = mod.name;
+                header.appendChild(nameSpan);
+
+                if (!IS_MOBILE) {
+                    const iconSpan = document.createElement('span');
+                    iconSpan.textContent = (mod.type === 'keep') ? '⇋' : '▶';
+                    iconSpan.style.marginLeft = '8px';
+                    header.appendChild(iconSpan);
+                }
+
+                // 「术语队列」行尾的速览角标（队列:X | 运行中:Y），由 refreshQueueGlance 定时刷新
+                if (mod.name === '术语队列') {
+                    const glance = document.createElement('span');
+                    glance.className = 'ntr-module-glance';
+                    glance.textContent = '|队列:0|运行中:0|';
+                    header.appendChild(glance);
+                    this.glanceMap.set(mod.name, glance);
+                }
+
+                const settingsDiv = document.createElement('div');
+                settingsDiv.className = 'ntr-settings-container';
+                settingsDiv.style.display = 'none';
+
+                // 选项可以是数组，也可以是函数（每次渲染/打开设置时重新求值，如「翻译器」要反映工作区最新列表）
+                const selectOptionList = (st) => {
+                    const raw = typeof st.options === 'function' ? st.options() : st.options;
+                    if (!Array.isArray(raw)) return [];
+                    return raw.map((o) => (o && typeof o === 'object')
+                        ? { value: String(o.value), label: String(o.label == null ? o.value : o.label) }
+                        : { value: String(o), label: String(o) });
+                };
+                const fillSelect = (el, st) => {
+                    el.innerHTML = '';
+                    const list = selectOptionList(st);
+                    const current = st.value == null ? '' : String(st.value);
+                    // 当前值不在选项里（翻译器被删/改名）时补一条，避免选中项凭空丢失
+                    if (!list.some((o) => o.value === current)) list.unshift({ value: current, label: current || '(未设置)' });
+                    list.forEach((o) => {
+                        const optEl = document.createElement('option');
+                        optEl.value = o.value;
+                        optEl.textContent = o.label;
+                        if (o.value === current) optEl.selected = true;
+                        el.appendChild(optEl);
+                    });
+                };
+                let syncGroupsFn = () => { };
+                const refreshSelectOptions = () => {
+                    settingsDiv.querySelectorAll('select[data-setting-name]').forEach((el) => {
+                        const st = (mod.settings || []).find((x) => x.name === el.dataset.settingName);
+                        if (st) fillSelect(el, st);
+                    });
+                    syncGroupsFn();
+                };
+
+                if (IS_MOBILE) {
+                    const btn = document.createElement('button');
+                    btn.textContent = '⚙️';
+                    btn.style.color = 'white';
+                    btn.style.float = 'right';
+                    btn.onclick = e => {
+                        e.stopPropagation();
+                        const styleVal = window.getComputedStyle(settingsDiv).display;
+                        settingsDiv.style.display = (styleVal === 'none' ? 'block' : 'none');
+                        if (settingsDiv.style.display === 'block') refreshSelectOptions();
+                    };
+                    header.appendChild(btn);
+
+                    header.onclick = e => {
+                        if (e.target.classList.contains('ntr-bind-button') || e.target === btn) return;
+                        const stored = this.configuration.modules.find(m => m.name === mod.name);
+                        const cfg = stored || mod;
+                        NotificationUtils.showSuccess(`运行模块: ${mod.name}`);
+                        this.handleModuleClick(cfg, header);
+                    };
+                } else {
+                    header.oncontextmenu = e => {
+                        e.preventDefault();
+                        const styleVal = window.getComputedStyle(settingsDiv).display;
+                        settingsDiv.style.display = (styleVal === 'none' ? 'block' : 'none');
+                        if (settingsDiv.style.display === 'block') refreshSelectOptions();
+                    };
+                    header.onclick = e => {
+                        if (e.button === 0 && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+                            if (e.target.classList.contains('ntr-bind-button')) return;
+                            this.handleModuleClick(mod, header);
+                        }
+                    };
+                }
+                if (Array.isArray(mod.settings)) {
+                    const groupDefs = Array.isArray(mod.settingGroups) ? mod.settingGroups : [];
+                    const renderedGroups = new Set();
+                    // 折叠框：勾选 enabledBy 那个开关才可用（打开自动展开、关掉自动收起并禁用内部输入）
+                    const syncGroups = () => {
+                        settingsDiv.querySelectorAll('.ntr-settings-group').forEach((box) => {
+                            const g = groupDefs.find((x) => x.id === box.dataset.groupId);
+                            if (!g) return;
+                            const toggle = g.enabledBy ? settingsDiv.querySelector(`input[type=checkbox][data-setting-name="${g.enabledBy}"]`) : null;
+                            const on = !toggle || toggle.checked;
+                            const expanded = on && box.dataset.expanded === '1';
+                            box.querySelector('.ntr-settings-group-body').style.display = expanded ? 'block' : 'none';
+                            box.querySelectorAll('.ntr-settings-group-body input, .ntr-settings-group-body select, .ntr-settings-group-body textarea, .ntr-settings-group-body button').forEach((el) => { el.disabled = !on; });
+                            const headEl = box.querySelector('.ntr-settings-group-head');
+                            headEl.textContent = `${expanded ? '▾' : '▸'} ${g.title}`;
+                            headEl.classList.toggle('disabled', !on);
+                        });
+                    };
+                    syncGroupsFn = syncGroups;
+                    const createSettingRow = (s) => {
+                        const row = document.createElement('div');
+                        row.style.marginBottom = '8px';
+
+                        const label = document.createElement('label');
+                        label.style.display = 'inline-block';
+                        label.style.minWidth = '70px';
+                        label.style.color = '#ccc';
+                        label.textContent = s.name + ': ';
+                        row.appendChild(label);
+
+                        let inputEl;
+                        switch (s.type) {
+                            case 'boolean': {
+                                inputEl = document.createElement('input');
+                                inputEl.type = 'checkbox';
+                                inputEl.dataset.settingName = s.name;
+                                inputEl.checked = !!s.value;
+                                inputEl.onchange = () => {
+                                    s.value = inputEl.checked;
+                                    this.saveConfiguration();
+                                    // 这类开关若控制着折叠框：勾上自动展开（好填内容），取消自动收起
+                                    settingsDiv.querySelectorAll('.ntr-settings-group').forEach((box) => {
+                                        const g = groupDefs.find((x) => x.id === box.dataset.groupId);
+                                        if (g && g.enabledBy === s.name) box.dataset.expanded = inputEl.checked ? '1' : '0';
+                                    });
+                                    syncGroups();
+                                };
+                                break;
+                            }
+                            case 'number': {
+                                inputEl = document.createElement('input');
+                                inputEl.type = 'number';
+                                inputEl.value = s.value;
+                                inputEl.className = 'ntr-number-input';
+                                inputEl.onchange = () => {
+                                    s.value = Number(inputEl.value) || 0;
+                                    this.saveConfiguration();
+                                };
+                                break;
+                            }
+                            case 'select': {
+                                inputEl = document.createElement('select');
+                                inputEl.dataset.settingName = s.name;
+                                fillSelect(inputEl, s);
+                                // 点开下拉时重新求值：设置面板一直开着也能看到工作区里刚加的翻译器
+                                const refreshBeforeOpen = () => { fillSelect(inputEl, s); inputEl.value = s.value == null ? '' : String(s.value); };
+                                inputEl.addEventListener('pointerdown', refreshBeforeOpen);
+                                inputEl.addEventListener('focus', refreshBeforeOpen);
+                                inputEl.onchange = () => {
+                                    s.value = inputEl.value;
+                                    this.saveConfiguration();
+                                };
+                                break;
+                            }
+                            case 'string': {
+                                if (s.name === 'bind') {
+                                    inputEl = document.createElement('button');
+                                    inputEl.className = 'ntr-bind-button';
+                                    inputEl.textContent = (s.value === 'none') ? '(None)' : `[${s.value.toUpperCase()}]`;
+                                    inputEl.onclick = () => {
+                                        inputEl.textContent = '(Press any key)';
+                                        const handler = ev => {
+                                            ev.preventDefault();
+                                            if (ev.key === 'Escape') {
+                                                s.value = 'none';
+                                                inputEl.textContent = '(None)';
+                                            } else {
+                                                s.value = ev.key.toLowerCase();
+                                                inputEl.textContent = `[${ev.key.toUpperCase()}]`;
+                                            }
+                                            this.saveConfiguration();
+                                            document.removeEventListener('keydown', handler, true);
+                                            ev.stopPropagation();
+                                        };
+                                        document.addEventListener('keydown', handler, true);
+                                    };
+                                } else {
+                                    inputEl = document.createElement('input');
+                                    inputEl.type = 'text';
+                                    inputEl.value = s.value;
+                                    inputEl.className = 'ntr-input';
+                                    inputEl.onchange = () => {
+                                        s.value = inputEl.value;
+                                        this.saveConfiguration();
+                                    };
+                                }
+                                break;
+                            }
+                            case 'textarea': {
+                                inputEl = document.createElement('textarea');
+                                inputEl.value = s.value;
+                                inputEl.className = 'ntr-input';
+                                inputEl.style.height = '80px';
+                                inputEl.style.width = '180px';
+                                inputEl.style.resize = 'vertical';
+                                inputEl.onchange = () => {
+                                    s.value = inputEl.value;
+                                    this.saveConfiguration();
+                                };
+                                break;
+                            }
+                            default: {
+                                inputEl = document.createElement('span');
+                                inputEl.style.color = '#999';
+                                inputEl.textContent = String(s.value);
+                            }
+                        }
+                        row.appendChild(inputEl);
+                        return row;
+                    };
+                    mod.settings.forEach(s => {
+                        const g = groupDefs.find((x) => x.members.includes(s.name));
+                        if (!g) {
+                            settingsDiv.appendChild(createSettingRow(s));
+                            return;
+                        }
+                        if (renderedGroups.has(g.id)) return;   // 同一组的成员一起渲染
+                        renderedGroups.add(g.id);
+                        const box = document.createElement('div');
+                        box.className = 'ntr-settings-group';
+                        box.dataset.groupId = g.id;
+                        box.dataset.expanded = '0';
+                        const head = document.createElement('div');
+                        head.className = 'ntr-settings-group-head';
+                        head.onclick = () => {
+                            box.dataset.expanded = box.dataset.expanded === '1' ? '0' : '1';
+                            syncGroups();
+                        };
+                        const body = document.createElement('div');
+                        body.className = 'ntr-settings-group-body';
+                        body.style.paddingLeft = '10px';
+                        body.style.marginTop = '6px';
+                        g.members.forEach((name) => {
+                            const ms = mod.settings.find((x) => x.name === name);
+                            if (ms) body.appendChild(createSettingRow(ms));
+                        });
+                        box.appendChild(head);
+                        box.appendChild(body);
+                        settingsDiv.appendChild(box);
+                    });
+                    syncGroups();
+                }
+
+                container.appendChild(header);
+                container.appendChild(settingsDiv);
+
+                this.panelBody.appendChild(container);
+                this.headerMap.set(mod, header);
+            });
+        }
+
+        attachGlobalKeyBindings() {
+            document.addEventListener('keydown', e => {
+                if (e.ctrlKey || e.altKey || e.metaKey) return;
+                const pk = e.key.toLowerCase();
+                this.configuration.modules.forEach(mod => {
+                    const bind = mod.settings.find(s => s.name === 'bind');
+                    if (!bind || bind.value === 'none') return;
+                    if (bind.value.toLowerCase() === pk) {
+                        if (!isModuleEnabledByWhitelist(mod)) return;
+                        e.preventDefault();
+                        this.handleModuleClick(mod, null);
+                    }
+                });
+            });
+        }
+
+        handleModuleClick(mod, header) {
+            if (!domainAllowed || !isModuleEnabledByWhitelist(mod)) return;
+            try {
+                if (mod.type === 'onclick') {
+                    if (typeof mod.run === 'function') {
+                        Promise.resolve(mod.run(mod)).catch(console.error);
+                    }
+                } else if (mod.type === 'keep') {
+                    const active = this.keepActiveSet.has(mod.name);
+                    if (active) {
+                        if (header) this.stopKeepModule(mod, header);
+                    } else {
+                        if (header) this.startKeepModule(mod, header);
+                    }
+                }
+            } catch (err) {
+                console.error('Error running module:', mod.name, err);
+            }
+        }
+
+        startKeepModule(mod, header) {
+            if (this.keepActiveSet.has(mod.name)) return;
+            header.classList.add('active');
+            this.keepActiveSet.add(mod.name);
+            this.updateKeepStateStorage();
+        }
+
+        stopKeepModule(mod, header) {
+            header.classList.remove('active');
+            this.keepActiveSet.delete(mod.name);
+            this.updateKeepStateStorage();
+        }
+
+        updateKeepStateStorage() {
+            const st = {};
+            this.keepActiveSet.forEach(n => {
+                st[n] = true;
+            });
+            localStorage.setItem('NTR_KeepState', JSON.stringify(st));
+        }
+
+        loadKeepStateAndStart() {
+            let saved = {};
+            try {
+                saved = JSON.parse(localStorage.getItem('NTR_KeepState') || '{}');
+            } catch (e) { }
+            this.configuration.modules.forEach(mod => {
+                if (mod.type === 'keep' && saved[mod.name]) {
+                    const hdr = this.headerMap.get(mod);
+                    if (hdr) {
+                        this.startKeepModule(mod, hdr);
+                    }
+                }
+            });
+        }
+
+        scheduleNextPoll() {
+            const now = Date.now();
+            if (now - this._lastKeepRun >= 100) {
+                this.pollKeepModules();
+                this._lastKeepRun = now;
+            }
+            if (now - this._lastVisRun >= 250) {
+                this.updateModuleVisibility();
+                if (this._lastEndPoint != window.location.href) {
+                    StorageUtils.update();
+                    this._lastEndPoint = window.location.href;
+                }
+                this._lastVisRun = now;
+            }
+            this.refreshQueueGlance();
+            this._pollTimer = setTimeout(() => {
+                this.scheduleNextPoll();
+            }, 10);
+        }
+
+        // 「术语队列」行尾速览：队列（待处理）+ 运行中，1s 节流；队列有变化时由 notify() 直接推一次
+        refreshQueueGlance(force) {
+            if (!this.glanceMap || this.glanceMap.size === 0) return;
+            const now = Date.now();
+            if (!force && now - this._lastGlanceRun < 1000) return;
+            if (this._glanceBusy) return;
+            this._lastGlanceRun = now;
+            this._glanceBusy = true;
+            GlossaryQueue.counts().then(({ queued, running }) => {
+                this.glanceMap.forEach((el) => {
+                    el.textContent = `|队列:${queued}|运行中:${running}|`;
+                    el.classList.toggle('busy', running > 0);
+                    el.classList.toggle('has', running === 0 && queued > 0);
+                });
+            }).catch(() => { }).then(() => { this._glanceBusy = false; });
+        }
+
+        pollKeepModules() {
+            this.configuration.modules.forEach(mod => {
+                if (mod.type === 'keep' && this.keepActiveSet.has(mod.name) && typeof mod.run === 'function') {
+                    mod.run(mod);
+                }
+            });
+        }
+
+        runModule(name) {
+            this.configuration.modules.filter(mod => mod.name == name).forEach(mod => {
+                if (typeof mod.run === 'function') {
+                    mod.run(mod, true);
+                }
+            });
+        }
+
+        updateModuleVisibility() {
+            this.configuration.modules.forEach(mod => {
+                const hdr = this.headerMap.get(mod);
+                if (!hdr) return;
+                const cont = hdr.parentElement;
+                const allowed = domainAllowed && isModuleEnabledByWhitelist(mod) && !mod.hidden;
+                if (!allowed) {
+                    cont.style.display = 'none';
+                    if (mod.type === 'keep' && this.keepActiveSet.has(mod.name)) {
+                        this.stopKeepModule(mod, hdr);
+                    }
+                } else {
+                    cont.style.display = 'block';
+                }
+            });
+        }
+
+        getAnchorCornerInfo(rect) {
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+            const horizontal = (centerX < window.innerWidth / 2) ? 'left' : 'right';
+            const vertical = (centerY < window.innerHeight / 2) ? 'top' : 'bottom';
+            return {
+                corner: vertical + '-' + horizontal,
+                x: (horizontal === 'left' ? rect.left : rect.right),
+                y: (vertical === 'top' ? rect.top : rect.bottom)
+            };
+        }
+
+        setMinimizedState(newVal) {
+            if (this.isMinimized === newVal) return;
+            const rect = this.panel.getBoundingClientRect();
+            const anchor = this.getAnchorCornerInfo(rect);
+
+            this.isMinimized = newVal;
+            if (this.isMinimized) {
+                this.panel.classList.add('minimized');
+                this.toggleSpan.textContent = '[+]';
+                this.panelBody.style.display = 'none';
+                this.infoBar.style.display = 'none';
+            } else {
+                this.panel.classList.remove('minimized');
+                this.toggleSpan.textContent = '[-]';
+                this.panelBody.style.display = 'block';
+                this.infoBar.style.display = 'flex';
+            }
+
+            setTimeout(() => {
+                const newRect = this.panel.getBoundingClientRect();
+                let left, top;
+                switch (anchor.corner) {
+                    case 'top-left':
+                        left = anchor.x;
+                        top = anchor.y;
+                        break;
+                    case 'top-right':
+                        left = anchor.x - newRect.width;
+                        top = anchor.y;
+                        break;
+                    case 'bottom-left':
+                        left = anchor.x;
+                        top = anchor.y - newRect.height;
+                        break;
+                    case 'bottom-right':
+                        left = anchor.x - newRect.width;
+                        top = anchor.y - newRect.height;
+                        break;
+                    default:
+                        left = parseFloat(this.panel.style.left) || newRect.left;
+                        top = parseFloat(this.panel.style.top) || newRect.top;
+                }
+                left = Math.min(Math.max(left, 0), window.innerWidth - newRect.width);
+                top = Math.min(Math.max(top, 0), window.innerHeight - newRect.height);
+                this.panel.style.left = left + 'px';
+                this.panel.style.top = top + 'px';
+                localStorage.setItem('ntr-panel-position', JSON.stringify({
+                    left: this.panel.style.left,
+                    top: this.panel.style.top
+                }));
+            }, 310);
+        }
+
+        async fetch(url, bypass = true, options = {}) {
+            // token 现读：新版站点是短效 access token（~2h）+ refresh cookie 自动续期，
+            // 页面加载时抓一次会在续期后变死值 → 每次请求都从 localStorage 重新取
+            const token = this.initToken() || this.token;
+            if (bypass && token) {
+                const fetchOptions = {
+                    method: options.method || 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        ...(options.headers || {})
+                    },
+                    ...options
+                };
+                if (token && !fetchOptions.headers['Authorization']) {
+                    fetchOptions.headers['Authorization'] = `Bearer ${token}`;
+                }
+                const response = await fetch(url, fetchOptions);
+                return response;
+            } else {
+                return await fetch(url, options);
+            }
+        }
+
+        delay(ms) {
+            return new Promise(r => setTimeout(r, ms));
+        }
+    }
+
+    const css = document.createElement('style');
+    css.textContent = `
+    #ntr-panel {
+        position: fixed;
+        left: 20px;
+        top: 70px;
+        z-index: 9999;
+        background: #1E1E1E;
+        color: #BBB;
+        padding: 8px;
+        border-radius: 8px;
+        font-family: Arial, sans-serif;
+        width: 320px;
+        box-shadow: 2px 2px 12px rgba(0,0,0,0.5);
+        border: 1px solid #333;
+        transition: width 0.3s ease, height 0.3s ease, top 0.3s ease, left 0.3s ease;
+    }
+    #ntr-panel.minimized {
+        width: 200px;
+    }
+    .ntr-titlebar {
+        font-weight: bold;
+        padding: 10px;
+        cursor: move;
+        background: #292929;
+        border-radius: 6px;
+        color: #CCC;
+        user-select: none;
+    }
+    .ntr-panel-body {
+        padding: 6px;
+        background: #232323;
+        border-radius: 4px;
+        overflow-y: auto;
+        max-height: 80vh;
+        transition: max-height 0.3s ease;
+    }
+    #ntr-panel.minimized .ntr-panel-body {
+        max-height: 0;
+    }
+    .ntr-module-container {
+        margin-bottom: 12px;
+        border: 1px solid #444;
+        border-radius: 4px;
+    }
+    .ntr-module-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: #2E2E2E;
+        padding: 6px 8px;
+        border-radius: 3px 3px 0 0;
+        border-bottom: 1px solid #333;
+        cursor: pointer;
+        transition: background 0.3s;
+    }
+    .ntr-module-header:hover {
+        background: #3a3a3a;
+    }
+    .ntr-module-glance {
+        margin-left: auto;
+        padding-left: 8px;
+        font-size: 11px;
+        color: #6f6f6f;
+        font-family: Consolas, "Courier New", monospace;
+        white-space: nowrap;
+    }
+    .ntr-module-glance.has { color: #c8a24a; }
+    .ntr-module-glance.busy { color: #63b363; }
+    .ntr-settings-container {
+        padding: 6px;
+        background: #1C1C1C;
+        display: none;
+    }
+    .ntr-settings-group {
+        margin-bottom: 8px;
+        border: 1px solid #3a3a3a;
+        border-radius: 4px;
+        background: #202020;
+        padding: 6px 8px;
+    }
+    .ntr-settings-group-head {
+        cursor: pointer;
+        color: #ddd;
+        font-size: 12px;
+        user-select: none;
+    }
+    .ntr-settings-group-head.disabled {
+        color: #888;
+    }
+    .ntr-settings-group-head:hover {
+        color: #fff;
+    }
+    .ntr-input {
+        width: 120px;
+        padding: 4px;
+        border: 1px solid #555;
+        border-radius: 4px;
+        background: #2A2A2A;
+        color: #FFF;
+    }
+    .ntr-number-input {
+        width: 60px;
+        padding: 4px;
+        border: 1px solid #555;
+        border-radius: 4px;
+        background: #2A2A2A;
+        color: #FFF;
+    }
+    .ntr-bind-button {
+        padding: 4px 8px;
+        border: 1px solid #555;
+        border-radius: 4px;
+        background: #2A2A2A;
+        color: #FFF;
+        cursor: pointer;
+    }
+    .ntr-info {
+        display: flex;
+        justify-content: space-between;
+        font-size: 10px;
+        color: #888;
+        margin-top: 8px;
+    }
+    .ntr-module-header.active {
+        background: #63E2B7 !important;
+        color: #fff !important;
+    }
+    .ntr-notification-container {
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 9999;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    .ntr-notification-message {
+        display: flex;
+        align-items: center;
+        min-width: 200px;
+        margin-top: 8px;
+        padding: 4px 8px;
+        border-radius: 4px;
+        background-color: #2A2A2A;
+        color: #fff;
+        font-size: 14px;
+        font-family: sans-serif;
+        opacity: 1;
+        transition: opacity 0.3s ease;
+    }
+    .ntr-notification-message .ntr-icon {
+        margin-right: 4px;
+        font-size: 16px;
+    }
+    .ntr-notification-message.fade-out {
+        opacity: 0;
+    }
+    /* Glossary Visual Feedback Badge Styles */
+    .ntr-glossary-badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        font-size: 12px;
+        margin-right: 6px;
+        transition: all 0.3s ease;
+        cursor: help;
+        flex-shrink: 0;
+    }
+    .ntr-glossary-pending {
+        background: linear-gradient(135deg, #fbbf24, #f59e0b);
+        animation: ntr-pulse 1.5s infinite;
+    }
+    .ntr-glossary-success {
+        background: linear-gradient(135deg, #4ade80, #22c55e);
+        box-shadow: 0 0 8px rgba(34, 197, 94, 0.5);
+    }
+    .ntr-glossary-fail {
+        background: linear-gradient(135deg, #ef4444, #dc2626);
+        box-shadow: 0 0 8px rgba(220, 38, 38, 0.5);
+    }
+    @keyframes ntr-pulse {
+        0%, 100% { transform: scale(1); opacity: 1; }
+        50% { transform: scale(0.9); opacity: 0.7; }
+    }
+    @media only screen and (max-width:600px) {
+        #ntr-panel {
+            transform: scale(0.6);
+            transform-origin: top left;
+        }
+    }
+    `;
+    document.head.appendChild(css);
+
+    // -----------------------------------
+    // Init Script
+    // -----------------------------------
+    const script = new NTRToolBox();
+    // 「调试日志」开关：日志模块自己去读模块设置（队列/引擎都在用它，避免到处传 cfg）
+    GlossaryLog.setEnabledSource(() => {
+        try {
+            const mod = (script.configuration.modules || []).find((m) => m.name === 'AI提取术语表');
+            const setting = mod && (mod.settings || []).find((s) => s.name === '调试日志');
+            return !!(setting && setting.value);
+        } catch (e) { return false; }
+    });
+    // 调试句柄（控制台/自动化测试用，不影响正常逻辑）
+    window._NTRToolBox = script;
+    window._NTRGlossaryDev = {
+        GlossaryEngine,
+        GlossaryUI,
+        GlossaryTargets,
+        GlossaryDB,
+        GlossaryQueue,
+        GlossaryLog,
+        resolveGlossaryWorkers,
+        resolveGlossaryTarget,
+        loadGlossarySourceText,
+        runGlossaryExtraction,
+        writeGlossaryMerged,
+        parseGlossaryText,
+        parseGlossaryEntries,
+        syncWorkspaceTranslators,
+    };
+    // 队列自动续跑（含刷新后接管中断任务）
+    GlossaryQueue.init(script);
+})();

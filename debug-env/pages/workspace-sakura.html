@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sakura 工作区 - NTR ToolBox Debug</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+        .header {
+            background: #16213e;
+            padding: 20px;
+            border-bottom: 1px solid #0f3460;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 {
+            font-size: 24px;
+        }
+        .workspace {
+            padding: 20px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .panel {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 20px;
+            min-height: 400px;
+        }
+        .panel h2 {
+            margin-bottom: 15px;
+            color: #e94560;
+            border-bottom: 2px solid #0f3460;
+            padding-bottom: 10px;
+        }
+        .n-list-item {
+            background: #0f3460;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .n-thing-main__description {
+            font-size: 12px;
+            color: #888;
+            margin-top: 5px;
+        }
+        button {
+            padding: 8px 16px;
+            background: #e94560;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+        button:hover {
+            background: #ff6b6b;
+        }
+        .debug-panel {
+            position: fixed;
+            right: 20px;
+            top: 20px;
+            background: #16213e;
+            padding: 20px;
+            border-radius: 8px;
+            width: 300px;
+            max-height: 80vh;
+            overflow-y: auto;
+            z-index: 10000;
+        }
+        .debug-panel h3 {
+            margin-bottom: 15px;
+            color: #4ade80;
+        }
+        .debug-panel button {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            background: #0f3460;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-left: 0;
+        }
+        .debug-panel button:hover {
+            background: #4ade80;
+        }
+        .log-area {
+            background: #0a0a14;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: 'Consolas', monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+            margin-top: 10px;
+        }
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 3px 0;
+            border-bottom: 1px solid #1a1a2e;
+        }
+        .worker-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background: #0f3460;
+            margin-bottom: 8px;
+            border-radius: 4px;
+        }
+        .job-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background: #0f3460;
+            margin-bottom: 8px;
+            border-radius: 4px;
+            border-left: 3px solid #4ade80;
+        }
+        .job-item.error {
+            border-left-color: #ef4444;
+        }
+        .job-item.pending {
+            border-left-color: #fbbf24;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Sakura 翻译工作区</h1>
+        <div>
+            <button onclick="addMockWorker()">添加测试翻译器</button>
+            <button onclick="addMockJob()">添加测试任务</button>
+        </div>
+    </div>
+
+    <div class="workspace">
+        <div class="panel">
+            <h2>🤖 翻译器列表</h2>
+            <div id="workerList">
+                <div class="worker-item">
+                    <span>共享翻译器 #1</span>
+                    <button onclick="toggleWorker(this)">启动</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>📋 任务队列</h2>
+            <div id="jobList">
+                <div class="n-list-item">
+                    <div>
+                        <div>web/kakuyomu/test123</div>
+                        <div class="n-thing-main__description">测试小说1 - 未完成</div>
+                    </div>
+                    <button>重试</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 调试控制面板 -->
+    <div class="debug-panel">
+        <h3>🔧 调试工具</h3>
+        <button onclick="showLocalStorage()">显示 LocalStorage</button>
+        <button onclick="clearLocalStorage()">清空 LocalStorage</button>
+        <button onclick="simulateAddWorkers()">模拟添加翻译器</button>
+        <button onclick="simulateDeleteWorkers()">模拟删除翻译器</button>
+        <button onclick="simulateLaunch()">模拟启动翻译器</button>
+        <button onclick="loadFromScript()">从脚本加载数据</button>
+        
+        <h4 style="margin-top: 20px;">📋 日志</h4>
+        <div class="log-area" id="logArea"></div>
+    </div>
+
+    <script>
+        // 调试日志系统
+        const DebugLogger = {
+            log: function(message, type = 'info') {
+                const logArea = document.getElementById('logArea');
+                const entry = document.createElement('div');
+                entry.className = `log-entry log-${type}`;
+                const time = new Date().toLocaleTimeString();
+                entry.textContent = `[${time}] ${message}`;
+                logArea.appendChild(entry);
+                logArea.scrollTop = logArea.scrollHeight;
+                console.log(`[${type.toUpperCase()}] ${message}`);
+            },
+            error: function(message) { this.log(message, 'error'); },
+            warn: function(message) { this.log(message, 'warn'); },
+            info: function(message) { this.log(message, 'info'); },
+            debug: function(message) { this.log(message, 'debug'); }
+        };
+
+        // 初始化 localStorage 数据结构
+        function initStorage() {
+            const key = 'workspace-sakura';
+            if (!localStorage.getItem(key)) {
+                localStorage.setItem(key, JSON.stringify({
+                    workers: [],
+                    jobs: [],
+                    uncompletedJobs: []
+                }));
+                DebugLogger.info('已初始化 Sakura 工作区存储');
+            }
+        }
+
+        // 显示 localStorage 内容
+        function showLocalStorage() {
+            DebugLogger.info('=== Sakura 工作区 LocalStorage ===');
+            const key = 'workspace-sakura';
+            const data = localStorage.getItem(key);
+            if (data) {
+                try {
+                    const parsed = JSON.parse(data);
+                    DebugLogger.info(`Workers: ${parsed.workers?.length || 0}`);
+                    DebugLogger.info(`Jobs: ${parsed.jobs?.length || 0}`);
+                    DebugLogger.info(`Uncompleted: ${parsed.uncompletedJobs?.length || 0}`);
+                    DebugLogger.debug(JSON.stringify(parsed, null, 2).substring(0, 500) + '...');
+                    
+                    // 更新界面
+                    updateWorkerList(parsed.workers);
+                    updateJobList(parsed.jobs);
+                } catch (e) {
+                    DebugLogger.error('解析失败: ' + e.message);
+                }
+            } else {
+                DebugLogger.warn('未找到 Sakura 工作区数据');
+            }
+        }
+
+        // 清空 localStorage
+        function clearLocalStorage() {
+            localStorage.removeItem('workspace-sakura');
+            localStorage.removeItem('NTR_ToolBox_Config');
+            localStorage.removeItem('NTR_KeepState');
+            localStorage.removeItem('ntr-panel-position');
+            DebugLogger.warn('已清空所有 NTR ToolBox 相关 LocalStorage');
+            initStorage();
+        }
+
+        // 添加测试翻译器
+        function addMockWorker() {
+            const key = 'workspace-sakura';
+            const data = JSON.parse(localStorage.getItem(key) || '{"workers":[],"jobs":[],"uncompletedJobs":[]}');
+            data.workers.push({
+                id: '测试翻译器 ' + (data.workers.length + 1),
+                endpoint: 'https://sakura-share.one',
+                prevSegLength: 500,
+                segLength: 500
+            });
+            localStorage.setItem(key, JSON.stringify(data));
+            DebugLogger.info('已添加测试翻译器');
+            showLocalStorage();
+        }
+
+        // 添加测试任务
+        function addMockJob() {
+            const key = 'workspace-sakura';
+            const data = JSON.parse(localStorage.getItem(key) || '{"workers":[],"jobs":[],"uncompletedJobs":[]}');
+            data.jobs.push({
+                task: 'web/kakuyomu/test' + Date.now(),
+                description: '测试任务 ' + (data.jobs.length + 1),
+                createAt: Date.now()
+            });
+            localStorage.setItem(key, JSON.stringify(data));
+            DebugLogger.info('已添加测试任务');
+            showLocalStorage();
+        }
+
+        // 模拟添加翻译器模块
+        function simulateAddWorkers() {
+            DebugLogger.info('模拟 "添加Sakura翻译器" 模块...');
+            if (window.script && window.script.configuration) {
+                const module = window.script.configuration.modules.find(m => m.name === '添加Sakura翻譯器');
+                if (module) {
+                    window.script.handleModuleClick(module, null);
+                    setTimeout(showLocalStorage, 500);
+                } else {
+                    DebugLogger.error('未找到模块');
+                }
+            } else {
+                DebugLogger.warn('脚本未加载');
+            }
+        }
+
+        // 模拟删除翻译器模块
+        function simulateDeleteWorkers() {
+            DebugLogger.info('模拟 "刪除翻譯器" 模块...');
+            if (window.script && window.script.configuration) {
+                const module = window.script.configuration.modules.find(m => m.name === '刪除翻譯器');
+                if (module) {
+                    window.script.handleModuleClick(module, null);
+                    setTimeout(showLocalStorage, 500);
+                } else {
+                    DebugLogger.error('未找到模块');
+                }
+            } else {
+                DebugLogger.warn('脚本未加载');
+            }
+        }
+
+        // 模拟启动翻译器
+        function simulateLaunch() {
+            DebugLogger.info('模拟 "啟動翻譯器" 模块...');
+            if (window.script && window.script.configuration) {
+                const module = window.script.configuration.modules.find(m => m.name === '啟動翻譯器');
+                if (module) {
+                    window.script.handleModuleClick(module, null);
+                } else {
+                    DebugLogger.error('未找到模块');
+                }
+            } else {
+                DebugLogger.warn('脚本未加载');
+            }
+        }
+
+        // 从脚本加载数据
+        function loadFromScript() {
+            DebugLogger.info('尝试从脚本加载数据...');
+            showLocalStorage();
+        }
+
+        // 更新界面上的 worker 列表
+        function updateWorkerList(workers) {
+            const list = document.getElementById('workerList');
+            if (workers && workers.length > 0) {
+                list.innerHTML = workers.map(w => `
+                    <div class="worker-item">
+                        <span>${w.id}</span>
+                        <button onclick="toggleWorker(this)">启动</button>
+                    </div>
+                `).join('');
+            } else {
+                list.innerHTML = '<p style="color: #888;">暂无翻译器</p>';
+            }
+        }
+
+        // 更新界面上的 job 列表
+        function updateJobList(jobs) {
+            const list = document.getElementById('jobList');
+            if (jobs && jobs.length > 0) {
+                list.innerHTML = jobs.map(j => `
+                    <div class="n-list-item">
+                        <div>
+                            <div>${j.task}</div>
+                            <div class="n-thing-main__description">${j.description} - 未完成</div>
+                        </div>
+                        <button>重试</button>
+                    </div>
+                `).join('');
+            } else {
+                list.innerHTML = '<p style="color: #888;">暂无任务</p>';
+            }
+        }
+
+        // 切换 worker 状态
+        function toggleWorker(btn) {
+            if (btn.textContent === '启动') {
+                btn.textContent = '停止';
+                btn.style.background = '#ef4444';
+            } else {
+                btn.textContent = '启动';
+                btn.style.background = '#e94560';
+            }
+        }
+
+        // 初始化
+        initStorage();
+        DebugLogger.info('Sakura 工作区调试环境已加载');
+        DebugLogger.info('当前页面: ' + window.location.pathname);
+        
+        // 自动刷新显示
+        setInterval(() => {
+            const key = 'workspace-sakura';
+            const data = localStorage.getItem(key);
+            if (data) {
+                try {
+                    const parsed = JSON.parse(data);
+                    updateWorkerList(parsed.workers);
+                    updateJobList(parsed.jobs);
+                } catch (e) {}
+            }
+        }, 1000);
+    </script>
+</body>
+</html>

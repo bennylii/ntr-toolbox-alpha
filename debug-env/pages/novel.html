@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>测试小说页面 - NTR ToolBox Debug</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+        .header {
+            background: #16213e;
+            padding: 20px;
+            border-bottom: 1px solid #0f3460;
+        }
+        .header h1 {
+            font-size: 24px;
+            margin-bottom: 10px;
+        }
+        .stats {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            padding: 20px;
+            background: #16213e;
+            margin: 20px;
+            border-radius: 8px;
+        }
+        .stats span.n-text {
+            background: #0f3460;
+            padding: 10px 15px;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .content {
+            padding: 20px;
+        }
+        .chapter-list {
+            list-style: none;
+            max-width: 800px;
+        }
+        .chapter-list li {
+            background: #16213e;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            border-left: 3px solid #e94560;
+        }
+        .chapter-list li:hover {
+            background: #1f2b47;
+        }
+        .debug-panel {
+            position: fixed;
+            right: 20px;
+            top: 20px;
+            background: #16213e;
+            padding: 20px;
+            border-radius: 8px;
+            width: 300px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        .debug-panel h3 {
+            margin-bottom: 15px;
+            color: #e94560;
+        }
+        .debug-panel button {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            background: #0f3460;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .debug-panel button:hover {
+            background: #e94560;
+        }
+        .log-area {
+            background: #0a0a14;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: 'Consolas', monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+            margin-top: 10px;
+        }
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 3px 0;
+            border-bottom: 1px solid #1a1a2e;
+        }
+        .log-info { color: #4ade80; }
+        .log-error { color: #ef4444; }
+        .log-warn { color: #fbbf24; }
+        .log-debug { color: #60a5fa; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>测试小说 - 某科学的超电磁炮</h1>
+        <p>作者：镰池和马 | 来源：Kakuyomu</p>
+    </div>
+
+    <!-- 统计信息 - 脚本会查找这个 span -->
+    <div class="stats">
+        <span class="n-text">总计 156 / 百度 0 / 有道 0 / GPT 0 / Sakura 0</span>
+    </div>
+
+    <div class="content">
+        <h2>章节列表</h2>
+        <ul class="chapter-list">
+            <li>第1章 科学的超电磁炮</li>
+            <li>第2章 都市传说</li>
+            <li>第3章 御坂美琴</li>
+            <li>第4章 幻想御手</li>
+            <li>第5章 绝对能力者</li>
+        </ul>
+    </div>
+
+    <!-- 调试控制面板 -->
+    <div class="debug-panel">
+        <h3>🔧 调试工具</h3>
+        <button onclick="simulateSakuraQueue()">模拟排隊Sakura v2</button>
+        <button onclick="simulateGPTQueue()">模拟排隊GPT v2</button>
+        <button onclick="clearLocalStorage()">清空 LocalStorage</button>
+        <button onclick="showLocalStorage()">显示 LocalStorage</button>
+        <button onclick="simulateAuth()">模拟登录状态</button>
+        
+        <h4 style="margin-top: 20px;">📋 日志</h4>
+        <div class="log-area" id="logArea"></div>
+    </div>
+
+    <!-- 本地加载脚本的替代方案：直接嵌入 -->
+    <script>
+        // 调试日志系统
+        const DebugLogger = {
+            log: function(message, type = 'info') {
+                const logArea = document.getElementById('logArea');
+                const entry = document.createElement('div');
+                entry.className = `log-entry log-${type}`;
+                const time = new Date().toLocaleTimeString();
+                entry.textContent = `[${time}] ${message}`;
+                logArea.appendChild(entry);
+                logArea.scrollTop = logArea.scrollHeight;
+                console.log(`[${type.toUpperCase()}] ${message}`);
+            },
+            error: function(message) { this.log(message, 'error'); },
+            warn: function(message) { this.log(message, 'warn'); },
+            info: function(message) { this.log(message, 'info'); },
+            debug: function(message) { this.log(message, 'debug'); }
+        };
+
+        // 模拟 API 响应
+        const MockAPI = {
+            // 模拟小说搜索结果
+            searchNovels: function(limit = 20) {
+                DebugLogger.info(`模拟搜索小说，限制: ${limit}`);
+                return {
+                    items: [
+                        {
+                            providerId: 'kakuyomu',
+                            novelId: '16816927859498123456',
+                            titleZh: '某科学的超电磁炮',
+                            titleJp: 'とある科学の超電磁砲',
+                            total: 156,
+                            sakura: 50,
+                            gpt: 30
+                        },
+                        {
+                            providerId: 'syosetu',
+                            novelId: 'n1234ab',
+                            titleZh: '关于我转生变成史莱姆这档事',
+                            titleJp: '転生したらスライムだった件',
+                            total: 300,
+                            sakura: 100,
+                            gpt: 80
+                        },
+                        {
+                            providerId: 'kakuyomu',
+                            novelId: '16817351567234567890',
+                            titleZh: '无职转生',
+                            titleJp: '無職転生',
+                            total: 250,
+                            sakura: 0,
+                            gpt: 0
+                        }
+                    ]
+                };
+            },
+
+            // 模拟 wenku 详情
+            getWenkuDetail: function(id) {
+                DebugLogger.info(`获取文库详情: ${id}`);
+                return {
+                    volumeJp: [
+                        { volumeId: '第1卷' },
+                        { volumeId: '第2卷' },
+                        { volumeId: '第3卷' }
+                    ]
+                };
+            },
+
+            // 模拟收藏列表
+            getFavorites: function(page = 0) {
+                DebugLogger.info(`获取收藏列表，页码: ${page}`);
+                return {
+                    items: [
+                        { providerId: 'kakuyomu', novelId: 'test1', titleZh: '测试小说1', total: 100, sakura: 50, gpt: 30 },
+                        { providerId: 'syosetu', novelId: 'test2', titleZh: '测试小说2', total: 80, sakura: 40, gpt: 20 }
+                    ]
+                };
+            }
+        };
+
+        // 拦截 fetch 请求
+        const originalFetch = window.fetch;
+        window.fetch = async function(url, options) {
+            DebugLogger.debug(`拦截请求: ${url}`);
+            
+            // 模拟小说搜索 API
+            if (url.includes('/api/novel?')) {
+                const mockData = MockAPI.searchNovels();
+                return Promise.resolve({
+                    ok: true,
+                    json: () => Promise.resolve(mockData)
+                });
+            }
+            
+            // 模拟 wenku API
+            if (url.includes('/api/wenku/')) {
+                const id = url.split('/api/wenku/')[1];
+                const mockData = MockAPI.getWenkuDetail(id);
+                return Promise.resolve({
+                    ok: true,
+                    json: () => Promise.resolve(mockData)
+                });
+            }
+            
+            // 模拟收藏 API
+            if (url.includes('/api/user/favored-web/')) {
+                const mockData = MockAPI.getFavorites();
+                return Promise.resolve({
+                    ok: true,
+                    json: () => Promise.resolve(mockData)
+                });
+            }
+            
+            // 其他请求使用原始 fetch
+            return originalFetch.apply(this, arguments);
+        };
+
+        // 模拟 localStorage 中的 auth token
+        function simulateAuth() {
+            const authData = {
+                profile: {
+                    token: 'mock-token-' + Date.now()
+                }
+            };
+            localStorage.setItem('auth', JSON.stringify(authData));
+            DebugLogger.info('已模拟登录状态，token 已设置');
+        }
+
+        // 显示 localStorage 内容
+        function showLocalStorage() {
+            DebugLogger.info('=== LocalStorage 内容 ===');
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                const value = localStorage.getItem(key);
+                try {
+                    const parsed = JSON.parse(value);
+                    DebugLogger.debug(`${key}: ${JSON.stringify(parsed, null, 2).substring(0, 200)}...`);
+                } catch {
+                    DebugLogger.debug(`${key}: ${value.substring(0, 100)}...`);
+                }
+            }
+        }
+
+        // 清空 localStorage
+        function clearLocalStorage() {
+            localStorage.clear();
+            DebugLogger.warn('已清空 LocalStorage');
+        }
+
+        // 模拟排队 Sakura
+        function simulateSakuraQueue() {
+            DebugLogger.info('开始模拟排隊Sakura v2...');
+            // 触发 NTR ToolBox 模块（如果已加载）
+            if (window.script && window.script.configuration) {
+                const sakuraModule = window.script.configuration.modules.find(m => m.name === '排隊Sakura v2');
+                if (sakuraModule) {
+                    window.script.handleModuleClick(sakuraModule, null);
+                } else {
+                    DebugLogger.error('未找到排隊Sakura v2模块');
+                }
+            } else {
+                DebugLogger.warn('NTR ToolBox 脚本尚未加载，请先加载脚本');
+            }
+        }
+
+        // 模拟排队 GPT
+        function simulateGPTQueue() {
+            DebugLogger.info('开始模拟排隊GPT v2...');
+            if (window.script && window.script.configuration) {
+                const gptModule = window.script.configuration.modules.find(m => m.name === '排隊GPT v2');
+                if (gptModule) {
+                    window.script.handleModuleClick(gptModule, null);
+                } else {
+                    DebugLogger.error('未找到排隊GPT v2模块');
+                }
+            } else {
+                DebugLogger.warn('NTR ToolBox 脚本尚未加载，请先加载脚本');
+            }
+        }
+
+        // 初始化
+        DebugLogger.info('调试环境已加载');
+        DebugLogger.info('当前页面: ' + window.location.pathname);
+        
+        // 模拟加载用户脚本的方式
+        DebugLogger.info('提示：在 Tampermonkey 中添加以下匹配规则以加载本地脚本:');
+        DebugLogger.debug('@match file:///C:/cache/models/debug-env/pages/*.html');
+        DebugLogger.info('或在控制台手动加载脚本内容');
+    </script>
+</body>
+</html>

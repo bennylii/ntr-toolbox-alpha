@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>小说搜索 - NTR ToolBox Debug</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        h1 { color: #fbbf24; margin-bottom: 20px; }
+        .search-box {
+            background: #16213e;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .search-box input {
+            width: 100%;
+            padding: 12px;
+            background: #0f3460;
+            border: none;
+            border-radius: 4px;
+            color: #fff;
+            font-size: 16px;
+        }
+        .filters {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 15px;
+        }
+        .filter-item {
+            background: #0f3460;
+            padding: 8px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .filter-item.active {
+            background: #fbbf24;
+            color: #000;
+        }
+        .novel-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        .novel-card {
+            background: #16213e;
+            padding: 20px;
+            border-radius: 8px;
+            border-left: 3px solid #fbbf24;
+        }
+        .novel-card h3 { color: #fff; margin-bottom: 10px; }
+        .novel-card .meta { color: #888; font-size: 14px; margin-bottom: 10px; }
+        .novel-card .stats { display: flex; gap: 15px; font-size: 13px; }
+        .novel-card .stats span { color: #4ade80; }
+        .debug-panel {
+            position: fixed;
+            right: 20px;
+            top: 20px;
+            background: #16213e;
+            padding: 15px;
+            border-radius: 8px;
+            width: 280px;
+            z-index: 10000;
+        }
+        .debug-panel button {
+            display: block;
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 8px;
+            background: #0f3460;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .debug-panel button:hover { background: #fbbf24; color: #000; }
+        .log-area {
+            background: #0a0a14;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            max-height: 150px;
+            overflow-y: auto;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔍 小说搜索</h1>
+    
+    <div class="search-box">
+        <input type="text" placeholder="中/日文标题或作者" value="超电磁炮">
+        <div class="filters">
+            <div class="filter-item active">Kakuyomu</div>
+            <div class="filter-item">成为小说家吧</div>
+            <div class="filter-item">Novelup</div>
+            <div class="filter-item">全部</div>
+            <div class="filter-item">连载中</div>
+            <div class="filter-item">已完结</div>
+            <div class="filter-item">全部</div>
+        </div>
+    </div>
+
+    <div class="novel-grid" id="novelGrid">
+        <div class="novel-card">
+            <h3>某科学的超电磁炮</h3>
+            <div class="meta">作者：镰池和马 | 来源：Kakuyomu</div>
+            <div class="stats">
+                <span>总计: 156</span>
+                <span>Sakura: 50</span>
+                <span>GPT: 30</span>
+            </div>
+        </div>
+        <div class="novel-card">
+            <h3>关于我转生变成史莱姆这档事</h3>
+            <div class="meta">作者：伏瀬 | 来源：Kakuyomu</div>
+            <div class="stats">
+                <span>总计: 300</span>
+                <span>Sakura: 100</span>
+                <span>GPT: 80</span>
+            </div>
+        </div>
+        <div class="novel-card">
+            <h3>无职转生</h3>
+            <div class="meta">作者：理不尽な孫の手 | 来源：Kakuyomu</div>
+            <div class="stats">
+                <span>总计: 250</span>
+                <span>Sakura: 0</span>
+                <span>GPT: 0</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="debug-panel">
+        <h3 style="color:#fbbf24;margin-bottom:10px;">🔧 调试</h3>
+        <button onclick="simulateQueueSakura()">模拟排隊Sakura</button>
+        <button onclick="simulateQueueGPT()">模拟排隊GPT</button>
+        <button onclick="showLocalStorage()">显示存储</button>
+        <div class="log-area" id="logArea"></div>
+    </div>
+
+    <script>
+        const DebugLogger = {
+            log: function(msg, type = 'info') {
+                const logArea = document.getElementById('logArea');
+                const entry = document.createElement('div');
+                entry.style.color = type === 'error' ? '#ef4444' : type === 'warn' ? '#fbbf24' : '#4ade80';
+                entry.textContent = msg;
+                logArea.appendChild(entry);
+                logArea.scrollTop = logArea.scrollHeight;
+            }
+        };
+
+        // 模拟 API
+        const originalFetch = window.fetch;
+        window.fetch = async function(url) {
+            if (url.includes('/api/novel?')) {
+                return {
+                    ok: true,
+                    json: () => Promise.resolve({
+                        items: [
+                            { providerId: 'kakuyomu', novelId: 'test1', titleZh: '某科学的超电磁炮', titleJp: 'とある科学の超電磁砲', total: 156, sakura: 50, gpt: 30 },
+                            { providerId: 'syosetu', novelId: 'test2', titleZh: '关于我转生变成史莱姆这档事', titleJp: '転生したらスライムだった件', total: 300, sakura: 100, gpt: 80 },
+                            { providerId: 'kakuyomu', novelId: 'test3', titleZh: '无职转生', titleJp: '無職転生', total: 250, sakura: 0, gpt: 0 }
+                        ]
+                    })
+                };
+            }
+            return originalFetch.apply(this, arguments);
+        };
+
+        function simulateQueueSakura() {
+            DebugLogger.log('模拟排隊Sakura v2...');
+            if (window.script && window.script.configuration) {
+                const mod = window.script.configuration.modules.find(m => m.name === '排隊Sakura v2');
+                if (mod) window.script.handleModuleClick(mod, null);
+                else DebugLogger.log('未找到模块', 'error');
+            } else {
+                DebugLogger.log('脚本未加载', 'error');
+            }
+        }
+
+        function simulateQueueGPT() {
+            DebugLogger.log('模拟排隊GPT v2...');
+            if (window.script && window.script.configuration) {
+                const mod = window.script.configuration.modules.find(m => m.name === '排隊GPT v2');
+                if (mod) window.script.handleModuleClick(mod, null);
+                else DebugLogger.log('未找到模块', 'error');
+            } else {
+                DebugLogger.log('脚本未加载', 'error');
+            }
+        }
+
+        function showLocalStorage() {
+            DebugLogger.log('=== LocalStorage ===');
+            ['workspace-sakura', 'gpt-workspace'].forEach(key => {
+                const data = localStorage.getItem(key);
+                if (data) {
+                    const parsed = JSON.parse(data);
+                    DebugLogger.log(`${key}: ${parsed.jobs?.length || 0} jobs`);
+                }
+            });
+        }
+
+        DebugLogger.log('页面加载完成');
+    </script>
+</body>
+</html>

@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NTR ToolBox 本地调试器</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            padding: 40px;
+        }
+        h1 { color: #4ade80; margin-bottom: 20px; }
+        h2 { color: #e94560; margin: 30px 0 15px; }
+        .intro { background: #16213e; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .page-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 15px; }
+        .page-item {
+            background: #0f3460;
+            padding: 20px;
+            border-radius: 8px;
+            text-decoration: none;
+            color: #fff;
+            transition: all 0.3s;
+            border: 2px solid transparent;
+        }
+        .page-item:hover {
+            border-color: #4ade80;
+            transform: translateY(-3px);
+            box-shadow: 0 5px 20px rgba(74, 222, 128, 0.3);
+        }
+        .page-item h3 { color: #4ade80; margin-bottom: 8px; }
+        .page-item p { color: #888; font-size: 14px; }
+        .instructions {
+            background: #16213e;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 40px;
+        }
+        .instructions pre {
+            background: #0a0a14;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-family: 'Consolas', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+        .note {
+            background: #fbbf24;
+            color: #000;
+            padding: 15px;
+            border-radius: 4px;
+            margin-top: 20px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔧 NTR ToolBox 本地调试环境</h1>
+    
+    <div class="intro">
+        <p>这是一个用于在本地调试 NTR ToolBox 脚本的模拟环境。通过此页面可以直接在浏览器中测试脚本的各项功能，无需部署到真实的网站。</p>
+    </div>
+
+    <h2>📄 测试页面</h2>
+    <div class="page-list">
+        <a href="pages/novel.html" class="page-item" target="_blank">
+            <h3>📖 小说详情页</h3>
+            <p>测试排隊Sakura v2和排隊GPT v2功能</p>
+        </a>
+        
+        <a href="pages/workspace-sakura.html" class="page-item" target="_blank">
+            <h3>🤖 Sakura 工作区</h3>
+            <p>测试翻译器添加、删除、启动功能</p>
+        </a>
+        
+        <a href="pages/workspace-gpt.html" class="page-item" target="_blank">
+            <h3>💬 GPT 工作区</h3>
+            <p>测试GPT翻译器管理功能</p>
+        </a>
+        
+        <a href="pages/novels.html" class="page-item" target="_blank">
+            <h3>🔍 小说搜索页</h3>
+            <p>测试批量排队功能</p>
+        </a>
+    </div>
+
+    <div class="instructions">
+        <h2>📝 Tampermonkey 配置方法</h2>
+        <p>要将本地脚本文件添加到 Tampermonkey，请按以下步骤操作：</p>
+        <br>
+        <pre>
+// 1. 在 Tampermonkey 中创建新脚本
+// 2. 复制 NTR_ToolBox.user.js 的全部内容
+// 3. 修改 @match 规则以匹配本地文件：
+
+// ==UserScript==
+// @name         NTR ToolBox (Local Debug)
+// @namespace    http://tampermonkey.net/
+// @version      v0.7.1-debug
+// @match        file:///C:/cache/models/debug-env/pages/*.html
+// @match        https://books.fishhawk.top/*
+// @match        https://books1.fishhawk.top/*
+// @match        https://n.novelia.cc/*
+// @grant        GM_openInTab
+// ==/UserScript==
+
+(function() {
+    'use strict';
+    // ... 脚本内容 ...
+})();</pre>
+
+        <div class="note">
+            ⚠️ 注意：由于浏览器的安全限制，直接打开本地 HTML 文件时可能无法加载外部 JS 文件。
+            建议使用以下方法之一：
+            <br><br>
+            1. 使用 Live Server 或类似工具启动本地服务器<br>
+            2. 将脚本内容直接嵌入到测试页面中<br>
+            3. 在 Chrome 启动参数中添加 --allow-file-access-from-files
+        </div>
+    </div>
+
+    <div class="instructions">
+        <h2>🚀 快速启动本地服务器</h2>
+        <pre># 方法1: 使用 Python
+cd C:/cache/models/debug-env
+python -m http.server 8080
+
+# 方法2: 使用 Node.js (需要安装 http-server)
+npx http-server -p 8080
+
+# 然后访问: http://localhost:8080/pages/novel.html</pre>
+    </div>
+
+    <div class="instructions">
+        <h2>🔍 调试技巧</h2>
+        <ul style="margin-left: 20px; line-height: 2;">
+            <li>打开浏览器的开发者工具 (F12)</li>
+            <li>查看 Console 标签页可以查看脚本的日志输出</li>
+            <li>使用页面上的调试按钮执行各种操作</li>
+            <li>在 Storage 标签页可以查看 localStorage 的变化</li>
+            <li>使用 Network 标签页可以查看 API 请求</li>
+        </ul>
+    </div>
+</body>
+</html>

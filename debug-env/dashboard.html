@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NTR ToolBox Debug Hub</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #4ade80;
+            --primary-dark: #22c55e;
+            --secondary: #e94560;
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --surface-lighter: #334155;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+            --border: #334155;
+            --glass: rgba(30, 41, 59, 0.7);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Sidebar */
+        aside {
+            width: 260px;
+            background: var(--surface);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            padding: 24px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 40px;
+        }
+
+        .logo-icon {
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--bg);
+            font-weight: bold;
+            font-size: 20px;
+        }
+
+        .logo-text {
+            font-weight: 700;
+            font-size: 18px;
+            letter-spacing: -0.5px;
+        }
+
+        nav {
+            flex: 1;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            border-radius: 8px;
+            color: var(--text-muted);
+            text-decoration: none;
+            margin-bottom: 8px;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+
+        .nav-item:hover, .nav-item.active {
+            background: var(--surface-lighter);
+            color: var(--text);
+        }
+
+        .nav-item.active {
+            color: var(--primary);
+            border-left: 3px solid var(--primary);
+            border-top-left-radius: 0;
+            border-bottom-left-radius: 0;
+        }
+
+        /* Main Content */
+        main {
+            flex: 1;
+            padding: 40px;
+            overflow-y: auto;
+            position: relative;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 40px;
+        }
+
+        .header-left h1 {
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .header-left p {
+            color: var(--text-muted);
+        }
+
+        .header-right {
+            display: flex;
+            gap: 16px;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: var(--bg);
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-dark);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(74, 222, 128, 0.3);
+        }
+
+        .btn-outline {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text);
+        }
+
+        .btn-outline:hover {
+            background: var(--surface-lighter);
+        }
+
+        /* Dashboard Grid */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 24px;
+        }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 24px;
+            transition: all 0.3s;
+        }
+
+        .card:hover {
+            border-color: var(--primary);
+            transform: translateY(-4px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .card-title {
+            font-weight: 600;
+            font-size: 18px;
+        }
+
+        .tag {
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            background: var(--surface-lighter);
+            color: var(--text-muted);
+        }
+
+        .tag-active {
+            background: rgba(74, 222, 128, 0.1);
+            color: var(--primary);
+        }
+
+        .page-desc {
+            color: var(--text-muted);
+            font-size: 14px;
+            line-height: 1.6;
+            margin-bottom: 24px;
+            height: 44px;
+            overflow: hidden;
+        }
+
+        /* Quick Actions Section */
+        .actions-section {
+            margin-top: 40px;
+            background: var(--glass);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 32px;
+        }
+
+        .actions-header {
+            margin-bottom: 24px;
+        }
+
+        .actions-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 16px;
+        }
+
+        .action-card {
+            background: var(--surface-lighter);
+            padding: 20px;
+            border-radius: 12px;
+            cursor: pointer;
+            text-align: center;
+            transition: all 0.2s;
+        }
+
+        .action-card:hover {
+            background: var(--primary);
+            color: var(--bg);
+        }
+
+        .action-card i {
+            display: block;
+            font-size: 24px;
+            margin-bottom: 12px;
+        }
+
+        /* Script Info */
+        .script-info {
+            margin-top: 40px;
+            background: #000;
+            border-radius: 12px;
+            padding: 20px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            color: #ccc;
+            border: 1px solid var(--border);
+        }
+
+        .script-info .line {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 4px;
+        }
+
+        .script-info .num {
+            color: #555;
+            text-align: right;
+            width: 30px;
+            user-select: none;
+        }
+
+        .script-info .keyword { color: #c678dd; }
+        .script-info .string { color: #98c379; }
+        .script-info .comment { color: #5c6370; }
+
+        /* Animation */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .card, .actions-section {
+            animation: fadeIn 0.5s ease forwards;
+        }
+    </style>
+</head>
+<body>
+    <aside>
+        <div class="logo">
+            <div class="logo-icon">N</div>
+            <div class="logo-text">NTR ToolBox</div>
+        </div>
+        <nav>
+            <div class="nav-item active">
+                <span>🏠</span> 控制中心
+            </div>
+            <div class="nav-item">
+                <span>📄</span> 脚本文件
+            </div>
+            <div class="nav-item">
+                <span>🔬</span> 模拟测试
+            </div>
+            <div class="nav-item">
+                <span>⚙️</span> 调试设置
+            </div>
+        </nav>
+        <div class="nav-item" style="margin-top: auto; border-top: 1px solid var(--border); pt-4">
+            <span>📚</span> 文档说明
+        </div>
+    </aside>
+
+    <main>
+        <header>
+            <div class="header-left">
+                <h1>调试控制台</h1>
+                <p>当前环境: Local Server | 端口: 3000</p>
+            </div>
+            <div class="header-right">
+                <button class="btn btn-outline" onclick="location.reload()">
+                    <span>🔄</span> 刷新环境
+                </button>
+                <button class="btn btn-primary" onclick="openAllPages()">
+                    <span>🚀</span> 一键注入
+                </button>
+            </div>
+        </header>
+
+        <div class="grid">
+            <!-- Card 1 -->
+            <div class="card" onclick="window.open('pages/novel.html', '_blank')">
+                <div class="card-header">
+                    <span class="card-title">📖 小说详情页</span>
+                    <span class="tag tag-active">Ready</span>
+                </div>
+                <p class="page-desc">测试核心翻译任务排队逻辑 (Sakura v2 / GPT v2)。</p>
+                <button class="btn btn-outline" style="width: 100%; justify-content: center;">打开测试</button>
+            </div>
+
+            <!-- Card 2 -->
+            <div class="card" onclick="window.open('pages/workspace-sakura.html', '_blank')">
+                <div class="card-header">
+                    <span class="card-title">🤖 Sakura 工作区</span>
+                    <span class="tag tag-active">Ready</span>
+                </div>
+                <p class="page-desc">管理翻译器节点，测试添加、删除及批量启动功能。</p>
+                <button class="btn btn-outline" style="width: 100%; justify-content: center;">打开测试</button>
+            </div>
+
+            <!-- Card 3 -->
+            <div class="card" onclick="window.open('pages/workspace-gpt.html', '_blank')">
+                <div class="card-header">
+                    <span class="card-title">💬 GPT 工作区</span>
+                    <span class="tag tag-active">Ready</span>
+                </div>
+                <p class="page-desc">GPT 翻译器管理界面，测试 API 配置及模型切换。</p>
+                <button class="btn btn-outline" style="width: 100%; justify-content: center;">打开测试</button>
+            </div>
+
+            <!-- Card 4 -->
+            <div class="card" onclick="window.open('pages/novels.html', '_blank')">
+                <div class="card-header">
+                    <span class="card-title">🔍 搜索列表页</span>
+                    <span class="tag">Beta</span>
+                </div>
+                <p class="page-desc">测试从搜索结果中批量抓取并添加任务的功能。</p>
+                <button class="btn btn-outline" style="width: 100%; justify-content: center;">打开测试</button>
+            </div>
+        </div>
+
+        <div class="actions-section">
+            <div class="actions-header">
+                <h2>⚡ 快速操作</h2>
+            </div>
+            <div class="actions-grid">
+                <div class="action-card" onclick="clearStorage()">
+                    <span>🧹</span>
+                    <p>重置存储</p>
+                </div>
+                <div class="action-card" onclick="alert('TODO: Log monitoring')">
+                    <span>📝</span>
+                    <p>实时日志</p>
+                </div>
+                <div class="action-card" onclick="alert('TODO: API Mocking')">
+                    <span>🔌</span>
+                    <p>API 模拟器</p>
+                </div>
+                <div class="action-card" onclick="window.open('../NTR_ToolBox.user.js', '_blank')">
+                    <span>🛠️</span>
+                    <p>编辑源文件</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="script-info">
+            <div class="line"><span class="num">1</span><span class="comment">// ==UserScript==</span></div>
+            <div class="line"><span class="num">2</span><span class="comment">// @name         NTR ToolBox</span></div>
+            <div class="line"><span class="num">3</span><span class="comment">// @namespace    http://tampermonkey.net/</span></div>
+            <div class="line"><span class="num">4</span><span class="comment">// @version      v0.7.1</span></div>
+            <div class="line"><span class="num">5</span><span class="comment">// ... 正在读取完整脚本头 ...</span></div>
+        </div>
+    </main>
+
+    <script>
+        function openAllPages() {
+            const pages = ['pages/novel.html', 'pages/workspace-sakura.html', 'pages/workspace-gpt.html'];
+            pages.forEach(p => window.open(p, '_blank'));
+        }
+
+        function clearStorage() {
+            if (confirm('确定要清空本地所有 NTR ToolBox 的调试数据吗？')) {
+                const keys = ['workspace-sakura', 'gpt-workspace', 'NTR_ToolBox_Config', 'NTR_KeepState', 'ntr-panel-position'];
+                keys.forEach(k => localStorage.removeItem(k));
+                alert('数据已清空');
+            }
+        }
+
+        // 模拟脚本头部加载
+        fetch('../NTR_ToolBox.user.js')
+            .then(res => res.text())
+            .then(text => {
+                const lines = text.split('\n').slice(0, 15);
+                const container = document.querySelector('.script-info');
+                container.innerHTML = '';
+                lines.forEach((line, i) => {
+                    const div = document.createElement('div');
+                    div.className = 'line';
+                    div.innerHTML = `<span class="num">${i+1}</span><span class="comment">${line}</span>`;
+                    container.appendChild(div);
+                });
+            });
+    </script>
+</body>
+</html>

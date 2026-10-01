@@ -1,0 +1,26 @@
+# 嵌套的独立仓库（各带自己的 .git）与第三方大块内容
+an-mem-exp/
+auto-novel/
+extensions/
+
+# Chrome 测试 profile（240M，含登录态，绝不入库）
+chrome-test-profile/
+chrome-measure-profile/
+
+# 运行产物 / 日志 / 临时文件
+*.log
+mock-llm/*.out
+tools/.tmp*
+dryrun.json
+panel.png
+queue-panel.png
+review-overlay.png
+__pycache__/
+tools/.o-*.json
+tools/.st.json
+tools/.engine-extract.mjs
+overlay-suspect.png
+queue-log.png
+queue-buttons.png
+queue-buttons-empty.png
+queue-translator-open.png

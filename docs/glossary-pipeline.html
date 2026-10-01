@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>NTR ToolBox · 队列提取术语表——流程图</title>
+<style>
+  :root {
+    --bg: #16181c; --card: #1f2228; --line: #33383f; --txt: #d8dde4; --dim: #98a1ab;
+    --accent: #4a8a4a; --accent2: #3f6ea8; --warn: #b5892f; --purple: #7b5ea8;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--txt);
+         font: 14px/1.6 "Microsoft YaHei", "PingFang SC", Arial, sans-serif; padding: 28px 32px 60px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 22px; }
+  .wrap { max-width: 1080px; }
+  .group { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px 16px; margin: 0 0 14px; background: #1b1e23; }
+  .group > h2 { font-size: 13px; margin: 0 0 10px; color: var(--dim); font-weight: 600; letter-spacing: .04em; }
+  .row { display: flex; gap: 14px; align-items: stretch; }
+  .box { flex: 1; background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--accent2);
+         border-radius: 8px; padding: 10px 12px; min-width: 0; }
+  .box b { display: block; margin-bottom: 3px; }
+  .box small { color: var(--dim); display: block; }
+  .box .code { font-family: Consolas, Menlo, monospace; font-size: 12px; color: #a8c8e8; }
+  .box.io { border-left-color: var(--accent); }
+  .box.warn { border-left-color: var(--warn); }
+  .box.ui { border-left-color: var(--purple); }
+  .arrow { text-align: center; color: #5c6675; font-size: 16px; line-height: 1; margin: 8px 0; }
+  .branch { margin-top: 8px; padding: 8px 10px; background: #23262c; border: 1px dashed #3c434c; border-radius: 8px; font-size: 12.5px; color: #c3cad3; }
+  .branch b { color: #e8c46a; }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; color: var(--dim); font-size: 12px; margin: 4px 0 18px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .two { display: flex; gap: 14px; }
+  .two > .box { flex: 1; }
+  ol, ul { margin: 4px 0 0 18px; padding: 0; }
+  li { margin: 2px 0; }
+  .tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #2c3037; color: #b9c2cc; margin-left: 6px; }
+  .tag.g { background: #24401f; color: #b9e0a8; }
+  .tag.y { background: #40361d; color: #ecd08a; }
+  .tag.b { background: #1f3247; color: #a8c8e8; }
+  code { background: #262a31; padding: 1px 5px; border-radius: 4px; font-size: 12px; color: #a8c8e8; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>往队列喂一个文本 → 提取术语表：完整流程</h1>
+  <div class="sub">对应 NTR ToolBox 里的「术语队列」+「AI提取术语表」；括号里是代码里的名字，方便对照调试日志（<code>[NTR-G]</code> 前缀）</div>
+
+  <div class="legend">
+    <span><i style="background:#3f6ea8"></i>主流程</span>
+    <span><i style="background:#4a8a4a"></i>只读 / 落库</span>
+    <span><i style="background:#b5892f"></i>失败与分支</span>
+    <span><i style="background:#7b5ea8"></i>人工关卡</span>
+  </div>
+
+  <div class="group">
+    <h2>0 · 入队</h2>
+    <div class="row">
+      <div class="box">
+        <b>加进队列 <small>面板「加入当前页 / 加入收藏页 / 加入本地书架」，或「AI提取术语表」在「任务方式=加入队列」时点一下模块</small></b>
+        <span class="code">addJobs(targets, extractSettings())</span>
+        <small>把「目标 + 设置快照」写进 IndexedDB <code>ntr-glossary/jobs</code>（任务持久化，刷新/关页面都还在）</small>
+      </div>
+      <div class="box warn">
+        <b>哪些设置现在固定、哪些跟着你改</b>
+        <small><b>入队时快照</b>：原文语言 · 分块字数 · 最大轮数 · 行数上限 · 输出上限 · 翻译器（含临时端点/模型/Key）</small>
+        <small><b>每次开跑实时读</b>：并发 · RPM · 逾时（<code>jobRuntime()</code>，改设置影响下一个任务/下次续跑）</small>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow">▼</div>
+
+  <div class="group">
+    <h2>1 · 开跑</h2>
+    <div class="row">
+      <div class="box">
+        <b>队列点「开始/续跑」<small>或刷新页面 2.5s 后自动续跑（有 pending 且「自动续跑」开着时）</small></b>
+        <small>任务置 <code>running</code> → 日志「任务开始」→ <code>jobRuntime()</code> 取实时参数</small>
+      </div>
+      <div class="box">
+        <b>解析翻译器 <span class="tag b">resolveWorkers</span></b>
+        <small>工作区 GPT 翻译器（下拉选的或全部轮换）／临时端点三元组；一个都没有 → 任务失败并写清原因</small>
+      </div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="row">
+      <div class="box io">
+        <b>抓正文（全程只读）<span class="tag g">loadGlossarySourceText</span></b>
+        <ul>
+          <li><b>网页小说</b>：<code>GET /api/novel/{provider}/{id}</code> 拿标题 → <code>/file?mode=jp</code> 下载 txt</li>
+          <li><b>文库</b>：<code>GET /api/wenku/{id}</code> → <code>volumeJp[]</code> → 每卷 <code>translate-v2/gpt/{卷}</code> 拿 toc → <code>chapter-task/{章}</code> 的 <code>paragraphJp[]</code> 拼正文</li>
+          <li><b>本地卷</b>：站点 IDB <code>volumes@2</code> 里逐章读</li>
+        </ul>
+        <small>文库抓取进度会写回 <code>job.progress.sync</code>（面板「备注」列实时显示）</small>
+      </div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="row">
+      <div class="box">
+        <b>行级清洗</b>
+        <small><code>splitLines → languageFilter(原文语言) → ruleFilter(资源名/纯符号行…) → 行数上限</code></small>
+      </div>
+      <div class="box warn">
+        <b>空正文</b>
+        <small>过滤后 0 行 → 任务失败「正文为空」（换原文语言或换书）</small>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow">▼</div>
+
+  <div class="group">
+    <h2>2 · 缺口计算：这次到底要跑哪些行</h2>
+    <div class="row">
+      <div class="box">
+        <b>读分块缓存记录 <span class="tag b">jobChunkRecords</span></b>
+        <small>IDB <code>chunks</code> 里键以 <code>job:&lt;任务id&gt;/</code> 开头的记录，每条都带它覆盖过的正文行</small>
+      </div>
+      <div class="box">
+        <b>多重集差 <span class="tag b">uncoveredLines</span></b>
+        <small>「这本书的行」减去「已成功块覆盖的行」→ 只把没覆盖过的行发出去（同一行出现多次也各自计数）</small>
+      </div>
+    </div>
+    <div class="branch">
+      <b>没有未覆盖行</b> → 直接置「待确认」，提示「没有未处理的正文行」，一个请求都不发。这就是「重试」按钮走的路：<b>只补漏，不重跑</b>。
+      <br><b>缓存命名空间</b>：整本跑用 <code>job:&lt;id&gt;</code>，补跑用 <code>job:&lt;id&gt;/fill</code>（补跑的块序号不再对应书里的位置，分开存避免错接）。
+    </div>
+  </div>
+
+  <div class="arrow">▼</div>
+
+  <div class="group">
+    <h2>3 · 轮次循环 <span class="tag b">runJob</span></h2>
+    <div class="row">
+      <div class="box">
+        <b>每轮预算</b>
+        <small><code>roundBudget = max(200, 分块字数 ÷ 2^(第几轮−1))</code>：<b>第 1、2 轮同预算</b>（瞬时失败原样再来一次），<b>第 3 轮起才减半</b></small>
+      </div>
+      <div class="box">
+        <b>分块 <span class="tag b">makeChunks</span></b>
+        <small>按预算切行（同时限制行数，避免短句挤爆），每块带原文文本</small>
+      </div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="row">
+      <div class="box">
+        <b>并发 worker 抢块，每块依次过：</b>
+        <ol>
+          <li><b>缓存命中？</b> 键 <code>…/r&lt;轮&gt;/c&lt;序号&gt;</code>，命中还要 <code>linesMatch</code> 核对行一致 → 直接复用（不重发、不计速）</li>
+          <li><b>限流闸门</b>：令牌桶（并发/RPM）+ 全局冷却（被限流后的等待，停止键可打断）</li>
+          <li><b>选 worker</b>：轮转 + 连续失败 2 次冷却 60s → <code>POST {endpoint}/v1/chat/completions</code>（温度 0，默认不发 <code>max_tokens</code>）</li>
+          <li><b>解析</b>：剥 thinking → JSONLINE 逐行修复 → 条目（含 type/count 上下文）</li>
+        </ol>
+      </div>
+    </div>
+    <div class="branch">
+      <b>成功</b> → 条目进内存、这些行记为已覆盖、<b>写分块缓存</b>（下次刷新/重试直接复用）；
+      <b>失败</b>（429 / 超时 / 空响应）→ 行退回待处理、块失败 +1、按上游要求进冷却。
+      <br><b>轮末</b>：没轮到的块（点了停止）的行也归还，然后带着剩下的行进下一轮；待处理为空或到「最大轮数」就收尾。
+    </div>
+  </div>
+
+  <div class="arrow">▼</div>
+
+  <div class="group">
+    <h2>4 · 后处理（零 token，<span class="tag b">postProcess</span>）</h2>
+    <div class="row">
+      <div class="box">
+        <b>清洗与投票</b>
+        <ol>
+          <li>归一化（全角→半角 / 去振假名）</li>
+          <li>按标点拆分对齐（<code>アリス・ローズ</code> → 两条）</li>
+          <li><b>整句丢弃</b>：src 含句读（。！？、等）直接扔 <span class="tag y">清洗计数</span></li>
+          <li>超长（&gt;32 宽）/ 黑名单类型（其他）丢弃</li>
+          <li>同 src 投票选最佳 dst/type，去重</li>
+          <li><b>敬称合并</b>：<code>アルテさん</code> 且 <code>アルテ</code> 也在表里 → 丢掉带敬称的（<code>なるちゃん</code> 这类整体昵称不动）<span class="tag y">清洗计数</span></li>
+        </ol>
+      </div>
+      <div class="box">
+        <b>回全文数次数 <span class="tag b">searchForContext</span></b>
+        <small>倒排索引（相邻字符对→行）算每个词的 count 与上下文；用长的先匹配、再打掩码防子串误配。</small>
+        <small>count=0 的条目丢掉；count 与上下文也是弹层「次数」列和排序的依据。</small>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow">▼</div>
+
+  <div class="group">
+    <h2>5 · 合并 + 落库</h2>
+    <div class="row">
+      <div class="box">
+        <b>和已有结果合并</b>
+        <small>补跑场景：新条目按 src 并进旧条目，然后<b>按全文重算一遍 count</b>（只拿补跑片段统计会偏小）</small>
+      </div>
+      <div class="box io">
+        <b>写回任务 <span class="tag g">put(job)</span></b>
+        <small><code>progress</code>（轮次/块数/<b>已覆盖 X/Y 行</b>/预计剩余）、<code>entries</code>、<code>resultCount</code>、<code>state</code> 全部进 IDB；面板与日志同步</small>
+      </div>
+    </div>
+    <div class="branch">
+      <b>停止</b> → 回到「待处理」（已跑过的块都在缓存里，点「开始/续跑」接着来）；
+      <b>一条都没提取到</b> → 「失败」；
+      <b>否则</b> → 「待确认」。
+      若开了队列设置<b>「自动确认纯新增」</b>且结果是纯新增（无冲突/相同）→ 跳过人工关卡直接写入并置「完成」。
+      完成通知会带上「清洗：整句 X 条 / 敬称 Y 条」。
+    </div>
+  </div>
+
+  <div class="arrow">▼</div>
+
+  <div class="group">
+    <h2>6 · 人工关卡：「待确认」（这一层才是你自己把关的地方）</h2>
+    <div class="row">
+      <div class="box ui">
+        <b>「预览」= 预览-合并-diff</b>
+        <ul>
+          <li>行状态：新增 / 冲突 / 相同 / 仅已有；按类型、次数、搜索过滤，表头可排序</li>
+          <li><b>「可疑」页签</b>：过长 / 像短语 / 带敬称 / 含标点——只提示，不删、不动勾选</li>
+          <li><b>次数过滤</b>（默认藏低频词）、类型勾选、「筛选 ▾」面板</li>
+        </ul>
+      </div>
+      <div class="box ui">
+        <b>「再次筛选」= LLM 审计</b>
+        <small>把条目分批（300/批）发给模型，只打「建议删」标签（复合词不拆 / 称呼控制 / 整句过长…），筛完问你要不要取消勾选；<b>按「并发」并行发批</b>，进度在面板里刷新</small>
+      </div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="row">
+      <div class="box ui">
+        <b>不满意就重来</b>
+        <small><b>「重试」</b>= 接着跑，只补没覆盖到的正文行（走 <code>/fill</code> 缓存，不重发已成功的块）；<br><b>「重跑」</b>= 整本重来一遍（成功的块仍然走缓存，结果整批重算）</small>
+      </div>
+      <div class="box io">
+        <b>「合并写入」<span class="tag g">writeGlossaryMerged</span></b>
+        <small>① 先给当前术语表存一份<b>版本快照</b>（每目标保留最近 20 个，可回滚）② 合并现有 → ③ <code>PUT /api/…/glossary</code>（本地卷写站点 IDB）</small>
+        <small>站点会提示<b>已翻译章节过期</b>，需要重新生成翻译才生效</small>
+      </div>
+    </div>
+  </div>
+
+  <div class="group">
+    <h2>7 · 出错时看哪里</h2>
+    <div class="row">
+      <div class="box">
+        <b>开「调试日志」（AI提取术语表 设置里，默认关）</b>
+        <small>每个阶段的事件都会带时间戳写 Console 并留在内存里（WARN/ERROR 一直记，INFO 开了才记）</small>
+      </div>
+      <div class="box">
+        <b>队列面板「导出日志」</b>
+        <small>下载一个 txt：请求耗时/worker/HTTP 码/冷却/缓存命中/轮次预算/清洗统计都在里面 —— 出问题直接导出丢给我就行</small>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

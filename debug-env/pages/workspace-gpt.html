@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPT 工作区 - NTR ToolBox Debug</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+        .header {
+            background: #16213e;
+            padding: 20px;
+            border-bottom: 1px solid #0f3460;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 { font-size: 24px; }
+        button {
+            padding: 8px 16px;
+            background: #60a5fa;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+        button:hover { background: #93c5fd; }
+        .workspace { padding: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .panel {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 20px;
+            min-height: 400px;
+        }
+        .panel h2 {
+            margin-bottom: 15px;
+            color: #60a5fa;
+            border-bottom: 2px solid #0f3460;
+            padding-bottom: 10px;
+        }
+        .n-list-item {
+            background: #0f3460;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+        }
+        .worker-item, .job-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background: #0f3460;
+            margin-bottom: 8px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>GPT 翻译工作区</h1>
+        <div>
+            <button onclick="addMockWorker()">添加测试翻译器</button>
+            <button onclick="addMockJob()">添加测试任务</button>
+        </div>
+    </div>
+    <div class="workspace">
+        <div class="panel">
+            <h2>🤖 翻译器列表</h2>
+            <div id="workerList"><p style="color:#888;">暂无翻译器</p></div>
+        </div>
+        <div class="panel">
+            <h2>📋 任务队列</h2>
+            <div id="jobList"><p style="color:#888;">暂无任务</p></div>
+        </div>
+    </div>
+    <script>
+        function initStorage() {
+            const key = 'gpt-workspace';
+            if (!localStorage.getItem(key)) {
+                localStorage.setItem(key, JSON.stringify({ workers: [], jobs: [], uncompletedJobs: [] }));
+            }
+        }
+        function addMockWorker() {
+            const key = 'gpt-workspace';
+            const data = JSON.parse(localStorage.getItem(key) || '{"workers":[],"jobs":[],"uncompletedJobs":[]}');
+            data.workers.push({ id: 'NTR translator ' + (data.workers.length + 1), type: 'api', model: 'deepseek-chat', endpoint: 'https://api.deepseek.com', key: 'sk-test' });
+            localStorage.setItem(key, JSON.stringify(data));
+            updateList();
+        }
+        function addMockJob() {
+            const key = 'gpt-workspace';
+            const data = JSON.parse(localStorage.getItem(key) || '{"workers":[],"jobs":[],"uncompletedJobs":[]}');
+            data.jobs.push({ task: 'web/kakuyomu/test' + Date.now(), description: '测试任务 ' + (data.jobs.length + 1), createAt: Date.now() });
+            localStorage.setItem(key, JSON.stringify(data));
+            updateList();
+        }
+        function updateList() {
+            const key = 'gpt-workspace';
+            const data = JSON.parse(localStorage.getItem(key) || '{"workers":[],"jobs":[]}');
+            document.getElementById('workerList').innerHTML = data.workers.length ? data.workers.map(w => `<div class="worker-item"><span>${w.id} (${w.model})</span><button>启动</button></div>`).join('') : '<p style="color:#888;">暂无翻译器</p>';
+            document.getElementById('jobList').innerHTML = data.jobs.length ? data.jobs.map(j => `<div class="job-item"><div><div>${j.task}</div><div style="font-size:12px;color:#888;">${j.description}</div></div><button>重试</button></div>`).join('') : '<p style="color:#888;">暂无任务</p>';
+        }
+        initStorage();
+        setInterval(updateList, 1000);
+    </script>
+</body>
+</html>
