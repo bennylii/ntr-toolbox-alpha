@@ -3071,6 +3071,10 @@
 .ntr-g-overlay .ntr-g-stats { font-size: 12px; color: #999; }
 .ntr-g-overlay .ntr-g-eta { margin-left: auto; color: #9CC7A8; }
 .ntr-g-overlay .ntr-g-toolbar { padding: 8px 14px; border-bottom: 1px solid #2a2a2a; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; }
+/* 队列工具栏按钮多（12 个），收紧间距/内边距让 1080 宽下不换行；「运行翻译器」选中 worker 后会变长，限宽省略 */
+#ntr-queue-overlay .ntr-g-toolbar { gap: 5px; }
+#ntr-queue-overlay .ntr-g-toolbar .ntr-g-btn { font-size: 12px; padding: 5px 8px; white-space: nowrap; }
+#ntr-queue-overlay .ntr-g-toolbar .ntr-g-shrink { max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
 .ntr-g-overlay .ntr-g-tab { padding: 3px 10px; border: 1px solid #3a3a3a; border-radius: 12px; cursor: pointer; color: #AAA; background: #262626; }
 .ntr-g-overlay .ntr-g-tab.active { background: #2E5A2E; border-color: #4a8a4a; color: #DFD; }
 .ntr-g-overlay input[type=text], .ntr-g-overlay input[type=number] { background: #232323; border: 1px solid #3a3a3a; color: #CCC; border-radius: 4px; padding: 3px 8px; }
@@ -4942,6 +4946,7 @@
             // 选中具体 worker 后，新入队任务 + 队列里 pending 任务的 options.workerId 会被它覆盖
             // （已经开跑或带结果的，按既有快照走，不被覆盖）
             const btnTranslator = mkBtn('运行翻译器 ▾', () => openTranslatorPopover());
+            btnTranslator.classList.add('ntr-g-shrink');   // 文案会带 worker id 变长，工具栏里限宽省略（完整值在 title 里）
             const btnExport = mkBtn('汇出备份', async () => {
                 const data = await exportBackup();
                 GlossaryUI.downloadText(`ntr-glossary-queue.${Date.now()}.json`, JSON.stringify(data, null, 2));
