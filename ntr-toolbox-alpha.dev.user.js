@@ -6327,200 +6327,219 @@
         }
     }
 
+    // -----------------------------------
+    // 面板样式（clean-room 重写，契约：docs/cleanroom/spec-05-css-and-shell.md）
+    // 选择器是 DOM/e2e 契约、渲染像素级一致；只另起分组、声明次序与注释
+    // -----------------------------------
     const css = document.createElement('style');
     css.textContent = `
+    /* —— 面板本体 —— */
     #ntr-panel {
-        position: fixed;
-        left: 20px;
-        top: 70px;
-        z-index: 9999;
-        background: #1E1E1E;
-        color: #BBB;
-        padding: 8px;
-        border-radius: 8px;
-        font-family: Arial, sans-serif;
-        width: 320px;
-        box-shadow: 2px 2px 12px rgba(0,0,0,0.5);
-        border: 1px solid #333;
-        transition: width 0.3s ease, height 0.3s ease, top 0.3s ease, left 0.3s ease;
+      position: fixed;
+      left: 20px;
+      top: 70px;
+      z-index: 9999;
+      width: 320px;
+      padding: 8px;
+      background: #1E1E1E;
+      color: #BBB;
+      font-family: Arial, sans-serif;
+      border: 1px solid #333;
+      border-radius: 8px;
+      box-shadow: 2px 2px 12px rgba(0,0,0,0.5);
+      transition: width 0.3s ease, height 0.3s ease, top 0.3s ease, left 0.3s ease;
     }
     #ntr-panel.minimized {
-        width: 200px;
+      width: 200px;
     }
     .ntr-titlebar {
-        font-weight: bold;
-        padding: 10px;
-        cursor: move;
-        background: #292929;
-        border-radius: 6px;
-        color: #CCC;
-        user-select: none;
+      padding: 10px;
+      background: #292929;
+      color: #CCC;
+      font-weight: bold;
+      border-radius: 6px;
+      cursor: move;
+      user-select: none;
     }
     .ntr-panel-body {
-        padding: 6px;
-        background: #232323;
-        border-radius: 4px;
-        overflow-y: auto;
-        max-height: 80vh;
-        transition: max-height 0.3s ease;
+      max-height: 80vh;
+      padding: 6px;
+      background: #232323;
+      border-radius: 4px;
+      overflow-y: auto;
+      transition: max-height 0.3s ease;
     }
     #ntr-panel.minimized .ntr-panel-body {
-        max-height: 0;
+      max-height: 0;
     }
+
+    /* —— 模块行 —— */
     .ntr-module-container {
-        margin-bottom: 12px;
-        border: 1px solid #444;
-        border-radius: 4px;
+      margin-bottom: 12px;
+      border: 1px solid #444;
+      border-radius: 4px;
     }
     .ntr-module-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        background: #2E2E2E;
-        padding: 6px 8px;
-        border-radius: 3px 3px 0 0;
-        border-bottom: 1px solid #333;
-        cursor: pointer;
-        transition: background 0.3s;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 8px;
+      background: #2E2E2E;
+      border-bottom: 1px solid #333;
+      border-radius: 3px 3px 0 0;
+      cursor: pointer;
+      transition: background 0.3s;
     }
     .ntr-module-header:hover {
-        background: #3a3a3a;
+      background: #3a3a3a;
     }
+    .ntr-module-header.active {
+      background: #63E2B7 !important;
+      color: #fff !important;
+    }
+    /* 「术语队列」行尾速览角标（分叉自有元素） */
     .ntr-module-glance {
-        margin-left: auto;
-        padding-left: 8px;
-        font-size: 11px;
-        color: #6f6f6f;
-        font-family: Consolas, "Courier New", monospace;
-        white-space: nowrap;
+      margin-left: auto;
+      padding-left: 8px;
+      font-size: 11px;
+      color: #6f6f6f;
+      font-family: Consolas, "Courier New", monospace;
+      white-space: nowrap;
     }
     .ntr-module-glance.has { color: #c8a24a; }
     .ntr-module-glance.busy { color: #63b363; }
+
+    /* —— 设置区（settingGroups 折叠框为分叉自有） —— */
     .ntr-settings-container {
-        padding: 6px;
-        background: #1C1C1C;
-        display: none;
+      display: none;
+      padding: 6px;
+      background: #1C1C1C;
     }
     .ntr-settings-group {
-        margin-bottom: 8px;
-        border: 1px solid #3a3a3a;
-        border-radius: 4px;
-        background: #202020;
-        padding: 6px 8px;
+      margin-bottom: 8px;
+      padding: 6px 8px;
+      background: #202020;
+      border: 1px solid #3a3a3a;
+      border-radius: 4px;
     }
     .ntr-settings-group-head {
-        cursor: pointer;
-        color: #ddd;
-        font-size: 12px;
-        user-select: none;
-    }
-    .ntr-settings-group-head.disabled {
-        color: #888;
+      color: #ddd;
+      font-size: 12px;
+      cursor: pointer;
+      user-select: none;
     }
     .ntr-settings-group-head:hover {
-        color: #fff;
+      color: #fff;
     }
+    .ntr-settings-group-head.disabled {
+      color: #888;
+    }
+
+    /* —— 输入控件 —— */
     .ntr-input {
-        width: 120px;
-        padding: 4px;
-        border: 1px solid #555;
-        border-radius: 4px;
-        background: #2A2A2A;
-        color: #FFF;
+      width: 120px;
+      padding: 4px;
+      background: #2A2A2A;
+      color: #FFF;
+      border: 1px solid #555;
+      border-radius: 4px;
     }
     .ntr-number-input {
-        width: 60px;
-        padding: 4px;
-        border: 1px solid #555;
-        border-radius: 4px;
-        background: #2A2A2A;
-        color: #FFF;
+      width: 60px;
+      padding: 4px;
+      background: #2A2A2A;
+      color: #FFF;
+      border: 1px solid #555;
+      border-radius: 4px;
     }
     .ntr-bind-button {
-        padding: 4px 8px;
-        border: 1px solid #555;
-        border-radius: 4px;
-        background: #2A2A2A;
-        color: #FFF;
-        cursor: pointer;
+      padding: 4px 8px;
+      background: #2A2A2A;
+      color: #FFF;
+      border: 1px solid #555;
+      border-radius: 4px;
+      cursor: pointer;
     }
+
+    /* —— 信息栏 —— */
     .ntr-info {
-        display: flex;
-        justify-content: space-between;
-        font-size: 10px;
-        color: #888;
-        margin-top: 8px;
+      display: flex;
+      justify-content: space-between;
+      margin-top: 8px;
+      font-size: 10px;
+      color: #888;
     }
-    .ntr-module-header.active {
-        background: #63E2B7 !important;
-        color: #fff !important;
-    }
+
+    /* —— toast 通知 —— */
     .ntr-notification-container {
-        position: fixed;
-        top: 20px;
-        left: 50%;
-        transform: translateX(-50%);
-        z-index: 9999;
-        display: flex;
-        flex-direction: column;
-        align-items: flex-start;
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      transform: translateX(-50%);
     }
     .ntr-notification-message {
-        display: flex;
-        align-items: center;
-        min-width: 200px;
-        margin-top: 8px;
-        padding: 4px 8px;
-        border-radius: 4px;
-        background-color: #2A2A2A;
-        color: #fff;
-        font-size: 14px;
-        font-family: sans-serif;
-        opacity: 1;
-        transition: opacity 0.3s ease;
+      display: flex;
+      align-items: center;
+      min-width: 200px;
+      margin-top: 8px;
+      padding: 4px 8px;
+      background-color: #2A2A2A;
+      color: #fff;
+      font-size: 14px;
+      font-family: sans-serif;
+      border-radius: 4px;
+      opacity: 1;
+      transition: opacity 0.3s ease;
     }
     .ntr-notification-message .ntr-icon {
-        margin-right: 4px;
-        font-size: 16px;
+      margin-right: 4px;
+      font-size: 16px;
     }
     .ntr-notification-message.fade-out {
-        opacity: 0;
+      opacity: 0;
     }
-    /* Glossary Visual Feedback Badge Styles */
+
+    /* —— 术语表填充徽章 —— */
     .ntr-glossary-badge {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 20px;
-        height: 20px;
-        border-radius: 50%;
-        font-size: 12px;
-        margin-right: 6px;
-        transition: all 0.3s ease;
-        cursor: help;
-        flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      margin-right: 6px;
+      font-size: 12px;
+      border-radius: 50%;
+      cursor: help;
+      flex-shrink: 0;
+      transition: all 0.3s ease;
     }
     .ntr-glossary-pending {
-        background: linear-gradient(135deg, #fbbf24, #f59e0b);
-        animation: ntr-pulse 1.5s infinite;
+      background: linear-gradient(135deg, #fbbf24, #f59e0b);
+      animation: nta-pulse 1.5s infinite;
     }
     .ntr-glossary-success {
-        background: linear-gradient(135deg, #4ade80, #22c55e);
-        box-shadow: 0 0 8px rgba(34, 197, 94, 0.5);
+      background: linear-gradient(135deg, #4ade80, #22c55e);
+      box-shadow: 0 0 8px rgba(34, 197, 94, 0.5);
     }
     .ntr-glossary-fail {
-        background: linear-gradient(135deg, #ef4444, #dc2626);
-        box-shadow: 0 0 8px rgba(220, 38, 38, 0.5);
+      background: linear-gradient(135deg, #ef4444, #dc2626);
+      box-shadow: 0 0 8px rgba(220, 38, 38, 0.5);
     }
-    @keyframes ntr-pulse {
-        0%, 100% { transform: scale(1); opacity: 1; }
-        50% { transform: scale(0.9); opacity: 0.7; }
+    @keyframes nta-pulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(0.9); opacity: 0.7; }
     }
+
+    /* —— 窄屏缩放 —— */
     @media only screen and (max-width:600px) {
-        #ntr-panel {
-            transform: scale(0.6);
-            transform-origin: top left;
-        }
+      #ntr-panel {
+        transform: scale(0.6);
+        transform-origin: top left;
+      }
     }
     `;
     document.head.appendChild(css);
