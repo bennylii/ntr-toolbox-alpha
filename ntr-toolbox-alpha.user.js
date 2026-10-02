@@ -126,13 +126,14 @@
             newStringSetting('bind', 'none'),
         ],
         run: async function (cfg) {
-            const totalCount = getModuleSetting(cfg, '数量') || 1;
-            const namePrefix = getModuleSetting(cfg, '名称') || '';
-            const linkValue = getModuleSetting(cfg, '链接') || '';
-
-            StorageUtils.addSakuraWorker(namePrefix, linkValue, totalCount);
-        }
-    }
+            // 批量注册到站点工作区：数量>1 时按 名称+序号 命名（同 id 覆盖、新 id 追加，由 StorageUtils 负责）
+            StorageUtils.addSakuraWorker(
+                getModuleSetting(cfg, '名称') || '',
+                getModuleSetting(cfg, '链接') || '',
+                getModuleSetting(cfg, '数量') || 1,
+            );
+        },
+    };
 
     const moduleAddGPTTranslator = {
         name: '添加GPT翻译器',
@@ -147,14 +148,14 @@
             newStringSetting('bind', 'none'),
         ],
         run: async function (cfg) {
-            const totalCount = getModuleSetting(cfg, '数量') || 1;
-            const namePrefix = getModuleSetting(cfg, '名称') || '';
-            const model = getModuleSetting(cfg, '模型') || '';
-            const apiKey = getModuleSetting(cfg, 'Key') || '';
-            const apiUrl = getModuleSetting(cfg, '链接') || '';
-
-            StorageUtils.addGPTWorker(namePrefix, model, apiUrl, apiKey, totalCount);
-        }
+            StorageUtils.addGPTWorker(
+                getModuleSetting(cfg, '名称') || '',
+                getModuleSetting(cfg, '模型') || '',
+                getModuleSetting(cfg, '链接') || '',
+                getModuleSetting(cfg, 'Key') || '',
+                getModuleSetting(cfg, '数量') || 1,
+            );
+        },
     };
 
     const moduleDeleteTranslator = {
@@ -167,33 +168,24 @@
             newStringSetting('bind', 'none'),
         ],
         run: async function (cfg) {
-            const confirmDelete = getModuleSetting(cfg, '确认删除');
-            const excludeStr = getModuleSetting(cfg, '排除') || '';
-            const excludeArr = excludeStr.split(',').filter(x => x);
+            // 工作区键按页面 URL 收尾判定；两者都不是就无事可做
+            const key = location.href.endsWith('gpt') ? StorageUtils.gpt
+                : (location.href.endsWith('sakura') ? StorageUtils.sakura : null);
+            if (!key) return;
 
-            // Get current workers to show count
-            let currentWorkers = [];
-            const key = location.href.endsWith('gpt') ? StorageUtils.gpt : (location.href.endsWith('sakura') ? StorageUtils.sakura : null);
-            if (key) {
-                const data = await StorageUtils._getData(key);
-                currentWorkers = data.workers.filter(w => !excludeArr.includes(w.id));
-            }
+            const excludeList = (getModuleSetting(cfg, '排除') || '').split(',').filter(Boolean);
+            const data = await StorageUtils._getData(key);
+            const deletable = data.workers.filter((w) => !excludeList.includes(w.id));
 
-            if (confirmDelete && currentWorkers.length > 0) {
-                if (!confirm(`确定要删除 ${currentWorkers.length} 个翻译器吗？`)) {
+            if (getModuleSetting(cfg, '确认删除') && deletable.length > 0) {
+                if (!confirm(`确定要删除 ${deletable.length} 个翻译器吗？`)) {
                     NotificationUtils.showWarning('已取消删除');
                     return;
                 }
             }
-
-            if (location.href.endsWith('gpt')) {
-                await StorageUtils.removeAllWorkers(StorageUtils.gpt, excludeArr);
-                NotificationUtils.showSuccess('已删除 GPT 翻译器');
-            } else if (location.href.endsWith('sakura')) {
-                await StorageUtils.removeAllWorkers(StorageUtils.sakura, excludeArr);
-                NotificationUtils.showSuccess('已删除 Sakura 翻译器');
-            }
-        }
+            await StorageUtils.removeAllWorkers(key, excludeList);
+            NotificationUtils.showSuccess(key === StorageUtils.gpt ? '已删除 GPT 翻译器' : '已删除 Sakura 翻译器');
+        },
     };
 
     const moduleLaunchTranslator = {
@@ -211,35 +203,36 @@
             const intervalVal = getModuleSetting(cfg, '延迟间隔') || 50;
             const maxClick = getModuleSetting(cfg, '最多启动') || 999;
             const noEmptyLaunch = getModuleSetting(cfg, '避免无效启动');
-            const allBtns = [...document.querySelectorAll('button')].filter(btn => {
+            // 「排除」是历史遗留设置：站点按钮上取不到 worker 名，实际从未参与过滤
+
+            const targets = [...document.querySelectorAll('button')].filter((btn) => {
                 if (!auto && noEmptyLaunch) return true;
                 const listItem = btn.closest('.n-list-item');
                 if (listItem) {
-                    const errorMessages = listItem.querySelectorAll('div');
-                    return !Array.from(errorMessages).some(div => div.textContent.includes("TypeError: Failed to fetch"));
+                    // 自动模式跳过已报网络错误的条目
+                    return ![...listItem.querySelectorAll('div')]
+                        .some((div) => div.textContent.includes('TypeError: Failed to fetch'));
                 }
                 return true;
             });
-            const delay = ms => new Promise(r => setTimeout(r, ms));
-            let idx = 0, clickCount = 0, lastRunning = 0, emptyCheck = 0;
 
-            async function nextClick() {
-                while (idx < allBtns.length && clickCount < maxClick) {
-                    const btn = allBtns[idx++];
-                    if (btn.textContent.includes('启动')) {
-                        btn.click();
-                        clickCount++;
-                        await delay(intervalVal);
-                    }
-                    if (noEmptyLaunch) {
-                        let running = [...document.querySelectorAll('button')].filter(btn => btn.textContent.includes('停止')).length;
-                        if (running == lastRunning) emptyCheck++;
-                        if (emptyCheck > 3) break;
-                    }
+            let idx = 0, clickCount = 0, lastRunning = 0, emptyCheck = 0;
+            const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+            while (idx < targets.length && clickCount < maxClick) {
+                const btn = targets[idx++];
+                if (btn.textContent.includes('启动')) {
+                    btn.click();
+                    clickCount++;
+                    await wait(intervalVal);
+                }
+                if (noEmptyLaunch) {
+                    // 上游 quirk：lastRunning 从不更新 → 每轮都 emptyCheck++，即最多走 4 轮就提前停
+                    const running = [...document.querySelectorAll('button')].filter((b) => b.textContent.includes('停止')).length;
+                    if (running === lastRunning) emptyCheck++;
+                    if (emptyCheck > 3) break;
                 }
             }
-            await nextClick();
-        }
+        },
     };
 
     const moduleQueueSakuraV2 = {
@@ -259,215 +252,176 @@
             newStringSetting('bind', 'none'),
         ],
         run: async function (cfg) {
-            const webCatchLimit = getModuleSetting(cfg, '单次撷取web数量(可破限)') || 20;
-            const wenkuCatchLimit = getModuleSetting(cfg, '撷取单页wenku数量(deving)') || 20;
+            const webLimit = getModuleSetting(cfg, '单次撷取web数量(可破限)') || 20;
             const pair = getModuleSetting(cfg, '固定均分任务') || 6;
             const smartJobLimit = getModuleSetting(cfg, '智能均分任务上限') || 1000;
             const smartChapterLimit = getModuleSetting(cfg, '智能均分章节下限') || 5;
-            const type = TaskUtils.getTypeString(window.location.pathname);
+            const pageType = TaskUtils.getTypeString(window.location.pathname);
             const mode = getModuleSetting(cfg, '模式') || '常规';
             const sepMode = getModuleSetting(cfg, '分段') || '智能';
             const r18Bypass = getModuleSetting(cfg, 'R18(需登入)');
+            const level = SettingUtils.getTranslateMode(mode);
+            const storeKey = StorageUtils.sakura;
 
-            let results = [];
-            let errorFlag = false;
-            const maxRetries = 3;
+            // 文库详情页借用站点自己的排队按钮：先按模式点一遍，再点「排队Sakura」
+            const clickSiteQueueButtons = async () => {
+                await TaskUtils.clickButtons(mode);
+                await TaskUtils.clickButtons('排队Sakura');
+            };
+            const split = (novels) => (sepMode === '智能')
+                ? TaskUtils.assignTasksSmart(novels, smartJobLimit, smartChapterLimit, level)
+                : TaskUtils.assignTasksStatic(novels, pair, level);
+            const toJobs = (novels) => novels.map((item) => ({
+                url: `/${item.providerId}/${item.novelId}`,
+                description: item.titleZh ?? item.titleJp,
+                total: item.total,
+                sakura: item.sakura,
+            }));
 
-            const modeMap = { '常规': '常规', '过期': '过期', '重翻': '重翻' };
-            const cnMode = modeMap[mode] || '常规';
-            const translateMode = SettingUtils.getTranslateMode(mode);
+            // 卷目录：失败重试 3 次（间隔 1s）；错误文案尾缀按分支沿用上游原文（wenkus 句号 / favorite 冒号）
+            const wenkuVolumes = async (novelId, tail = '.') => {
+                for (let attempts = 0; attempts < 3; attempts++) {
+                    try {
+                        const res = await script.fetch(`${window.location.origin}/api/wenku/${novelId}`, r18Bypass);
+                        if (!res.ok) throw new Error('Network response was not ok');
+                        const data = await res.json();
+                        return data.volumeJp.map((v) => v.volumeId);
+                    } catch (error) {
+                        NotificationUtils.showError(`Failed to fetch data for ID ${novelId}, attempt ${attempts + 1}${tail}`);
+                        if (attempts < 2) await new Promise((r) => setTimeout(r, 1000));
+                    }
+                }
+                return [];
+            };
 
-            switch (type) {
+            const jobs = [];
+            let failed = false;
+
+            switch (pageType) {
                 case 'wenkus': {
-                    const wenkuIds = TaskUtils.wenkuIds();
-                    const apiEndpoint = `/api/wenku/`;
-
+                    // 列表页：每个 /wenku/{id} 链接 → 拉卷目录 → 每卷一个 wenku 任务
                     await Promise.all(
-                        wenkuIds.map(async (id) => {
-                            let attempts = 0;
-                            let success = false;
-
-                            while (attempts < maxRetries && !success) {
-                                try {
-                                    const response = await script.fetch(`${window.location.origin}${apiEndpoint}${id}`, r18Bypass);
-                                    if (!response.ok) throw new Error('Network response was not ok');
-                                    const data = await response.json();
-                                    const volumeIds = data.volumeJp.map(volume => volume.volumeId);
-
-                                    volumeIds.forEach(name => results.push({ task: TaskUtils.wenkuLinkBuilder(id, name, translateMode), description: name }))
-                                    success = true;
-                                } catch (error) {
-                                    NotificationUtils.showError(`Failed to fetch data for ID ${id}, attempt ${attempts + 1}.`);
-                                    attempts++;
-                                    if (attempts < maxRetries) {
-                                        await new Promise(resolve => setTimeout(resolve, 1000));
-                                    }
-                                }
-                            }
+                        TaskUtils.wenkuIds().map(async (id) => {
+                            const volumes = await wenkuVolumes(id);
+                            volumes.forEach((volumeId) => jobs.push({
+                                task: TaskUtils.wenkuLinkBuilder(id, volumeId, level),
+                                description: volumeId,
+                            }));
                         })
                     );
-                    await StorageUtils.addJobs(StorageUtils.sakura, results);
+                    await StorageUtils.addJobs(storeKey, jobs);
                     break;
-                };
+                }
                 case 'wenku': {
-                    await TaskUtils.clickButtons(cnMode);
-                    await TaskUtils.clickButtons('排队Sakura');
+                    await clickSiteQueueButtons();
                     break;
                 }
                 case 'novels': {
-                    const apiUrl = TaskUtils.webSearchApi(webCatchLimit);
                     try {
-                        const response = await script.fetch(`${window.location.origin}${apiUrl}`, r18Bypass);
-                        if (!response.ok) throw new Error('Network response was not ok');
-                        const data = await response.json();
-                        const novels = data.items.map(item => {
-                            const title = item.titleZh ?? item.titleJp;
-                            return {
-                                url: `/${item.providerId}/${item.novelId}`,
-                                description: title,
-                                total: item.total,
-                                sakura: item.sakura
-                            };
-                        });
-                        results = sepMode == '智能'
-                            ? await TaskUtils.assignTasksSmart(novels, smartJobLimit, smartChapterLimit, translateMode)
-                            : await TaskUtils.assignTasksStatic(novels, pair, translateMode);
-
-                        await StorageUtils.addJobs(StorageUtils.sakura, results);
+                        const res = await script.fetch(`${window.location.origin}${TaskUtils.webSearchApi(webLimit)}`, r18Bypass);
+                        if (!res.ok) throw new Error('Network response was not ok');
+                        const data = await res.json();
+                        const splitJobs = await split(toJobs(data.items));
+                        await StorageUtils.addJobs(storeKey, splitJobs);
+                        jobs.push(...splitJobs);
                     } catch (error) {
-                        errorFlag = true;
-                        NotificationUtils.showError(`Failed to fetch web search results.`);
+                        failed = true;
+                        NotificationUtils.showError('Failed to fetch web search results.');
                     }
                     break;
                 }
                 case 'novel': {
                     try {
-                        const targetSpan = Array.from(document.querySelectorAll('span.n-text')).find(span => /总计 (\d+) \/ 百度 (\d+) \/ 有道 (\d+) \/ GPT (\d+) \/ Sakura (\d+)/.test(span.textContent));
-                        if (!targetSpan) {
-                            throw Error('无法找到统计信息');
-                        }
-                        const [_, total, , , , sakura] = targetSpan.textContent.match(/总计 (\d+) \/ 百度 (\d+) \/ 有道 (\d+) \/ GPT (\d+) \/ Sakura (\d+)/);
-                        const url = window.location.pathname.split('/novel')[1];
-                        const title = document.title;
-                        if (title.includes('轻小说机翻机器人')) throw Error('小说页尚未载入');
-
-                        const novels = [{ url: url, total: total, sakura: sakura, description: title }];
-                        results = sepMode == '智能'
-                            ? await TaskUtils.assignTasksSmart(novels, smartJobLimit, smartChapterLimit, translateMode)
-                            : await TaskUtils.assignTasksStatic(novels, pair, translateMode);
-
-                        await StorageUtils.addJobs(StorageUtils.sakura, results);
+                        const statsRe = /总计 (\d+) \/ 百度 (\d+) \/ 有道 (\d+) \/ GPT (\d+) \/ Sakura (\d+)/;
+                        const statSpan = [...document.querySelectorAll('span.n-text')].find((span) => statsRe.test(span.textContent));
+                        if (!statSpan) throw new Error('无法找到统计信息');
+                        if (document.title.includes('轻小说机翻机器人')) throw new Error('小说页尚未载入');
+                        const matched = statSpan.textContent.match(statsRe);
+                        const novel = {
+                            url: window.location.pathname.split('/novel')[1],
+                            description: document.title,
+                            total: matched[1],
+                            sakura: matched[5],
+                        };
+                        const splitJobs = await split([novel]);
+                        await StorageUtils.addJobs(storeKey, splitJobs);
+                        jobs.push(...splitJobs);
                     } catch (error) {
-                        errorFlag = true;
-                        NotificationUtils.showError(`Failed to fetch data for ${title}.`);
+                        failed = true;
+                        NotificationUtils.showError(`Failed to fetch data for ${document.title}.`);
                     }
                     break;
                 }
                 case 'favorite-web': {
-                    const url = new URL(window.location.href);
-                    //get folder id
-                    const id = url.pathname.endsWith('/web') ? 'default' : url.pathname.split('/').pop();
-                    let tries = 0;
+                    const pageUrl = new URL(window.location.href);
+                    const folderId = pageUrl.pathname.endsWith('/web') ? 'default' : pageUrl.pathname.split('/').pop();
                     let page = 0;
-
+                    let tries = 0;
                     while (true) {
-                        const apiUrl = `${url.origin}/api/user/favored-web/${id}?page=${page}&pageSize=90&sort=update`;
-                        let tasks = [];
                         let novelCount = 0;
                         try {
-                            const response = await script.fetch(apiUrl);
-                            const data = await response.json();
-                            const novels = data.items.map(item => {
-                                const title = item.titleZh ?? item.titleJp;
-                                return {
-                                    url: `/${item.providerId}/${item.novelId}`,
-                                    description: title,
-                                    total: item.total,
-                                    sakura: item.sakura
-                                };
-                            });
+                            const res = await script.fetch(`${pageUrl.origin}/api/user/favored-web/${folderId}?page=${page}&pageSize=90&sort=update`);
+                            const data = await res.json();
+                            const novels = toJobs(data.items);
                             novelCount = novels.length;
-                            tasks = sepMode == '智能'
-                                ? await TaskUtils.assignTasksSmart(novels, smartJobLimit, smartChapterLimit, translateMode)
-                                : await TaskUtils.assignTasksStatic(novels, pair, translateMode);
-
-                            await StorageUtils.addJobs(StorageUtils.sakura, tasks);
-                            results.push(...tasks);
+                            const tasks = await split(novels);
+                            await StorageUtils.addJobs(storeKey, tasks);
+                            jobs.push(...tasks);
+                            // 页码文案的 3*page+1/-3 是上游原文（与 pageSize=90 并不一致），钉住
                             NotificationUtils.showSuccess(`成功排队 ${3 * page + 1}-${3 * page + 3}页, 共${tasks.length}个任务`);
                         } catch (error) {
                             console.log(error);
-                            NotificationUtils.showError(`Failed to fetch data for ${id}, page ${page + 1}.`);
+                            NotificationUtils.showError(`Failed to fetch data for ${folderId}, page ${page + 1}.`);
                             if (tries++ > 3) break;
                             continue;
                         }
                         if (novelCount < 90) break;
-                        else page++;
+                        page++;
                     }
                     break;
                 }
                 case 'favorite-wenku': {
-                    const url = new URL(window.location.href);
-                    //get folder id
-                    const id = url.pathname.endsWith('/wenku') ? 'default' : url.pathname.split('/').pop();
+                    const pageUrl = new URL(window.location.href);
+                    const folderId = pageUrl.pathname.endsWith('/wenku') ? 'default' : pageUrl.pathname.split('/').pop();
                     let page = 0;
                     let tries = 0;
                     while (true) {
-                        const apiUrl = `${url.origin}/api/user/favored-wenku/${id}?page=${page}&pageSize=72&sort=update`;
-                        let tasks = [];
                         let novelCount = 0;
                         try {
-                            const response = await script.fetch(apiUrl);
-                            const data = await response.json();
-                            const wenkuIds = data.items.map(novel => novel.id);
-                            novelCount = wenkuIds.length;
-
-                            await Promise.all(
-                                wenkuIds.map(async (id) => {
-                                    let attempts = 0;
-                                    let success = false;
-                                    const apiEndpoint = `/api/wenku/`;
-
-                                    while (attempts < maxRetries && !success) {
-                                        try {
-                                            const response = await script.fetch(`${window.location.origin}${apiEndpoint}${id}`, r18Bypass);
-                                            if (!response.ok) throw new Error('Network response was not ok');
-                                            const data = await response.json();
-                                            const volumeIds = data.volumeJp.map(volume => volume.volumeId);
-
-                                            volumeIds.forEach(name => tasks.push({ task: TaskUtils.wenkuLinkBuilder(id, name, translateMode), description: name }))
-                                            success = true;
-                                        } catch (error) {
-                                            NotificationUtils.showError(`Failed to fetch data for ID ${id}, attempt ${attempts + 1}:`);
-                                            attempts++;
-                                            if (attempts < maxRetries) {
-                                                await new Promise(resolve => setTimeout(resolve, 1000));
-                                            }
-                                        }
-                                    }
-                                })
-                            );
-                            await StorageUtils.addJobs(StorageUtils.sakura, tasks);
-                            results.push(...tasks);
+                            const res = await script.fetch(`${pageUrl.origin}/api/user/favored-wenku/${folderId}?page=${page}&pageSize=72&sort=update`);
+                            const data = await res.json();
+                            const ids = data.items.map((n) => n.id);
+                            novelCount = ids.length;
+                            const tasks = [];
+                            await Promise.all(ids.map(async (id) => {
+                                const volumes = await wenkuVolumes(id, ':');
+                                volumes.forEach((volumeId) => tasks.push({
+                                    task: TaskUtils.wenkuLinkBuilder(id, volumeId, level),
+                                    description: volumeId,
+                                }));
+                            }));
+                            await StorageUtils.addJobs(storeKey, tasks);
+                            jobs.push(...tasks);
                             NotificationUtils.showSuccess(`成功排队 ${3 * page + 1}-${3 * page + 3}页, 共${tasks.length}本小说`);
                         } catch (error) {
                             console.log(error);
-                            NotificationUtils.showError(`Failed to fetch data for ${id}, page ${page + 1}.`);
+                            NotificationUtils.showError(`Failed to fetch data for ${folderId}, page ${page + 1}.`);
+                            // 上游 quirk：tries 从不自增 → 持续报错时这一页会无限重试（现状钉住）
                             if (tries > 3) break;
                             continue;
                         }
                         if (novelCount < 72) break;
-                        else page++;
+                        page++;
                     }
                     break;
                 }
                 default: { }
             }
-            if (errorFlag) return;
-            // Fix: Properly filter unique novels by description
-            const uniqueNovels = new Set(results.map(result => result.description));
-            NotificationUtils.showSuccess(`排队成功 : 共 ${uniqueNovels.size} 本小说, 均分 ${results.length} 分段.`);
-        }
-    }
+            if (failed) return;
+            const uniqueBooks = new Set(jobs.map((j) => j.description));
+            NotificationUtils.showSuccess(`排队成功 : 共 ${uniqueBooks.size} 本小说, 均分 ${jobs.length} 分段.`);
+        },
+    };
 
     const moduleQueueGPTV2 = {
         name: '排队GPT v2',
@@ -486,218 +440,176 @@
             newStringSetting('bind', 'none'),
         ],
         run: async function (cfg) {
-            const webCatchLimit = getModuleSetting(cfg, '单次撷取web数量(可破限)') || 20;
-            const wenkuCatchLimit = getModuleSetting(cfg, '撷取单页wenku数量(deving)') || 20;
+            const webLimit = getModuleSetting(cfg, '单次撷取web数量(可破限)') || 20;
             const pair = getModuleSetting(cfg, '固定均分任务') || 6;
             const smartJobLimit = getModuleSetting(cfg, '智能均分任务上限') || 1000;
             const smartChapterLimit = getModuleSetting(cfg, '智能均分章节下限') || 5;
-            const type = TaskUtils.getTypeString(window.location.pathname);
+            const pageType = TaskUtils.getTypeString(window.location.pathname);
             const mode = getModuleSetting(cfg, '模式') || '常规';
             const sepMode = getModuleSetting(cfg, '分段') || '智能';
             const r18Bypass = getModuleSetting(cfg, 'R18(需登入)');
+            const level = SettingUtils.getTranslateMode(mode);
+            const storeKey = StorageUtils.gpt;
 
-            let results = [];
-            const maxRetries = 3;
-            let errorFlag = false;
+            // 文库详情页借用站点自己的排队按钮：先按模式点一遍，再点「排队GPT」
+            const clickSiteQueueButtons = async () => {
+                await TaskUtils.clickButtons(mode);
+                await TaskUtils.clickButtons('排队GPT');
+            };
+            const split = (novels) => (sepMode === '智能')
+                ? TaskUtils.assignTasksSmart(novels, smartJobLimit, smartChapterLimit, level)
+                : TaskUtils.assignTasksStatic(novels, pair, level);
+            const toJobs = (novels) => novels.map((item) => ({
+                url: `/${item.providerId}/${item.novelId}`,
+                description: item.titleZh ?? item.titleJp,
+                total: item.total,
+                gpt: item.gpt,
+            }));
 
-            const modeMap = { '常规': '常规', '过期': '过期', '重翻': '重翻' };
-            const cnMode = modeMap[mode] || '常规';
-            const translateMode = SettingUtils.getTranslateMode(mode);
+            // 卷目录：失败重试 3 次（间隔 1s）；GPT 模块的错误文案按上游原文统一冒号收尾
+            const wenkuVolumes = async (novelId) => {
+                for (let attempts = 0; attempts < 3; attempts++) {
+                    try {
+                        const res = await script.fetch(`${window.location.origin}/api/wenku/${novelId}`, r18Bypass);
+                        if (!res.ok) throw new Error('Network response was not ok');
+                        const data = await res.json();
+                        return data.volumeJp.map((v) => v.volumeId);
+                    } catch (error) {
+                        NotificationUtils.showError(`Failed to fetch data for ID ${novelId}, attempt ${attempts + 1}:`);
+                        if (attempts < 2) await new Promise((r) => setTimeout(r, 1000));
+                    }
+                }
+                return [];
+            };
 
+            const jobs = [];
+            let failed = false;
 
-            switch (type) {
+            switch (pageType) {
                 case 'wenkus': {
-                    const wenkuIds = TaskUtils.wenkuIds();
-                    const apiEndpoint = `/api/wenku/`;
-
+                    // 列表页：每个 /wenku/{id} 链接 → 拉卷目录 → 每卷一个 wenku 任务
                     await Promise.all(
-                        wenkuIds.map(async (id) => {
-                            let attempts = 0;
-                            let success = false;
-
-                            while (attempts < maxRetries && !success) {
-                                try {
-                                    const response = await script.fetch(`${window.location.origin}${apiEndpoint}${id}`, r18Bypass);
-                                    if (!response.ok) throw new Error('Network response was not ok');
-                                    const data = await response.json();
-                                    const volumeIds = data.volumeJp.map(volume => volume.volumeId);
-
-                                    volumeIds.forEach(name => results.push({ task: TaskUtils.wenkuLinkBuilder(id, name, translateMode), description: name }))
-                                    success = true;
-                                } catch (error) {
-                                    NotificationUtils.showError(`Failed to fetch data for ID ${id}, attempt ${attempts + 1}:`);
-                                    attempts++;
-                                    if (attempts < maxRetries) {
-                                        await new Promise(resolve => setTimeout(resolve, 1000));
-                                    }
-                                }
-                            }
+                        TaskUtils.wenkuIds().map(async (id) => {
+                            const volumes = await wenkuVolumes(id);
+                            volumes.forEach((volumeId) => jobs.push({
+                                task: TaskUtils.wenkuLinkBuilder(id, volumeId, level),
+                                description: volumeId,
+                            }));
                         })
                     );
-                    await StorageUtils.addJobs(StorageUtils.gpt, results);
+                    await StorageUtils.addJobs(storeKey, jobs);
                     break;
-                };
+                }
                 case 'wenku': {
-                    await TaskUtils.clickButtons(cnMode);
-                    await TaskUtils.clickButtons('排队GPT');
+                    await clickSiteQueueButtons();
                     break;
                 }
                 case 'novels': {
-                    const apiUrl = TaskUtils.webSearchApi(webCatchLimit);
                     try {
-                        const response = await script.fetch(`${window.location.origin}${apiUrl}`, r18Bypass)
-                        if (!response.ok) throw new Error('Network response was not ok');
-                        const data = await response.json();
-                        const novels = data.items.map(item => {
-                            const title = item.titleZh ?? item.titleJp;
-                            return {
-                                url: `/${item.providerId}/${item.novelId}`,
-                                description: title,
-                                total: item.total,
-                                gpt: item.gpt
-                            };
-                        });
-                        results = sepMode == '智能'
-                            ? await TaskUtils.assignTasksSmart(novels, smartJobLimit, smartChapterLimit, translateMode)
-                            : await TaskUtils.assignTasksStatic(novels, pair, translateMode);
-
-                        await StorageUtils.addJobs(StorageUtils.gpt, results);
+                        const res = await script.fetch(`${window.location.origin}${TaskUtils.webSearchApi(webLimit)}`, r18Bypass);
+                        if (!res.ok) throw new Error('Network response was not ok');
+                        const data = await res.json();
+                        const splitJobs = await split(toJobs(data.items));
+                        await StorageUtils.addJobs(storeKey, splitJobs);
+                        jobs.push(...splitJobs);
                     } catch (error) {
-                        errorFlag = true;
-                        NotificationUtils.showError(`Failed to fetch web search results.`);
+                        failed = true;
+                        NotificationUtils.showError('Failed to fetch web search results.');
                     }
                     break;
                 }
                 case 'novel': {
                     try {
-                        const targetSpan = Array.from(document.querySelectorAll('span.n-text')).find(span => /总计 (\d+) \/ 百度 (\d+) \/ 有道 (\d+) \/ GPT (\d+) \/ Sakura (\d+)/.test(span.textContent));
-                        if (!targetSpan) {
-                            throw Error('无法找到统计信息');
-                        }
-                        const [_, total, , , gpt] = targetSpan.textContent.match(/总计 (\d+) \/ 百度 (\d+) \/ 有道 (\d+) \/ GPT (\d+) \/ Sakura (\d+)/);
-                        const url = window.location.pathname.split('/novel')[1];
-
-                        const title = document.title;
-                        if (title.includes('轻小说机翻机器人')) throw Error('小说页尚未载入');
-
-                        const novels = [{ url: url, total: total, gpt: gpt, description: title }]
-
-                        results = sepMode == '智能'
-                            ? await TaskUtils.assignTasksSmart(novels, smartJobLimit, smartChapterLimit, translateMode)
-                            : await TaskUtils.assignTasksStatic(novels, pair, translateMode);
-
-                        await StorageUtils.addJobs(StorageUtils.gpt, results);
+                        const statsRe = /总计 (\d+) \/ 百度 (\d+) \/ 有道 (\d+) \/ GPT (\d+) \/ Sakura (\d+)/;
+                        const statSpan = [...document.querySelectorAll('span.n-text')].find((span) => statsRe.test(span.textContent));
+                        if (!statSpan) throw new Error('无法找到统计信息');
+                        if (document.title.includes('轻小说机翻机器人')) throw new Error('小说页尚未载入');
+                        const matched = statSpan.textContent.match(statsRe);
+                        const novel = {
+                            url: window.location.pathname.split('/novel')[1],
+                            description: document.title,
+                            total: matched[1],
+                            gpt: matched[4],
+                        };
+                        const splitJobs = await split([novel]);
+                        await StorageUtils.addJobs(storeKey, splitJobs);
+                        jobs.push(...splitJobs);
                     } catch (error) {
-                        errorFlag = true;
-                        NotificationUtils.showError(`Failed to fetch data for ${title}.`);
+                        failed = true;
+                        NotificationUtils.showError(`Failed to fetch data for ${document.title}.`);
                     }
                     break;
                 }
                 case 'favorite-web': {
-                    const url = new URL(window.location.href);
-                    //get folder id
-                    const id = url.pathname.endsWith('/web') ? 'default' : url.pathname.split('/').pop();
-                    let tries = 0;
+                    const pageUrl = new URL(window.location.href);
+                    const folderId = pageUrl.pathname.endsWith('/web') ? 'default' : pageUrl.pathname.split('/').pop();
                     let page = 0;
-
+                    let tries = 0;
                     while (true) {
-                        const apiUrl = `${url.origin}/api/user/favored-web/${id}?page=${page}&pageSize=90&sort=update`;
-                        let tasks = [];
                         let novelCount = 0;
                         try {
-                            const response = await script.fetch(apiUrl);
-                            const data = await response.json();
-                            const novels = data.items.map(item => {
-                                const title = item.titleZh ?? item.titleJp;
-                                return {
-                                    url: `/${item.providerId}/${item.novelId}`,
-                                    description: title,
-                                    total: item.total,
-                                    gpt: item.gpt
-                                };
-                            });
+                            const res = await script.fetch(`${pageUrl.origin}/api/user/favored-web/${folderId}?page=${page}&pageSize=90&sort=update`);
+                            const data = await res.json();
+                            const novels = toJobs(data.items);
                             novelCount = novels.length;
-                            tasks = sepMode == '智能'
-                                ? await TaskUtils.assignTasksSmart(novels, smartJobLimit, smartChapterLimit, translateMode)
-                                : await TaskUtils.assignTasksStatic(novels, pair, translateMode);
-
-                            await StorageUtils.addJobs(StorageUtils.gpt, tasks);
-                            results.push(...tasks);
+                            const tasks = await split(novels);
+                            await StorageUtils.addJobs(storeKey, tasks);
+                            jobs.push(...tasks);
+                            // 页码文案的 3*page+1/-3 是上游原文（与 pageSize=90 并不一致），钉住
                             NotificationUtils.showSuccess(`成功排队 ${3 * page + 1}-${3 * page + 3}页, 共${novelCount}本小说`);
                         } catch (error) {
                             console.log(error);
-                            NotificationUtils.showError(`Failed to fetch data for ${id}, page ${page + 1}.`);
+                            NotificationUtils.showError(`Failed to fetch data for ${folderId}, page ${page + 1}.`);
                             if (tries++ > 3) break;
                             continue;
                         }
                         if (novelCount < 90) break;
-                        else page++;
+                        page++;
                     }
                     break;
                 }
                 case 'favorite-wenku': {
-                    const url = new URL(window.location.href);
-                    //get folder id
-                    const id = url.pathname.endsWith('/wenku') ? 'default' : url.pathname.split('/').pop();
+                    const pageUrl = new URL(window.location.href);
+                    const folderId = pageUrl.pathname.endsWith('/wenku') ? 'default' : pageUrl.pathname.split('/').pop();
                     let page = 0;
                     let tries = 0;
                     while (true) {
-                        const apiUrl = `${url.origin}/api/user/favored-wenku/${id}?page=${page}&pageSize=72&sort=update`;
-                        let tasks = [];
                         let novelCount = 0;
                         try {
-                            const response = await script.fetch(apiUrl);
-                            const data = await response.json();
-                            const wenkuIds = data.items.map(novel => novel.id);
-                            novelCount = wenkuIds.length;
-
-                            await Promise.all(
-                                wenkuIds.map(async (id) => {
-                                    let attempts = 0;
-                                    let success = false;
-                                    const apiEndpoint = `/api/wenku/`;
-
-                                    while (attempts < maxRetries && !success) {
-                                        try {
-                                            const response = await script.fetch(`${window.location.origin}${apiEndpoint}${id}`, r18Bypass);
-                                            if (!response.ok) throw new Error('Network response was not ok');
-                                            const data = await response.json();
-                                            const volumeIds = data.volumeJp.map(volume => volume.volumeId);
-
-                                            volumeIds.forEach(name => tasks.push({ task: TaskUtils.wenkuLinkBuilder(id, name, translateMode), description: name }))
-                                            success = true;
-                                        } catch (error) {
-                                            NotificationUtils.showError(`Failed to fetch data for ID ${id}, attempt ${attempts + 1}:`);
-                                            attempts++;
-                                            if (attempts < maxRetries) {
-                                                await new Promise(resolve => setTimeout(resolve, 1000));
-                                            }
-                                        }
-                                    }
-                                })
-                            );
-                            await StorageUtils.addJobs(StorageUtils.gpt, tasks);
-                            results.push(...tasks);
+                            const res = await script.fetch(`${pageUrl.origin}/api/user/favored-wenku/${folderId}?page=${page}&pageSize=72&sort=update`);
+                            const data = await res.json();
+                            const ids = data.items.map((n) => n.id);
+                            novelCount = ids.length;
+                            const tasks = [];
+                            await Promise.all(ids.map(async (id) => {
+                                const volumes = await wenkuVolumes(id);
+                                volumes.forEach((volumeId) => tasks.push({
+                                    task: TaskUtils.wenkuLinkBuilder(id, volumeId, level),
+                                    description: volumeId,
+                                }));
+                            }));
+                            await StorageUtils.addJobs(storeKey, tasks);
+                            jobs.push(...tasks);
                             NotificationUtils.showSuccess(`成功排队 ${3 * page + 1}-${3 * page + 3}页, 共${tasks.length}本小说`);
                         } catch (error) {
                             console.log(error);
-                            NotificationUtils.showError(`Failed to fetch data for ${id}, page ${page + 1}.`);
+                            NotificationUtils.showError(`Failed to fetch data for ${folderId}, page ${page + 1}.`);
+                            // 上游 quirk：tries 从不自增 → 持续报错时这一页会无限重试（现状钉住）
                             if (tries > 3) break;
                             continue;
                         }
                         if (novelCount < 72) break;
-                        else page++;
+                        page++;
                     }
                     break;
                 }
                 default: { }
             }
-            if (errorFlag) return;
-            // Fix: Properly filter unique novels by description
-            const uniqueNovels = new Set(results.map(result => result.description));
-            NotificationUtils.showSuccess(`排队成功 : 共 ${uniqueNovels.size} 本小说, 均分 ${results.length} 分段.`);
-        }
-    }
+            if (failed) return;
+            const uniqueBooks = new Set(jobs.map((j) => j.description));
+            NotificationUtils.showSuccess(`排队成功 : 共 ${uniqueBooks.size} 本小说, 均分 ${jobs.length} 分段.`);
+        },
+    };
 
     const moduleAutoRetry = {
         name: '自动重试',
@@ -717,9 +629,11 @@
             this._lastRun = now;
 
             const maxAttempts = getModuleSetting(cfg, '最大重试次数') || 99;
+            // 上游 quirk：false || 3 = 3 —— 把「重启翻译器」关掉实际关不住（现状钉住，见 .e2e-auto-retry.js）
             const relaunch = getModuleSetting(cfg, '重启翻译器') || 3;
             const moveToTop = getModuleSetting(cfg, '置顶重试任务');
 
+            // 设计意图是「手动点任意按钮就清零重试计数」，但 tagName 比对用小写 'button'（DOM 里是 'BUTTON'）→ 永不生效
             if (!this._boundClickHandler) {
                 this._boundClickHandler = (e) => {
                     if (e.target.tagName === 'button') {
@@ -730,36 +644,35 @@
             }
 
             const listItems = document.querySelectorAll('.n-list-item');
-            const unfinished = [...listItems].filter(item => {
+            const unfinished = [...listItems].filter((item) => {
                 const desc = item.querySelector('.n-thing-main__description');
                 return desc && desc.textContent.includes('未完成');
             });
-            async function retryTasks(attempts) {
-                const hasStop = [...document.querySelectorAll('button')].some(b => b.textContent === '停止');
-                if (!hasStop) {
-                    const retryBtns = [...document.querySelectorAll('button')].filter(b => b.textContent.includes('重试未完成任务'));
-                    if (retryBtns[0]) {
-                        const clickCount = Math.min(unfinished.length, listItems.length);
-                        for (let i = 0; i < clickCount; i++) {
-                            retryBtns[0].click();
-                        }
-                        if (moveToTop) {
-                            TaskUtils.clickTaskMoveToTop(unfinished.length);
-                        }
-                        attempts++;
-                    }
+
+            const retryTasks = async (attempts) => {
+                // 有任务在跑（页面存在文案全等『停止』的按钮）时不插手
+                const hasStop = [...document.querySelectorAll('button')].some((b) => b.textContent === '停止');
+                if (hasStop) return attempts;
+                const retryBtn = [...document.querySelectorAll('button')].find((b) => b.textContent.includes('重试未完成任务'));
+                if (!retryBtn) return attempts;
+                for (let i = 0; i < Math.min(unfinished.length, listItems.length); i++) {
+                    retryBtn.click();
                 }
-                return attempts;
-            }
+                if (moveToTop) {
+                    TaskUtils.clickTaskMoveToTop(unfinished.length);
+                }
+                return attempts + 1;
+            };
 
             if (unfinished.length > 0 && this._attempts < maxAttempts) {
                 this._attempts = await retryTasks(this._attempts);
                 script.delay(10);
+                // 即使 retry 按钮不存在，只要页上有未完成条目，每轮也会触发一次「启动翻译器」
                 if (relaunch) {
                     script.runModule('启动翻译器');
                 }
             }
-        }
+        },
     };
 
     const moduleClearJobs = {
@@ -771,40 +684,30 @@
             newBooleanSetting('仅清空已完成', false),
         ],
         run: async function (cfg) {
-            const confirmClear = getModuleSetting(cfg, '确认清空');
-            const onlyCompleted = getModuleSetting(cfg, '仅清空已完成');
-            
-            const key = window.location.pathname.includes('workspace/sakura') ? StorageUtils.sakura : 
-                        (window.location.pathname.includes('workspace/gpt') ? StorageUtils.gpt : null);
-            
+            const key = window.location.pathname.includes('workspace/sakura') ? StorageUtils.sakura
+                : (window.location.pathname.includes('workspace/gpt') ? StorageUtils.gpt : null);
             if (!key) {
                 NotificationUtils.showError('无法确定工作区类型');
                 return;
             }
-
-            const data = await StorageUtils._getData(key);
-            
-            let jobsToRemove = [];
-            if (onlyCompleted) {
-                // 只清空已完成的 jobs（需要根据实际数据结构判断）
-                // 假设 jobs 中有 status 字段或通过其他方式判断
+            // 上游未实现的死设置：勾上只提示、不动数据（现状钉住，见 .e2e-collect-tasks.js）
+            if (getModuleSetting(cfg, '仅清空已完成')) {
                 NotificationUtils.showWarning('仅清空已完成功能需配合网站API');
                 return;
-            } else {
-                jobsToRemove = data.jobs;
             }
 
-            if (confirmClear && jobsToRemove.length > 0) {
-                if (!confirm(`确定要清空 ${jobsToRemove.length} 个任务吗？此操作不可恢复！`)) {
+            const data = await StorageUtils._getData(key);
+            const removedCount = data.jobs.length;
+            if (getModuleSetting(cfg, '确认清空') && removedCount > 0) {
+                if (!confirm(`确定要清空 ${removedCount} 个任务吗？此操作不可恢复！`)) {
                     NotificationUtils.showWarning('已取消清空');
                     return;
                 }
             }
-
             data.jobs = [];
             await StorageUtils._setData(key, data);
-            NotificationUtils.showSuccess(`已清空 ${jobsToRemove.length} 个任务`);
-        }
+            NotificationUtils.showSuccess(`已清空 ${removedCount} 个任务`);
+        },
     };
 
     const moduleSyncStorage = {
@@ -816,7 +719,8 @@
             newStringSetting('bind', 'none')
         ],
         run: async function (cfg) {
-        }
+            // 上游未实现的占位模块：保持 no-op（契约钉在 .e2e-sync-storage.js）
+        },
     }
 
     const moduleFillGlossary = {
@@ -843,83 +747,79 @@
                 return;
             }
 
-            // Parse glossary
+            // 每行 `原文 => 译文`；整行是 JSON 对象也能吃（合并进表）
             const newGlossary = {};
-            const delimiter = '=>';
-            glossaryText.split('\n').forEach(line => {
-                line = line.trim();
-                if (!line) return;
-                const parts = line.split(delimiter);
-                if (parts.length === 2) {
-                    newGlossary[parts[0].trim()] = parts[1].trim();
-                } else {
-                    try {
-                        const obj = JSON.parse(line);
-                        if (typeof obj === 'object') {
-                            Object.assign(newGlossary, obj);
-                        }
-                    } catch (e) { }
+            glossaryText.split('\n').forEach((line) => {
+                const trimmed = line.trim();
+                if (!trimmed) return;
+                const pair = trimmed.split('=>');
+                if (pair.length === 2) {
+                    newGlossary[pair[0].trim()] = pair[1].trim();
+                    return;
                 }
+                try {
+                    const obj = JSON.parse(trimmed);
+                    if (typeof obj === 'object') {
+                        Object.assign(newGlossary, obj);
+                    }
+                } catch (e) { }
             });
-
             if (Object.keys(newGlossary).length === 0) {
                 NotificationUtils.showError('未能解析任何术语 (格式: 日文 => 中文)');
                 return;
             }
 
+            // 当前页的小说条目（站内 /novel/{provider}/{id} 链接，去重）；
+            // 容器链第一环是自定义元素 n-list-item（无点号，上游如此），落空再走 .n-list-item
             const collectNovels = () => {
-                const links = [...document.querySelectorAll('a')];
-                const novels = [];
                 const seen = new Set();
-                links.forEach(a => {
+                const novels = [];
+                [...document.querySelectorAll('a')].forEach((a) => {
                     try {
                         const url = new URL(a.href);
                         if (url.origin !== window.location.origin) return;
                         const match = url.pathname.match(/^\/novel\/([^/]+)\/([^/]+)$/);
-                        if (match) {
-                            const id = `${match[1]}/${match[2]}`;
-                            if (!seen.has(id)) {
-                                let container = a.closest('n-list-item');
-                                if (!container) container = a.closest('.n-list-item');
-                                if (!container) container = a.closest('.novel-card');
-                                if (!container) container = a.closest('div');
-                                novels.push({ providerId: match[1], novelId: match[2], id, container });
-                                seen.add(id);
-                            }
-                        }
+                        if (!match) return;
+                        const id = `${match[1]}/${match[2]}`;
+                        if (seen.has(id)) return;
+                        seen.add(id);
+                        const container = a.closest('n-list-item')
+                            || a.closest('.n-list-item')
+                            || a.closest('.novel-card')
+                            || a.closest('div');
+                        novels.push({ providerId: match[1], novelId: match[2], id, container });
                     } catch (e) { }
                 });
                 return novels;
             };
 
-            // 先收一便当前页 novels 用于 confirm 提示；开启翻页时也告知用户范围
+            // 先收一遍当前页 novels 用于 confirm 提示；开启翻页时也告知用户范围
             const firstPage = collectNovels();
             if (firstPage.length === 0) {
                 NotificationUtils.showWarning('未在当前页面找到小说条目');
                 return;
             }
-            const tail = autoPaginate
+            const paginateHint = autoPaginate
                 ? `\n\n将自动翻到第 1/${maxPages} 页（每页点「下一页」后等新列表载入；点不到/按钮禁用/翻不动会自动停止）。`
                 : '';
-            if (!confirm(`确定要为当前页面的 ${firstPage.length} 本小说${isAppend ? '追加' : '填充'}术语表吗？\n(包含 ${Object.keys(newGlossary).length} 个术语)${tail}`)) {
+            if (!confirm(`确定要为当前页面的 ${firstPage.length} 本小说${isAppend ? '追加' : '填充'}术语表吗？\n(包含 ${Object.keys(newGlossary).length} 个术语)${paginateHint}`)) {
                 return;
             }
 
             if (visualFeedback) {
-                document.querySelectorAll('.ntr-glossary-badge').forEach(el => el.remove());
+                document.querySelectorAll('.ntr-glossary-badge').forEach((el) => el.remove());
             }
 
             let successCount = 0;
             let failCount = 0;
             let pagesProcessed = 0;
-            let stoppedReason = null;  // 'no-next' | 'disabled' | 'max-pages' | null
+            let stoppedReason = null;   // 'no-next' | 'disabled' | 'max-pages' | 'empty' | 'stuck'
 
-            const setNovelStatus = (container, status, message) => {
+            const setBadge = (container, status, message) => {
                 if (!visualFeedback || !container) return;
                 let badge = container.querySelector('.ntr-glossary-badge');
                 if (!badge) {
                     badge = document.createElement('span');
-                    badge.className = 'ntr-glossary-badge';
                     const flex = container.querySelector('n-flex') || container.querySelector('.n-flex') || container;
                     if (flex.firstElementChild) {
                         flex.insertBefore(badge, flex.firstElementChild);
@@ -929,41 +829,32 @@
                 }
                 badge.className = 'ntr-glossary-badge ntr-glossary-' + status;
                 badge.title = message;
-                const iconMap = { success: '✅', fail: '❌', pending: '⏳' };
-                badge.textContent = iconMap[status] || '⏳';
+                badge.textContent = { success: '✅', fail: '❌', pending: '⏳' }[status] || '⏳';
             };
 
-            // 找下一页按钮：
-            // ①真站（naive-ui）：.n-pagination 里的 .n-pagination-item--button —— 首个是「上一页」、
-            //   末个是「下一页」；按钮只有图标（无文字/无 aria-label），禁用态是 class（--disabled），不是 disabled 属性
-            // ②回落：文本含「下/›」或 aria 含 next 的 <button>（旧结构/其它页面）
+            // 下一页按钮：真站（naive-ui）的按钮只有图标，首个是「上一页」、末个是「下一页」，
+            // 禁用态在 class（--disabled）上而非 disabled 属性；回落找文本含 下/› 或 aria next 的按钮
             const findNextButton = () => {
-                const pag = [...document.querySelectorAll('.n-pagination')].find(p => p.offsetWidth || p.offsetHeight);
+                const pag = [...document.querySelectorAll('.n-pagination')].find((p) => p.offsetWidth || p.offsetHeight);
                 if (pag) {
                     const btns = [...pag.querySelectorAll('.n-pagination-item--button')];
                     if (btns.length) return btns[btns.length - 1];
                 }
-                const candidates = [...document.querySelectorAll('.n-pagination button')];
-                for (const btn of candidates) {
+                return [...document.querySelectorAll('.n-pagination button')].find((btn) => {
                     const text = (btn.textContent || '').trim();
                     const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
-                    if (text.includes('下') || text.includes('›') || aria.includes('next')) return btn;
-                }
-                return null;
+                    return text.includes('下') || text.includes('›') || aria.includes('next');
+                }) || null;
             };
-            const isNextDisabled = (el) => el.disabled === true || el.getAttribute('disabled') !== null || el.classList.contains('n-pagination-item--disabled');
-
+            const nextDisabled = (el) => el.disabled === true || el.getAttribute('disabled') !== null || el.classList.contains('n-pagination-item--disabled');
             const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-            // 当前页「签名」：条目数 + 首末条目 id（用于确认列表真的翻过去了）
+            // 当前页「签名」：条目数 + 首末条目 id —— 用来确认列表真的翻过去了
             const pageSignature = () => {
                 const list = collectNovels();
-                const first = list[0];
-                const last = list[list.length - 1];
-                return `${list.length}|${first ? first.id : ''}|${last ? last.id : ''}`;
+                return `${list.length}|${list[0] ? list[0].id : ''}|${list[list.length - 1] ? list[list.length - 1].id : ''}`;
             };
 
-            // 一次一页填完后决定下一步
             const processCurrentPage = async () => {
                 const novels = collectNovels();
                 if (novels.length === 0) {
@@ -973,71 +864,69 @@
                 pagesProcessed += 1;
                 for (const novel of novels) {
                     if (visualFeedback && novel.container) {
-                        setNovelStatus(novel.container, 'pending', '正在填充术语表...');
+                        setBadge(novel.container, 'pending', '正在填充术语表...');
                     }
                     try {
                         let finalGlossary = newGlossary;
                         if (isAppend) {
+                            // 追加模式：先取站点现表，新值优先合并
                             const getRes = await script.fetch(`${window.location.origin}/api/novel/${novel.providerId}/${novel.novelId}`);
-                            if (getRes.ok) {
-                                const data = await getRes.json();
-                                finalGlossary = Object.assign({}, data.glossary || {}, newGlossary);
-                            } else {
-                                throw new Error('Fetch failed');
-                            }
+                            if (!getRes.ok) throw new Error('Fetch failed');
+                            const data = await getRes.json();
+                            finalGlossary = Object.assign({}, data.glossary || {}, newGlossary);
                         }
-
                         const putRes = await script.fetch(`${window.location.origin}/api/novel/${novel.providerId}/${novel.novelId}/glossary`, true, {
                             method: 'PUT',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(finalGlossary)
+                            body: JSON.stringify(finalGlossary),
                         });
-
                         if (putRes.ok) {
                             successCount++;
-                            setNovelStatus(novel.container, 'success', `术语表填充成功 (+${Object.keys(newGlossary).length} 术语)`);
+                            setBadge(novel.container, 'success', `术语表填充成功 (+${Object.keys(newGlossary).length} 术语)`);
                         } else {
                             failCount++;
-                            setNovelStatus(novel.container, 'fail', `术语表填充失败: HTTP ${putRes.status}`);
+                            setBadge(novel.container, 'fail', `术语表填充失败: HTTP ${putRes.status}`);
                         }
                     } catch (e) {
                         console.error(`Failed to update glossary for ${novel.id}:`, e);
                         failCount++;
-                        setNovelStatus(novel.container, 'fail', `术语表填充失败: ${e.message || '网络错误'}`);
+                        setBadge(novel.container, 'fail', `术语表填充失败: ${e.message || '网络错误'}`);
                     }
                 }
             };
 
-            // 主循环
             await processCurrentPage();
 
             if (autoPaginate) {
                 while (pagesProcessed < maxPages) {
                     const nextBtn = findNextButton();
                     if (!nextBtn) { stoppedReason = 'no-next'; break; }
-                    if (isNextDisabled(nextBtn)) { stoppedReason = 'disabled'; break; }
+                    if (nextDisabled(nextBtn)) { stoppedReason = 'disabled'; break; }
                     const sigBefore = pageSignature();
                     nextBtn.click();
-                    // 等列表真的翻页（真站是异步路由 + 请求，可能超过 1 秒）→ 最长等 10 秒
-                    let changed = false;
+                    // 等列表真的翻过去（真站是异步路由 + 请求，可能超过 1 秒）→ 最长 10s；没变就停，防同一页重复填
+                    let flipped = false;
                     for (let waited = 0; waited < 10000; waited += 250) {
                         await sleep(250);
-                        if (pageSignature() !== sigBefore) { changed = true; break; }
+                        if (pageSignature() !== sigBefore) { flipped = true; break; }
                     }
-                    if (!changed) { stoppedReason = 'stuck'; break; }  // 点了没反应：别把同一页重复填一遍
-                    await sleep(400);  // 列表刚换上，稍等渲染稳定再收
+                    if (!flipped) { stoppedReason = 'stuck'; break; }
+                    await sleep(400);   // 列表刚换上，稍等渲染稳定再收
                     await processCurrentPage();
                 }
                 if (!stoppedReason && pagesProcessed >= maxPages) stoppedReason = 'max-pages';
             }
 
-            const tailMsg = autoPaginate ? `，翻页 ${pagesProcessed} 页${stoppedReason ? `（停止：${({ 'no-next': '已到末页', 'disabled': '下一页按钮不可用', 'max-pages': '达到翻页上限', 'empty': '翻到空白页', 'stuck': '列表没有翻动' })[stoppedReason] || stoppedReason}）` : ''}` : '';
+            const stopText = stoppedReason
+                ? ({ 'no-next': '已到末页', 'disabled': '下一页按钮不可用', 'max-pages': '达到翻页上限', 'empty': '翻到空白页', 'stuck': '列表没有翻动' }[stoppedReason] || stoppedReason)
+                : null;
+            const tailMsg = autoPaginate ? `，翻页 ${pagesProcessed} 页${stopText ? `（停止：${stopText}）` : ''}` : '';
             if (failCount === 0) {
                 NotificationUtils.showSuccess(`成功填充 ${successCount} 本小说的术语表${tailMsg}`);
             } else {
                 NotificationUtils.showWarning(`填充完成: ${successCount} 成功, ${failCount} 失败${tailMsg}`);
             }
-        }
+        },
     };
 
     // -----------------------------------
