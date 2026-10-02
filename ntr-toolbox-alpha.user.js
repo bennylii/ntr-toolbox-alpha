@@ -5646,6 +5646,7 @@
     class NTRToolBox {
         constructor() {
             this.configuration = this.loadConfiguration();
+            // 面板运行态：激活的 keep 模块 / 模块行 header 缓存 / 速览角标（分叉）与轮询计时
             this.keepActiveSet = new Set();
             this.headerMap = new Map();
             this.glanceMap = new Map();       // 模块名 → 行尾速览角标元素
@@ -5668,14 +5669,17 @@
             SiteCheck.schedule();
         }
 
+        // 配置合并的底稿：settings 逐项拷贝保证各实例互不影响；_lastRun 归零让 keep 模块马上获得一次执行机会。
+        // settings 之外的字段（run/progress 等）故意共享引用——函数不该来自存储，progress 本来就是全局态
         static cloneDefaultModules() {
-            return defaultModules.map(m => ({
-                ...m,
-                settings: m.settings ? m.settings.map(s => ({ ...s })) : [],
-                _lastRun: 0
+            return defaultModules.map((mod) => ({
+                ...mod,
+                settings: mod.settings ? mod.settings.map((s) => ({ ...s })) : [],
+                _lastRun: 0,
             }));
         }
 
+        // 标题栏拖拽（鼠标 + 触摸）：拖动中实时夹紧，松手后按视口夹紧并持久化到 ntr-panel-position
         static DragHandler = class {
             constructor(panel, title) {
                 this.panel = panel;
@@ -5683,97 +5687,70 @@
                 this.dragging = false;
                 this.offsetX = 0;
                 this.offsetY = 0;
-                this.init();
+                this._bindEvents();
             }
 
-            init() {
+            _bindEvents() {
+                const grabPoint = (x, y) => {
+                    this.panel.style.transition = 'none';
+                    this.dragging = true;
+                    this.offsetX = x - this.panel.offsetLeft;
+                    this.offsetY = y - this.panel.offsetTop;
+                };
+                const moveTo = (x, y) => {
+                    this.panel.style.left = (x - this.offsetX) + 'px';
+                    this.panel.style.top = (y - this.offsetY) + 'px';
+                    this.clampPosition();
+                };
+                const settle = () => {
+                    this.dragging = false;
+                    this.panel.style.transition = 'width 0.3s ease, height 0.3s ease, top 0.3s ease, left 0.3s ease';
+                    const rect = this.panel.getBoundingClientRect();
+                    const left = Math.min(Math.max(rect.left, 0), window.innerWidth - rect.width);
+                    const top = Math.min(Math.max(rect.top, 0), window.innerHeight - rect.height);
+                    this.panel.style.left = left + 'px';
+                    this.panel.style.top = top + 'px';
+                    localStorage.setItem('ntr-panel-position', JSON.stringify({
+                        left: this.panel.style.left,
+                        top: this.panel.style.top
+                    }));
+                };
+
                 this.title.addEventListener('mousedown', (e) => {
                     if (e.button !== 0) return;
-                    // Disable transitions while dragging
-                    this.panel.style.transition = 'none';
-                    this.dragging = true;
-                    this.offsetX = e.clientX - this.panel.offsetLeft;
-                    this.offsetY = e.clientY - this.panel.offsetTop;
+                    grabPoint(e.clientX, e.clientY);
                     e.preventDefault();
                 });
-
                 document.addEventListener('mousemove', (e) => {
                     if (!this.dragging) return;
-                    const newLeft = e.clientX - this.offsetX;
-                    const newTop = e.clientY - this.offsetY;
-                    this.panel.style.left = newLeft + 'px';
-                    this.panel.style.top = newTop + 'px';
-                    this.clampPosition();
+                    moveTo(e.clientX, e.clientY);
                 });
-
                 document.addEventListener('mouseup', () => {
                     if (!this.dragging) return;
-                    this.dragging = false;
-                    // Re-enable transitions
-                    this.panel.style.transition = 'width 0.3s ease, height 0.3s ease, top 0.3s ease, left 0.3s ease';
-                    const rect = this.panel.getBoundingClientRect();
-                    let left = rect.left;
-                    let top = rect.top;
-                    left = Math.min(Math.max(left, 0), window.innerWidth - rect.width);
-                    top = Math.min(Math.max(top, 0), window.innerHeight - rect.height);
-                    this.panel.style.left = left + 'px';
-                    this.panel.style.top = top + 'px';
-                    localStorage.setItem('ntr-panel-position', JSON.stringify({
-                        left: this.panel.style.left,
-                        top: this.panel.style.top
-                    }));
+                    settle();
                 });
-                // Touch events for mobile
+
                 this.title.addEventListener('touchstart', (e) => {
-                    // Disable transitions while dragging
-                    this.panel.style.transition = 'none';
-                    this.dragging = true;
-                    const touch = e.touches[0];
-                    this.offsetX = touch.clientX - this.panel.offsetLeft;
-                    this.offsetY = touch.clientY - this.panel.offsetTop;
+                    grabPoint(e.touches[0].clientX, e.touches[0].clientY);
                     e.preventDefault();
                 }, { passive: false });
-
                 document.addEventListener('touchmove', (e) => {
                     if (!this.dragging) return;
-                    const touch = e.touches[0];
-                    const newLeft = touch.clientX - this.offsetX;
-                    const newTop = touch.clientY - this.offsetY;
-                    this.panel.style.left = newLeft + 'px';
-                    this.panel.style.top = newTop + 'px';
-                    this.clampPosition();
+                    moveTo(e.touches[0].clientX, e.touches[0].clientY);
                     e.preventDefault();
                 }, { passive: false });
-
-                document.addEventListener('touchend', (e) => {
+                document.addEventListener('touchend', () => {
                     if (!this.dragging) return;
-                    this.dragging = false;
-                    // Re-enable transitions
-                    this.panel.style.transition = 'width 0.3s ease, height 0.3s ease, top 0.3s ease, left 0.3s ease';
-                    const rect = this.panel.getBoundingClientRect();
-                    let left = rect.left;
-                    let top = rect.top;
-                    left = Math.min(Math.max(left, 0), window.innerWidth - rect.width);
-                    top = Math.min(Math.max(top, 0), window.innerHeight - rect.height);
-                    this.panel.style.left = left + 'px';
-                    this.panel.style.top = top + 'px';
-                    localStorage.setItem('ntr-panel-position', JSON.stringify({
-                        left: this.panel.style.left,
-                        top: this.panel.style.top
-                    }));
+                    settle();
                 }, { passive: false });
             }
 
             clampPosition() {
                 const rect = this.panel.getBoundingClientRect();
-                let left = parseFloat(this.panel.style.left) || 0;
-                let top = parseFloat(this.panel.style.top) || 0;
                 const maxLeft = window.innerWidth - rect.width;
                 const maxTop = window.innerHeight - rect.height;
-                if (left < 0) left = 0;
-                if (top < 0) top = 0;
-                if (left > maxLeft) left = maxLeft;
-                if (top > maxTop) top = maxTop;
+                const left = Math.min(Math.max(parseFloat(this.panel.style.left) || 0, 0), maxLeft);
+                const top = Math.min(Math.max(parseFloat(this.panel.style.top) || 0, 0), maxTop);
                 this.panel.style.left = left + 'px';
                 this.panel.style.top = top + 'px';
             }
@@ -5879,7 +5856,7 @@
             this.panel = document.createElement('div');
             this.panel.id = 'ntr-panel';
 
-            // restore from localStorage
+            // 上次关闭时的位置：left/top 都有值才恢复，坏数据当作没存过
             const savedPos = localStorage.getItem('ntr-panel-position');
             if (savedPos) {
                 try {
@@ -5900,7 +5877,6 @@
             this.toggleSpan.style.float = 'right';
             this.toggleSpan.textContent = '[-]';
             this.titleBar.appendChild(this.toggleSpan);
-
             this.panel.appendChild(this.titleBar);
 
             this.panelBody = document.createElement('div');
@@ -5933,34 +5909,31 @@
             // 队列状态变化（加任务/开始跑/跑完）时立刻刷新行尾速览，不用等下一次轮询
             GlossaryQueue.setGlanceHook(() => this.refreshQueueGlance(true));
 
-            // set up drag
             this.dragHandler = new NTRToolBox.DragHandler(this.panel, this.titleBar);
-
             this.buildModules();
 
+            // 量两套尺寸（展开/最小化），最小化锚角归位时要用；量完把 minimized 类摘掉还原
             setTimeout(() => {
                 this.expandedWidth = this.panel.offsetWidth;
                 this.expandedHeight = this.panel.offsetHeight;
 
                 const wasMin = this.isMinimized;
                 if (!wasMin) this.panel.classList.add('minimized');
-                const h0 = this.panel.offsetHeight;
-                if (!wasMin) this.panel.classList.remove('minimized');
-
+                this.minimizedHeight = this.panel.offsetHeight;
                 this.minimizedWidth = this.panel.offsetWidth;
-                this.minimizedHeight = h0;
+                if (!wasMin) this.panel.classList.remove('minimized');
             }, 150);
 
             if (IS_MOBILE) {
                 // On mobile, single tap toggles minimized state.
-                this.titleBar.addEventListener('click', e => {
+                this.titleBar.addEventListener('click', (e) => {
                     if (!this.dragHandler.dragging) {
                         e.preventDefault();
                         this.setMinimizedState(!this.isMinimized);
                     }
                 });
             } else {
-                this.titleBar.addEventListener('contextmenu', e => {
+                this.titleBar.addEventListener('contextmenu', (e) => {
                     e.preventDefault();
                     this.setMinimizedState(!this.isMinimized);
                 });
@@ -5972,22 +5945,20 @@
             this.headerMap.clear();
             this.glanceMap.clear();
 
-            this.configuration.modules.forEach(mod => {
+            this.configuration.modules.forEach((mod) => {
                 const container = document.createElement('div');
                 container.className = 'ntr-module-container';
 
                 const header = document.createElement('div');
                 header.className = 'ntr-module-header';
-
                 const nameSpan = document.createElement('span');
                 nameSpan.textContent = mod.name;
                 header.appendChild(nameSpan);
-
                 if (!IS_MOBILE) {
-                    const iconSpan = document.createElement('span');
-                    iconSpan.textContent = (mod.type === 'keep') ? '⇋' : '▶';
-                    iconSpan.style.marginLeft = '8px';
-                    header.appendChild(iconSpan);
+                    const icon = document.createElement('span');
+                    icon.textContent = (mod.type === 'keep') ? '⇋' : '▶';
+                    icon.style.marginLeft = '8px';
+                    header.appendChild(icon);
                 }
 
                 // 「术语队列」行尾的速览角标（队列:X | 运行中:Y），由 refreshQueueGlance 定时刷新
@@ -6003,91 +5974,100 @@
                 settingsDiv.className = 'ntr-settings-container';
                 settingsDiv.style.display = 'none';
 
-                // 选项可以是数组，也可以是函数（每次渲染/打开设置时重新求值，如「翻译器」要反映工作区最新列表）
-                const selectOptionList = (st) => {
-                    const raw = typeof st.options === 'function' ? st.options() : st.options;
+                // ---- 下拉选项（分叉）：options 可为函数（如「翻译器」要反映工作区最新列表） ----
+                const optionList = (setting) => {
+                    const raw = typeof setting.options === 'function' ? setting.options() : setting.options;
                     if (!Array.isArray(raw)) return [];
                     return raw.map((o) => (o && typeof o === 'object')
                         ? { value: String(o.value), label: String(o.label == null ? o.value : o.label) }
                         : { value: String(o), label: String(o) });
                 };
-                const fillSelect = (el, st) => {
-                    el.innerHTML = '';
-                    const list = selectOptionList(st);
-                    const current = st.value == null ? '' : String(st.value);
+                const fillSelect = (el, setting) => {
+                    const current = setting.value == null ? '' : String(setting.value);
+                    const list = optionList(setting);
                     // 当前值不在选项里（翻译器被删/改名）时补一条，避免选中项凭空丢失
-                    if (!list.some((o) => o.value === current)) list.unshift({ value: current, label: current || '(未设置)' });
+                    if (!list.some((o) => o.value === current)) {
+                        list.unshift({ value: current, label: current || '(未设置)' });
+                    }
+                    el.innerHTML = '';
                     list.forEach((o) => {
-                        const optEl = document.createElement('option');
-                        optEl.value = o.value;
-                        optEl.textContent = o.label;
-                        if (o.value === current) optEl.selected = true;
-                        el.appendChild(optEl);
+                        const opt = document.createElement('option');
+                        opt.value = o.value;
+                        opt.textContent = o.label;
+                        if (o.value === current) opt.selected = true;
+                        el.appendChild(opt);
                     });
                 };
                 let syncGroupsFn = () => { };
                 const refreshSelectOptions = () => {
                     settingsDiv.querySelectorAll('select[data-setting-name]').forEach((el) => {
-                        const st = (mod.settings || []).find((x) => x.name === el.dataset.settingName);
-                        if (st) fillSelect(el, st);
+                        const setting = (mod.settings || []).find((x) => x.name === el.dataset.settingName);
+                        if (setting) fillSelect(el, setting);
                     });
                     syncGroupsFn();
                 };
 
+                // ---- header 交互：桌面 左键执行/右键设置；移动端 单击执行 + ⚙️设置 ----
+                const toggleSettings = () => {
+                    const opening = window.getComputedStyle(settingsDiv).display === 'none';
+                    settingsDiv.style.display = opening ? 'block' : 'none';
+                    if (opening) refreshSelectOptions();
+                };
                 if (IS_MOBILE) {
-                    const btn = document.createElement('button');
-                    btn.textContent = '⚙️';
-                    btn.style.color = 'white';
-                    btn.style.float = 'right';
-                    btn.onclick = e => {
+                    const gear = document.createElement('button');
+                    gear.textContent = '⚙️';
+                    gear.style.color = 'white';
+                    gear.style.float = 'right';
+                    gear.onclick = (e) => {
                         e.stopPropagation();
-                        const styleVal = window.getComputedStyle(settingsDiv).display;
-                        settingsDiv.style.display = (styleVal === 'none' ? 'block' : 'none');
-                        if (settingsDiv.style.display === 'block') refreshSelectOptions();
+                        toggleSettings();
                     };
-                    header.appendChild(btn);
+                    header.appendChild(gear);
 
-                    header.onclick = e => {
-                        if (e.target.classList.contains('ntr-bind-button') || e.target === btn) return;
-                        const stored = this.configuration.modules.find(m => m.name === mod.name);
-                        const cfg = stored || mod;
+                    header.onclick = (e) => {
+                        if (e.target.classList.contains('ntr-bind-button') || e.target === gear) return;
+                        const stored = this.configuration.modules.find((m) => m.name === mod.name);
                         NotificationUtils.showSuccess(`运行模块: ${mod.name}`);
-                        this.handleModuleClick(cfg, header);
+                        this.handleModuleClick(stored || mod, header);
                     };
                 } else {
-                    header.oncontextmenu = e => {
+                    header.oncontextmenu = (e) => {
                         e.preventDefault();
-                        const styleVal = window.getComputedStyle(settingsDiv).display;
-                        settingsDiv.style.display = (styleVal === 'none' ? 'block' : 'none');
-                        if (settingsDiv.style.display === 'block') refreshSelectOptions();
+                        toggleSettings();
                     };
-                    header.onclick = e => {
-                        if (e.button === 0 && !e.ctrlKey && !e.altKey && !e.shiftKey) {
-                            if (e.target.classList.contains('ntr-bind-button')) return;
-                            this.handleModuleClick(mod, header);
-                        }
+                    header.onclick = (e) => {
+                        if (e.button !== 0 || e.ctrlKey || e.altKey || e.shiftKey) return;
+                        if (e.target.classList.contains('ntr-bind-button')) return;
+                        this.handleModuleClick(mod, header);
                     };
                 }
+
+                // ---- 设置行渲染 ----
                 if (Array.isArray(mod.settings)) {
                     const groupDefs = Array.isArray(mod.settingGroups) ? mod.settingGroups : [];
                     const renderedGroups = new Set();
-                    // 折叠框：勾选 enabledBy 那个开关才可用（打开自动展开、关掉自动收起并禁用内部输入）
+
+                    // 折叠框状态同步：enabledBy 开关没勾 → 整组收起并禁用内部输入
                     const syncGroups = () => {
                         settingsDiv.querySelectorAll('.ntr-settings-group').forEach((box) => {
-                            const g = groupDefs.find((x) => x.id === box.dataset.groupId);
-                            if (!g) return;
-                            const toggle = g.enabledBy ? settingsDiv.querySelector(`input[type=checkbox][data-setting-name="${g.enabledBy}"]`) : null;
-                            const on = !toggle || toggle.checked;
-                            const expanded = on && box.dataset.expanded === '1';
+                            const def = groupDefs.find((x) => x.id === box.dataset.groupId);
+                            if (!def) return;
+                            const toggle = def.enabledBy
+                                ? settingsDiv.querySelector(`input[type=checkbox][data-setting-name="${def.enabledBy}"]`)
+                                : null;
+                            const enabled = !toggle || toggle.checked;
+                            const expanded = enabled && box.dataset.expanded === '1';
                             box.querySelector('.ntr-settings-group-body').style.display = expanded ? 'block' : 'none';
-                            box.querySelectorAll('.ntr-settings-group-body input, .ntr-settings-group-body select, .ntr-settings-group-body textarea, .ntr-settings-group-body button').forEach((el) => { el.disabled = !on; });
+                            box.querySelectorAll('.ntr-settings-group-body input, .ntr-settings-group-body select, .ntr-settings-group-body textarea, .ntr-settings-group-body button')
+                                .forEach((el) => { el.disabled = !enabled; });
                             const headEl = box.querySelector('.ntr-settings-group-head');
-                            headEl.textContent = `${expanded ? '▾' : '▸'} ${g.title}`;
-                            headEl.classList.toggle('disabled', !on);
+                            headEl.textContent = `${expanded ? '▾' : '▸'} ${def.title}`;
+                            headEl.classList.toggle('disabled', !enabled);
                         });
                     };
                     syncGroupsFn = syncGroups;
-                    const createSettingRow = (s) => {
+
+                    const createSettingRow = (setting) => {
                         const row = document.createElement('div');
                         row.style.marginBottom = '8px';
 
@@ -6095,138 +6075,138 @@
                         label.style.display = 'inline-block';
                         label.style.minWidth = '70px';
                         label.style.color = '#ccc';
-                        label.textContent = s.name + ': ';
+                        label.textContent = setting.name + ': ';
                         row.appendChild(label);
 
-                        let inputEl;
-                        switch (s.type) {
+                        let input;
+                        switch (setting.type) {
                             case 'boolean': {
-                                inputEl = document.createElement('input');
-                                inputEl.type = 'checkbox';
-                                inputEl.dataset.settingName = s.name;
-                                inputEl.checked = !!s.value;
-                                inputEl.onchange = () => {
-                                    s.value = inputEl.checked;
+                                input = document.createElement('input');
+                                input.type = 'checkbox';
+                                input.dataset.settingName = setting.name;
+                                input.checked = !!setting.value;
+                                input.onchange = () => {
+                                    setting.value = input.checked;
                                     this.saveConfiguration();
-                                    // 这类开关若控制着折叠框：勾上自动展开（好填内容），取消自动收起
+                                    // 开关若控制折叠框：勾上自动展开（好填内容），取消自动收起
                                     settingsDiv.querySelectorAll('.ntr-settings-group').forEach((box) => {
-                                        const g = groupDefs.find((x) => x.id === box.dataset.groupId);
-                                        if (g && g.enabledBy === s.name) box.dataset.expanded = inputEl.checked ? '1' : '0';
+                                        const def = groupDefs.find((x) => x.id === box.dataset.groupId);
+                                        if (def && def.enabledBy === setting.name) box.dataset.expanded = input.checked ? '1' : '0';
                                     });
                                     syncGroups();
                                 };
                                 break;
                             }
                             case 'number': {
-                                inputEl = document.createElement('input');
-                                inputEl.type = 'number';
-                                inputEl.value = s.value;
-                                inputEl.className = 'ntr-number-input';
-                                inputEl.onchange = () => {
-                                    s.value = Number(inputEl.value) || 0;
+                                input = document.createElement('input');
+                                input.type = 'number';
+                                input.value = setting.value;
+                                input.className = 'ntr-number-input';
+                                input.onchange = () => {
+                                    setting.value = Number(input.value) || 0;
                                     this.saveConfiguration();
                                 };
                                 break;
                             }
                             case 'select': {
-                                inputEl = document.createElement('select');
-                                inputEl.dataset.settingName = s.name;
-                                fillSelect(inputEl, s);
+                                input = document.createElement('select');
+                                input.dataset.settingName = setting.name;
+                                fillSelect(input, setting);
                                 // 点开下拉时重新求值：设置面板一直开着也能看到工作区里刚加的翻译器
-                                const refreshBeforeOpen = () => { fillSelect(inputEl, s); inputEl.value = s.value == null ? '' : String(s.value); };
-                                inputEl.addEventListener('pointerdown', refreshBeforeOpen);
-                                inputEl.addEventListener('focus', refreshBeforeOpen);
-                                inputEl.onchange = () => {
-                                    s.value = inputEl.value;
+                                const refill = () => {
+                                    fillSelect(input, setting);
+                                    input.value = setting.value == null ? '' : String(setting.value);
+                                };
+                                input.addEventListener('pointerdown', refill);
+                                input.addEventListener('focus', refill);
+                                input.onchange = () => {
+                                    setting.value = input.value;
                                     this.saveConfiguration();
                                 };
                                 break;
                             }
                             case 'string': {
-                                if (s.name === 'bind') {
-                                    inputEl = document.createElement('button');
-                                    inputEl.className = 'ntr-bind-button';
-                                    inputEl.textContent = (s.value === 'none') ? '(None)' : `[${s.value.toUpperCase()}]`;
-                                    inputEl.onclick = () => {
-                                        inputEl.textContent = '(Press any key)';
-                                        const handler = ev => {
+                                if (setting.name === 'bind') {
+                                    // 快捷键捕获按钮：点击后按任意键录入（Escape 清除）
+                                    input = document.createElement('button');
+                                    input.className = 'ntr-bind-button';
+                                    input.textContent = (setting.value === 'none') ? '(None)' : `[${setting.value.toUpperCase()}]`;
+                                    input.onclick = () => {
+                                        input.textContent = '(Press any key)';
+                                        const capture = (ev) => {
                                             ev.preventDefault();
-                                            if (ev.key === 'Escape') {
-                                                s.value = 'none';
-                                                inputEl.textContent = '(None)';
-                                            } else {
-                                                s.value = ev.key.toLowerCase();
-                                                inputEl.textContent = `[${ev.key.toUpperCase()}]`;
-                                            }
+                                            setting.value = (ev.key === 'Escape') ? 'none' : ev.key.toLowerCase();
+                                            input.textContent = (setting.value === 'none') ? '(None)' : `[${ev.key.toUpperCase()}]`;
                                             this.saveConfiguration();
-                                            document.removeEventListener('keydown', handler, true);
+                                            document.removeEventListener('keydown', capture, true);
                                             ev.stopPropagation();
                                         };
-                                        document.addEventListener('keydown', handler, true);
+                                        document.addEventListener('keydown', capture, true);
                                     };
                                 } else {
-                                    inputEl = document.createElement('input');
-                                    inputEl.type = 'text';
-                                    inputEl.value = s.value;
-                                    inputEl.className = 'ntr-input';
-                                    inputEl.onchange = () => {
-                                        s.value = inputEl.value;
+                                    input = document.createElement('input');
+                                    input.type = 'text';
+                                    input.value = setting.value;
+                                    input.className = 'ntr-input';
+                                    input.onchange = () => {
+                                        setting.value = input.value;
                                         this.saveConfiguration();
                                     };
                                 }
                                 break;
                             }
                             case 'textarea': {
-                                inputEl = document.createElement('textarea');
-                                inputEl.value = s.value;
-                                inputEl.className = 'ntr-input';
-                                inputEl.style.height = '80px';
-                                inputEl.style.width = '180px';
-                                inputEl.style.resize = 'vertical';
-                                inputEl.onchange = () => {
-                                    s.value = inputEl.value;
+                                input = document.createElement('textarea');
+                                input.value = setting.value;
+                                input.className = 'ntr-input';
+                                input.style.height = '80px';
+                                input.style.width = '180px';
+                                input.style.resize = 'vertical';
+                                input.onchange = () => {
+                                    setting.value = input.value;
                                     this.saveConfiguration();
                                 };
                                 break;
                             }
                             default: {
-                                inputEl = document.createElement('span');
-                                inputEl.style.color = '#999';
-                                inputEl.textContent = String(s.value);
+                                input = document.createElement('span');
+                                input.style.color = '#999';
+                                input.textContent = String(setting.value);
                             }
                         }
-                        row.appendChild(inputEl);
+                        row.appendChild(input);
                         return row;
                     };
-                    mod.settings.forEach(s => {
-                        const g = groupDefs.find((x) => x.members.includes(s.name));
-                        if (!g) {
-                            settingsDiv.appendChild(createSettingRow(s));
+
+                    mod.settings.forEach((setting) => {
+                        const groupDef = groupDefs.find((x) => x.members.includes(setting.name));
+                        if (!groupDef) {
+                            settingsDiv.appendChild(createSettingRow(setting));
                             return;
                         }
-                        if (renderedGroups.has(g.id)) return;   // 同一组的成员一起渲染
-                        renderedGroups.add(g.id);
-                        const box = document.createElement('div');
-                        box.className = 'ntr-settings-group';
-                        box.dataset.groupId = g.id;
-                        box.dataset.expanded = '0';
+                        if (renderedGroups.has(groupDef.id)) return;   // 同一组的成员聚在一起渲染
+                        renderedGroups.add(groupDef.id);
+                        const groupBox = document.createElement('div');
+                        groupBox.className = 'ntr-settings-group';
+                        groupBox.dataset.groupId = groupDef.id;
+                        groupBox.dataset.expanded = '0';
                         const head = document.createElement('div');
                         head.className = 'ntr-settings-group-head';
                         head.onclick = () => {
-                            box.dataset.expanded = box.dataset.expanded === '1' ? '0' : '1';
+                            groupBox.dataset.expanded = (groupBox.dataset.expanded === '1') ? '0' : '1';
                             syncGroups();
                         };
                         const body = document.createElement('div');
                         body.className = 'ntr-settings-group-body';
                         body.style.paddingLeft = '10px';
                         body.style.marginTop = '6px';
-                        g.members.forEach((name) => {
-                            const ms = mod.settings.find((x) => x.name === name);
-                            if (ms) body.appendChild(createSettingRow(ms));
+                        groupDef.members.forEach((memberName) => {
+                            const memberSetting = mod.settings.find((x) => x.name === memberName);
+                            if (memberSetting) body.appendChild(createSettingRow(memberSetting));
                         });
-                        box.appendChild(head);
-                        box.appendChild(body);
-                        settingsDiv.appendChild(box);
+                        groupBox.appendChild(head);
+                        groupBox.appendChild(body);
+                        settingsDiv.appendChild(groupBox);
                     });
                     syncGroups();
                 }
@@ -6240,21 +6220,20 @@
         }
 
         attachGlobalKeyBindings() {
-            document.addEventListener('keydown', e => {
+            document.addEventListener('keydown', (e) => {
                 if (e.ctrlKey || e.altKey || e.metaKey) return;
-                const pk = e.key.toLowerCase();
-                this.configuration.modules.forEach(mod => {
-                    const bind = mod.settings.find(s => s.name === 'bind');
-                    if (!bind || bind.value === 'none') return;
-                    if (bind.value.toLowerCase() === pk) {
-                        if (!isModuleEnabledByWhitelist(mod)) return;
-                        e.preventDefault();
-                        this.handleModuleClick(mod, null);
-                    }
+                const pressed = e.key.toLowerCase();
+                this.configuration.modules.forEach((mod) => {
+                    const bind = mod.settings.find((s) => s.name === 'bind');
+                    if (!bind || bind.value === 'none' || bind.value.toLowerCase() !== pressed) return;
+                    if (!isModuleEnabledByWhitelist(mod)) return;
+                    e.preventDefault();
+                    this.handleModuleClick(mod, null);
                 });
             });
         }
 
+        // 点击入口。域门槛在这里：非站点域名 / 不在白名单页上一律不动作（自动化测试请走 runModule）
         handleModuleClick(mod, header) {
             if (!domainAllowed || !isModuleEnabledByWhitelist(mod)) return;
             try {
@@ -6263,8 +6242,7 @@
                         Promise.resolve(mod.run(mod)).catch(console.error);
                     }
                 } else if (mod.type === 'keep') {
-                    const active = this.keepActiveSet.has(mod.name);
-                    if (active) {
+                    if (this.keepActiveSet.has(mod.name)) {
                         if (header) this.stopKeepModule(mod, header);
                     } else {
                         if (header) this.startKeepModule(mod, header);
@@ -6289,11 +6267,9 @@
         }
 
         updateKeepStateStorage() {
-            const st = {};
-            this.keepActiveSet.forEach(n => {
-                st[n] = true;
-            });
-            localStorage.setItem('NTR_KeepState', JSON.stringify(st));
+            const state = {};
+            this.keepActiveSet.forEach((name) => { state[name] = true; });
+            localStorage.setItem('NTR_KeepState', JSON.stringify(state));
         }
 
         loadKeepStateAndStart() {
@@ -6301,16 +6277,14 @@
             try {
                 saved = JSON.parse(localStorage.getItem('NTR_KeepState') || '{}');
             } catch (e) { }
-            this.configuration.modules.forEach(mod => {
-                if (mod.type === 'keep' && saved[mod.name]) {
-                    const hdr = this.headerMap.get(mod);
-                    if (hdr) {
-                        this.startKeepModule(mod, hdr);
-                    }
-                }
+            this.configuration.modules.forEach((mod) => {
+                if (mod.type !== 'keep' || !saved[mod.name]) return;
+                const hdr = this.headerMap.get(mod);
+                if (hdr) this.startKeepModule(mod, hdr);
             });
         }
 
+        // 主循环：keep 重跑（≥100ms）→ 显隐与路由（≥250ms）→ 队列速览 → 10ms 后再来一遍
         scheduleNextPoll() {
             const now = Date.now();
             if (now - this._lastKeepRun >= 100) {
@@ -6319,7 +6293,7 @@
             }
             if (now - this._lastVisRun >= 250) {
                 this.updateModuleVisibility();
-                if (this._lastEndPoint != window.location.href) {
+                if (this._lastEndPoint !== window.location.href) {
                     StorageUtils.update();
                     this._lastEndPoint = window.location.href;
                     SiteCheck.onRouteChange();
@@ -6332,7 +6306,7 @@
             }, 10);
         }
 
-        // 「术语队列」行尾速览：队列（待处理）+ 运行中，1s 节流；队列有变化时由 notify() 直接推一次
+        // 「术语队列」行尾速览：队列（待处理）+ 运行中，1s 节流；队列有变化时由 notify() 直接推一次（分叉自有）
         refreshQueueGlance(force) {
             if (!this.glanceMap || this.glanceMap.size === 0) return;
             const now = Date.now();
@@ -6350,54 +6324,50 @@
         }
 
         pollKeepModules() {
-            this.configuration.modules.forEach(mod => {
+            this.configuration.modules.forEach((mod) => {
                 if (mod.type === 'keep' && this.keepActiveSet.has(mod.name) && typeof mod.run === 'function') {
                     mod.run(mod);
                 }
             });
         }
 
+        // 自动化入口：绕过域门槛与白名单，按名直接执行
         runModule(name) {
-            this.configuration.modules.filter(mod => mod.name == name).forEach(mod => {
-                if (typeof mod.run === 'function') {
-                    mod.run(mod, true);
-                }
-            });
+            this.configuration.modules
+                .filter((mod) => mod.name == name)
+                .forEach((mod) => {
+                    if (typeof mod.run === 'function') {
+                        mod.run(mod, true);
+                    }
+                });
         }
 
         updateModuleVisibility() {
-            this.configuration.modules.forEach(mod => {
+            this.configuration.modules.forEach((mod) => {
                 const hdr = this.headerMap.get(mod);
                 if (!hdr) return;
-                const cont = hdr.parentElement;
                 const allowed = domainAllowed && isModuleEnabledByWhitelist(mod) && !mod.hidden;
-                if (!allowed) {
-                    cont.style.display = 'none';
-                    if (mod.type === 'keep' && this.keepActiveSet.has(mod.name)) {
-                        this.stopKeepModule(mod, hdr);
-                    }
-                } else {
-                    cont.style.display = 'block';
+                hdr.parentElement.style.display = allowed ? 'block' : 'none';
+                if (!allowed && mod.type === 'keep' && this.keepActiveSet.has(mod.name)) {
+                    this.stopKeepModule(mod, hdr);
                 }
             });
         }
 
+        // 面板中心落在屏幕四象限的哪一块 → 最小化时往那个角贴
         getAnchorCornerInfo(rect) {
-            const centerX = rect.left + rect.width / 2;
-            const centerY = rect.top + rect.height / 2;
-            const horizontal = (centerX < window.innerWidth / 2) ? 'left' : 'right';
-            const vertical = (centerY < window.innerHeight / 2) ? 'top' : 'bottom';
+            const corner = ((rect.top + rect.height / 2) < window.innerHeight / 2 ? 'top' : 'bottom')
+                + '-' + ((rect.left + rect.width / 2) < window.innerWidth / 2 ? 'left' : 'right');
             return {
-                corner: vertical + '-' + horizontal,
-                x: (horizontal === 'left' ? rect.left : rect.right),
-                y: (vertical === 'top' ? rect.top : rect.bottom)
+                corner,
+                x: corner.endsWith('-left') ? rect.left : rect.right,
+                y: corner.startsWith('top') ? rect.top : rect.bottom,
             };
         }
 
         setMinimizedState(newVal) {
             if (this.isMinimized === newVal) return;
-            const rect = this.panel.getBoundingClientRect();
-            const anchor = this.getAnchorCornerInfo(rect);
+            const anchor = this.getAnchorCornerInfo(this.panel.getBoundingClientRect());
 
             this.isMinimized = newVal;
             if (this.isMinimized) {
@@ -6412,6 +6382,7 @@
                 this.infoBar.style.display = 'flex';
             }
 
+            // 等 310ms（transition 收尾）再按锚角把面板贴回原来的角，夹紧视口并持久化
             setTimeout(() => {
                 const newRect = this.panel.getBoundingClientRect();
                 let left, top;
@@ -6447,31 +6418,23 @@
             }, 310);
         }
 
+        // 站点请求通道：token 每次现读（短效 access token 靠 refresh cookie 续期，构造时缓存只是兜底）；
+        // options.headers 可以整体覆盖，但缺 Authorization 时补上 Bearer
         async fetch(url, bypass = true, options = {}) {
-            // token 现读：新版站点是短效 access token（~2h）+ refresh cookie 自动续期，
-            // 页面加载时抓一次会在续期后变死值 → 每次请求都从 localStorage 重新取
             const token = this.initToken() || this.token;
-            if (bypass && token) {
-                const fetchOptions = {
-                    method: options.method || 'GET',
-                    headers: {
-                        'Authorization': `Bearer ${token}`,
-                        ...(options.headers || {})
-                    },
-                    ...options
-                };
-                if (token && !fetchOptions.headers['Authorization']) {
-                    fetchOptions.headers['Authorization'] = `Bearer ${token}`;
-                }
-                const response = await fetch(url, fetchOptions);
-                return response;
-            } else {
-                return await fetch(url, options);
+            if (!bypass || !token) {
+                return fetch(url, options);
             }
+            const merged = {
+                ...options,
+                method: options.method || 'GET',
+                headers: { Authorization: `Bearer ${token}`, ...(options.headers || {}) },
+            };
+            return fetch(url, merged);
         }
 
         delay(ms) {
-            return new Promise(r => setTimeout(r, ms));
+            return new Promise((r) => setTimeout(r, ms));
         }
     }
 
