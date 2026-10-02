@@ -3,9 +3,10 @@ an-mem-exp/
 auto-novel/
 extensions/
 
-# Chrome 测试 profile（240M，含登录态，绝不入库）
+# Chrome 测试 profile（含登录态，绝不入库）；chrome-e2e-profile 为无 TM 的并行测试车道专用
 chrome-test-profile/
 chrome-measure-profile/
+chrome-e2e-profile/
 
 # 运行产物 / 日志 / 临时文件
 *.log

@@ -21,10 +21,11 @@ docs/                          管线说明（html + png）
 
 ```sh
 node mock-llm/server.mjs                     # 起 mock（8788）：假 /v1/chat/completions + 假站点 /novel /wenku /favorite
+PORT=8789 node mock-llm/server.mjs           # 并行车道 mock（8789，另起端口避免与他人实例抢 8788）
 node tools/.gen-dev.mjs                      # 生成 ntr-toolbox-alpha.dev.user.js（交付前必跑）
 node tools/engine-test.mjs                   # GlossaryEngine 单测（需 mock 在跑）
 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8788/wenku/mock-src"   # 跑 e2e 套件
-node tools/cdp.mjs open <url> | inject | evalf <file> | shot <png> | logs   # 直接操作浏览器
+node tools/cdp.mjs open <url> | inject | evalf <file> | shot <png> | logs   # 直接操作浏览器（CDP_PORT 环境变量换端口）
 ```
 
 测试用 Chrome（独立 profile，绝不用日常 Chrome）：
@@ -33,6 +34,17 @@ node tools/cdp.mjs open <url> | inject | evalf <file> | shot <png> | logs   # �
 chrome.exe --remote-debugging-port=9333 --user-data-dir="<repo>\chrome-test-profile" \
   --proxy-server="http://127.0.0.1:6789" --no-first-run --no-default-browser-check
 ```
+
+**并行测试车道**（有另一个会话/人在用 8788+9333 时用这套，完全隔离）：
+
+```sh
+PORT=8789 node mock-llm/server.mjs
+chrome.exe --remote-debugging-port=9334 --user-data-dir="<repo>\chrome-e2e-profile" \
+  --proxy-server="http://127.0.0.1:6789" --no-first-run --no-default-browser-check
+CDP_PORT=9334 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8789/..."
+```
+
+注意：`chrome-e2e-profile/` 是全新 profile，**没有 TM、没有登录态**——mock e2e（走 inject）专用；TM 重装与实站验证仍走 9333 主车道。套件内把「临时端点」设到 8788 的（wenku-dryrun/tempendpoint 等）在车道上跑要先把该设置值改成 8789。
 
 ## 交付流程（改了 user.js 之后）
 
