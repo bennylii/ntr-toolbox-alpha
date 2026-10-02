@@ -10,8 +10,7 @@
 ntr-toolbox-alpha.user.js      唯一源文件（改它；没有 src/）
 ntr-toolbox-alpha.dev.user.js  由 .gen-dev.mjs 生成（@version 追加 -dev、@name 加 (dev)），不要手改
 tools/                         开发/测试脚本（.e2e-*.js = 页面上下文断言套件；.probe-*.js = 小探针）
-tools/.t2s-backup.user.js      上游 v0.7.2 原版备份 —— clean-room 重构的行为 diff 基准，重构全部完成前保留
-docs/cleanroom/                各模块重构前的行为规格（spec）
+docs/cleanroom/                各模块重构前的行为规格（spec-01..05，全部已实施）
 mock-llm/server.mjs            假 LLM + 假站点（端口 8788）
 debug-env/                     离线站点页面替身（无网络也能开发/截图）
 docs/                          管线说明（html + png）
@@ -53,11 +52,11 @@ CDP_PORT=9334 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8789
 3. Tampermonkey 里重装：打开 `http://127.0.0.1:8788/ntr-toolbox-alpha.dev.user.js` → 点安装按钮（测试 profile 里装的是**篡改猴测试版/Beta**）。重装后**必须刷新页面**新代码才生效。
 4. 验证装上的版本 = 本地文件：`node tools/cdp.mjs evalf tools/.probe-tm-hash.js`（比对 sha256）。
 
-## clean-room 重构约定（重构上游模块时必读）
+## clean-room 重构约定（已完成）
 
-- 重构对象是**上游派生代码**；本仓库自有代码（AI 术语表管线、SiteCheck 等）不必重构。
-- 每个模块按「写行为规格 `docs/cleanroom/spec-*.md` →（缺测试则先补定格测试）→ 从 spec 独立实现 → 全套 e2e 等价验证」推进；**不逐行翻译** `tools/.t2s-backup.user.js` 的表达（结构/命名/注释全部另起）。
-- 数据兼容红线（浅改名决策，全重构期间不变）：`CONFIG_VERSION=23`、localStorage 键（`NTR_ToolBox_Config` 等）、IndexedDB 库名（`ntr-glossary`、`volumes`）、DOM id/class（`#ntr-panel` 等）、全局 API（`_NTRToolBox`、`_NTRGlossaryDev`、`_NTRToolBoxInstance`）、默认翻译器名前缀 `'NTR translator '`。
+- 上游派生代码的 clean-room 重写**已全部完成**（spec-01 配置/通知/token → spec-02 helper 层 → spec-03 面板框架 → spec-04 模块定义 → spec-05 注入样式），上游原版备份 `tools/.t2s-backup.user.js` 已移除（需要行为对照时从 git 历史取回：`git show 4e993e8:tools/.t2s-backup.user.js`）。
+- 若未来要从上游借鉴新功能：仍按「写行为规格 `docs/cleanroom/spec-*.md` →（缺测试则先补定格测试）→ 从 spec 独立实现 → 全套 e2e 等价验证」推进；**不逐行翻译**原版表达（结构/命名/注释全部另起）。
+- 数据兼容红线（全项目期间不变）：`CONFIG_VERSION=23`、localStorage 键（`NTR_ToolBox_Config` 等）、IndexedDB 库名（`ntr-glossary`、`volumes`）、DOM id/class（`#ntr-panel` 等）、全局 API（`_NTRToolBox`、`_NTRGlossaryDev`、`_NTRToolBoxInstance`）、默认翻译器名前缀 `'NTR translator '`。
 
 ## 硬性约定（安全 / 数据）
 

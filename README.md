@@ -63,7 +63,7 @@ node tools/.run-suite.mjs tools/.e2e-queue-retry-btn.js "http://127.0.0.1:8788/w
 
 ## clean-room 重构说明
 
-- 本仓库以 `tools/.t2s-backup.user.js`（上游 v0.7.2 原版备份）作为**行为 diff 基准**：重构按「行为规格 → 独立实现 → e2e 等价验证」推进，不逐行翻译原代码；重构完成前该基准文件暂留仓库。
+- 重构**已完成**：以 `tools/.t2s-backup.user.js`（上游 v0.7.2 原版备份，已随重构完成移除、git 历史仍可取回）作为行为 diff 基准，按「行为规格 → 独立实现 → e2e 等价验证」推进（规格见 `docs/cleanroom/`，spec-01..05 全部实施），不逐行翻译原代码。
 - 上游原作的代码表达（All Rights Reserved）不进入本仓库的许可范围；重构产出的实现代码以 MIT 许可由本仓库作者所有。
 
 ## 许可与致谢
