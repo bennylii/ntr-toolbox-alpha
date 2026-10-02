@@ -1,6 +1,6 @@
-// 行为定格（重构前基线）：自动重试（keep 型，1s 节流轮询「未完成」条目并点「重试未完成任务」）
+// 行为定格：自动重试（keep 型，1s 节流轮询「未完成」条目并点「重试未完成任务」）
 // 依赖站点 DOM（.n-list-item/.n-thing-main__description/.n-thing-header__extra + 按钮文案）——全部 stage 自建。
-// 两个上游 quirk（tagName 小写永假、重启翻译器 false||3 短路）按现状钉住，重写须保持等价。
+// 2026-10-02 行为修复：手动点击清零计数（原 tagName 小写永假）、关闭「重启翻译器」真正关断（原 false||3 短路）。
 // 跑法：node tools/.run-suite.mjs tools/.e2e-auto-retry.js "http://127.0.0.1:8788/wenku/mock-src"
 const out = { checks: [], notes: [], errors: [] };
 const check = (label, cond, extra) => { out.checks.push({ label, ok: !!cond, extra: extra === undefined ? null : extra }); };
@@ -102,25 +102,25 @@ try {
     check('无 retry 按钮：_attempts 不增但重启触发', mod._attempts === 2 && launchCalls === 4, { attempts: mod._attempts, launchCalls });
     stage.insertBefore(retryBtn, stage.firstChild);
 
-    // ---------- F. quirk1：真 button 点击不清零 _attempts（tagName==='button' 永假） ----------
+    // ---------- F. 手动点击清零计数（2026-10-02 行为修复：原来是 tagName 小写永假，清零从未生效） ----------
     retryBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));   // retryBtn 自己的监听器把 retryClicks 计到 5
-    check('quirk1：点击 button 后 _attempts 不归零', mod._attempts === 2, mod._attempts);
+    check('手动点击 button 后 _attempts 清零', mod._attempts === 0, mod._attempts);
 
-    // ---------- G. 重试上限 ----------
-    setSetting('最大重试次数', 4);
-    forceTick(); await mod.run(mod);   // attempts 2→3
-    forceTick(); await mod.run(mod);   // attempts 3→4
-    check('上限内：连跑到 _attempts=4', retryClicks === 9 && mod._attempts === 4, { retryClicks, attempts: mod._attempts });
+    // ---------- G. 重试上限（从清零后的 0 开始计数） ----------
+    setSetting('最大重试次数', 2);
+    forceTick(); await mod.run(mod);   // attempts 0→1
+    forceTick(); await mod.run(mod);   // attempts 1→2
+    check('上限内：连跑到 _attempts=2', retryClicks === 9 && mod._attempts === 2, { retryClicks, attempts: mod._attempts });
     const launchBeforeCap = launchCalls;
-    forceTick(); await mod.run(mod);   // attempts=4 >= 4 → 整个分支跳过
+    forceTick(); await mod.run(mod);   // attempts=2 >= 2 → 整个分支跳过
     check('达上限：零点击且不再重启', retryClicks === 9 && launchCalls === launchBeforeCap, { retryClicks, launchCalls });
 
-    // ---------- H. quirk2：重启翻译器=false 仍触发（false||3 短路） ----------
+    // ---------- H. 关闭「重启翻译器」→ 不再触发启动（2026-10-02 行为修复：原来 false||3 短路关不掉） ----------
     mod._attempts = 0;
     setSetting('重启翻译器', false);
     forceTick();
     await mod.run(mod);
-    check('quirk2：关闭「重启翻译器」后仍触发启动', launchCalls === launchBeforeCap + 1 && retryClicks === 11, { launchCalls, before: launchBeforeCap, retryClicks });
+    check('关闭「重启翻译器」后不再触发启动', launchCalls === launchBeforeCap && retryClicks === 11, { launchCalls, before: launchBeforeCap, retryClicks });
     setSetting('重启翻译器', true);
 
     // ---------- I. 置顶重试任务：extras 从最后一个往前点 N 次 ----------

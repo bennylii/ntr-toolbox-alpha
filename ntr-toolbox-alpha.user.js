@@ -629,14 +629,14 @@
             this._lastRun = now;
 
             const maxAttempts = getModuleSetting(cfg, '最大重试次数') || 99;
-            // 上游 quirk：false || 3 = 3 —— 把「重启翻译器」关掉实际关不住（现状钉住，见 .e2e-auto-retry.js）
-            const relaunch = getModuleSetting(cfg, '重启翻译器') || 3;
+            // 「重启翻译器」是布尔开关：直接读布尔值（历史上这里写成了 `|| 3`，导致关掉也会照样重启）
+            const relaunch = getModuleSetting(cfg, '重启翻译器') === true;
             const moveToTop = getModuleSetting(cfg, '置顶重试任务');
 
-            // 设计意图是「手动点任意按钮就清零重试计数」，但 tagName 比对用小写 'button'（DOM 里是 'BUTTON'）→ 永不生效
+            // 手动点了页面上任意按钮（说明用户在亲自操作）→ 清零重试计数，重新给满预算
             if (!this._boundClickHandler) {
                 this._boundClickHandler = (e) => {
-                    if (e.target.tagName === 'button') {
+                    if (String(e.target.tagName).toUpperCase() === 'BUTTON') {
                         this._attempts = 0;
                     }
                 };

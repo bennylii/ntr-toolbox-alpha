@@ -37,8 +37,8 @@
 ## 5. 自动重试（keep 型，whitelist `/workspace/*`）
 设置 最大重试次数(number,99)/置顶重试任务(boolean,false)/重启翻译器(boolean,true)。实例态 `_attempts/_lastRun/_interval=1000`。run（契约细节见 .e2e-auto-retry.js 钉住的现状）：
 1. 1s 节流（`_lastRun/_interval`）。
-2. maxAttempts = 设置||99；relaunch = 重启翻译器||3（**false 短路成 3**——quirk）；moveToTop = 置顶重试任务。
-3. 惰性绑一次 document click 监听：`e.target.tagName === 'button'`（**小写永假**——quirk，设计意图「手动点击清零计数」实际从不生效）。
+2. maxAttempts = 设置||99；relaunch = 重启翻译器（**布尔直读**）；moveToTop = 置顶重试任务。
+3. 惰性绑一次 document click 监听：目标是 `<button>`（大小写不敏感）→ `_attempts` 清零（用户在亲自操作 = 重新给满预算；模块自己每轮点 retry 按钮也会触发清零，但轮次进度由轮次入参承载，不受影响）。
 4. 扫 `.n-list-item` 中 `.n-thing-main__description` 文案含『未完成』的条目。
 5. 有未完成且 `_attempts < maxAttempts`：
    - 页面有 textContent **全等**『停止』的按钮 → 什么都不做；
@@ -62,8 +62,14 @@
 7. 收尾：全成功 → success『成功填充 N 本小说的术语表(，翻页 X 页（停止：…）)』；有失败 → warning『填充完成: X 成功, Y 失败…』。
 
 ## 9. 与旧实现的刻意差异
-- 只另起表达，全部文案/设置名/接口形状/quirk（含点名差异、重试计数不自增、3*page+1 页码）逐条保留——定格测试已钉。
+- 只另起表达，全部文案/设置名/接口形状逐条保留——定格测试已钉。
 - 排队 v2 两模块各自的 `maxRetries=3`、间隔 1s 重试结构保留；不合并两模块（文案微差太多，合并弊大于利）。
 - 两模块的卷目录拉取提为局部 helper `wenkuVolumes`（Sakura 版带文案尾缀参数：wenkus 句号 / favorite 冒号，GPT 版恒冒号——沿用上游原文的差异）。
 - 加固：排队 v2 的 `novel` 详情页分支，旧实现把 `title` 声明在 try 内、catch 引用它会 ReferenceError（统计条缺失时错误 toast 从不弹出）；重写后 catch 用 `document.title`，能正常弹错误。此路径无定格测试覆盖，属可观测微调。
 - 加固：删除翻译器在非工作区页提前 return（旧实现继续走完两个 if）；清空任务把「已清空 N」的 N 在清空前捕获（与旧实现等价，只是表达更直白）。
+
+## 10. 行为变更记录（重构后，经用户决策）
+- **2026-10-02**：修复自动重试的两个上游 quirk（原以「保持等价」钉住）：
+  1. 手动点击清零计数：`tagName === 'button'`（小写永假）→ 大小写不敏感比较，清零真正生效；
+  2. 「重启翻译器」开关：`设置值 || 3`（false 短路成 3，关不掉）→ 布尔直读（`=== true`），关闭即不再触发重启。
+  对应 `.e2e-auto-retry.js` 的 F/G/H 段断言已同步改写为修复后行为。
