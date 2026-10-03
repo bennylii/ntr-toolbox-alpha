@@ -3,6 +3,7 @@
 // 子命令：
 //   auth <token>            保存站点凭据（也可由油猴「同步 Daemon」推送）
 //   add <novel-url>         登记一本书（/novel/{provider}/{id} 或 /wenku/{id}）
+//   run [--book key] [--concurrency 2]  跑一遍增强术语管线（提取→核实→回扫→直写/提案）
 //   translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 //   watch [--interval 分钟]  常驻：定期按 expire 档补翻未译/过期章节
 //   serve [--port 7331]     本机控制面（/status /progress /auth /run）
@@ -19,6 +20,7 @@ const { Store } = await imp('store.mjs');
 const { loadEngine } = await imp('engine.mjs');
 const { SiteClient } = await imp('site-client.mjs');
 const { TranslationPipeline } = await imp('translate-pipeline.mjs');
+const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
 const { startServer } = await imp('server.mjs');
 
 const DB_PATH = path.join(here, 'daemon.db');
@@ -48,7 +50,7 @@ function getWorkers() {
 
 function makeClient(book) {
   const origin = book.origin || store.getConfig('origin') || 'https://n.novelia.cc';
-  return new SiteClient({ origin, token: store.getConfig('token') || '' });
+  return new SiteClient({ origin, token: store.getConfig('token') || '', engine });
 }
 
 const pipeline = new TranslationPipeline({
@@ -61,6 +63,20 @@ const pipeline = new TranslationPipeline({
     level: typeof flags.level === 'string' ? flags.level : 'expire',
     concurrency: Math.max(1, Number(flags.concurrency) || 2),
     maxChapters: Math.max(0, Number(flags['max-chapters']) || 0),
+    rssLimitMB: RSS_LIMIT_MB,
+  },
+});
+
+const glossaryPipeline = new GlossaryPipeline({
+  store, engine,
+  workers: getWorkers(),
+  makeClient,
+  log,
+  options: {
+    budgetChars: Math.max(200, Number(flags.budget) || 3000),
+    concurrency: Math.max(1, Number(flags.concurrency) || 2),
+    verify: flags['no-verify'] !== true,
+    maxRequests: Number(flags['max-requests']) || 0,
     rssLimitMB: RSS_LIMIT_MB,
   },
 });
@@ -111,22 +127,45 @@ switch (command) {
     log.log(`已登记: ${info.key}（${info.kind}）`);
     break;
   }
+  case 'run': {
+    const books = flags.book ? [store.getBook(flags.book)].filter(Boolean) : store.listBooks();
+    if (books.length === 0) { log.error('没有登记的书：先 add <novel-url>'); break; }
+    for (const book of books) {
+      log.log(`==== glossary ${book.key} ====`);
+      try {
+        const r = await glossaryPipeline.runBook(book.key);
+        log.log(`==== ${book.key} 完成`, JSON.stringify(r.stats));
+      } catch (e) {
+        log.error(`==== ${book.key} 失败: ${(e && e.message) || e}`);
+        if (e && e.code === 'unauthorized') log.error('凭据失效：在站点页面点「同步 Daemon」，或 daemon auth <token> 重新写入');
+      }
+    }
+    break;
+  }
   case 'translate': {
     await runBooks(flags.book);
     break;
   }
   case 'watch': {
     const intervalMin = Math.max(1, Number(flags.interval) || 30);
-    log.log(`watch 模式：每 ${intervalMin} 分钟按 expire 档补一次（Ctrl-C 退出）`);
+    const watchJob = flags.job === 'glossary' ? 'glossary' : 'translate';
+    log.log(`watch 模式（job=${watchJob}）：每 ${intervalMin} 分钟一次（Ctrl-C 退出）`);
     for (;;) {
-      await runBooks(flags.book);
+      if (watchJob === 'glossary') {
+        const books = flags.book ? [store.getBook(flags.book)].filter(Boolean) : store.listBooks();
+        for (const book of books) {
+          try { await glossaryPipeline.runBook(book.key); } catch (e) { log.error(`${book.key}: ${(e && e.message) || e}`); }
+        }
+      } else {
+        await runBooks(flags.book);
+      }
       log.log(`休眠 ${intervalMin} 分钟…`);
       await new Promise((r) => setTimeout(r, intervalMin * 60 * 1000));
     }
   }
   case 'serve': {
     const port = Math.max(1, Number(flags.port) || 7331);
-    await startServer({ store, pipeline, port, log });
+    await startServer({ store, pipeline, glossaryPipeline, port, log });
     log.log('serve 模式：Ctrl-C 退出');
     await new Promise(() => { });
   }
@@ -137,6 +176,7 @@ switch (command) {
       const prog = store.listProgress(b.key);
       log.log(`  ${b.key}  [${b.state}] ${b.title || ''}  已译章节=${prog.length}`);
     });
+    log.log(`open proposals: ${store.listProposals().filter((x) => x.status === 'open').length}`);
     log.log(`workers: ${getWorkers().length} 个（auth / 油猴同步写入）`);
     break;
   }
