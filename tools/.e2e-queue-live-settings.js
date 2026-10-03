@@ -48,7 +48,7 @@ const contentOptions = () => ({
   timeoutMs: 300000,
   maxLines: 7,
   workerId: 'w1',
-  testEndpoint: 'http://127.0.0.1:8788',
+  testEndpoint: `${location.origin}`,
   testModel: 'mock-glossary-1',
   testKey: 'x',
 });
@@ -63,7 +63,7 @@ const runOptions = () => ({
   timeoutMs: 300000,
   maxLines: 0,
   workerId: '',
-  testEndpoint: 'http://127.0.0.1:8788',
+  testEndpoint: `${location.origin}`,
   testModel: 'mock-glossary-1',
   testKey: 'x',
 });
@@ -99,7 +99,7 @@ try {
     { concurrency: merged.concurrency, rpm: merged.rpm, timeoutMs: merged.timeoutMs });
   check('分块字数/最大轮数/行数上限/原文语言/翻译器选择 仍是入队快照',
     merged.budgetChars === 600 && merged.maxRounds === 1 && merged.maxLines === 7 && merged.sourceLanguage === 'KO'
-    && merged.workerId === 'w1' && merged.testEndpoint === 'http://127.0.0.1:8788',
+    && merged.workerId === 'w1' && merged.testEndpoint === `${location.origin}`,
     { budgetChars: merged.budgetChars, maxRounds: merged.maxRounds, sourceLanguage: merged.sourceLanguage });
   const noSnap = Q.jobRuntime(null);
   check('老备份（无 job.options）→ 整份用实时设置', noSnap.concurrency === 5 && noSnap.timeoutMs === 45000 && noSnap.budgetChars === 3000 && noSnap.sourceLanguage === 'JA',
@@ -117,7 +117,7 @@ try {
   setSetting('并发', 1);
   setSetting('RPM', 0);
   setSetting('逾时(秒)', 45);
-  const created = await Q.addJobs([target], { ...runOptions(), testEndpoint: 'http://127.0.0.1:8788?slow=1000&run=' + Date.now() });
+  const created = await Q.addJobs([target], { ...runOptions(), testEndpoint: `${location.origin}?slow=1000&run=` + Date.now() });
   const jobId = created[0].id;
   await Q.openPanel();
   await sleep(300);
@@ -155,7 +155,7 @@ try {
   setSetting('逾时(秒)', 90);
   reqCaptured.length = 0;
   runCaptured.length = 0;
-  const created2 = await Q.addJobs([target], { ...runOptions(), testEndpoint: 'http://127.0.0.1:8788?slow=400&run=' + Date.now() });
+  const created2 = await Q.addJobs([target], { ...runOptions(), testEndpoint: `${location.origin}?slow=400&run=` + Date.now() });
   Q.runLoop();
   await waitJob(created2[0].id, null);
   await sleep(400);
@@ -167,7 +167,7 @@ try {
   setSetting('并发', 2);
   setSetting('RPM', 120);
   setSetting('逾时(秒)', 45);
-  const auditRow = (await Q.addJobs([target], { ...runOptions(), testEndpoint: 'http://127.0.0.1:8788?audit=1&run=' + Date.now() }))[0];
+  const auditRow = (await Q.addJobs([target], { ...runOptions(), testEndpoint: `${location.origin}?audit=1&run=` + Date.now() }))[0];
   auditRow.state = 'review';
   auditRow.entries = [
     { src: 'アリス', dst: '爱丽丝', type: '女性人名', count: 871 },
@@ -206,7 +206,7 @@ try {
   // 实跑：请求层拿到的是队列覆盖值（公用 2 / 队列 8）
   setQ('并发(0=跟随)', 8);
   reqCaptured.length = 0; runCaptured.length = 0;
-  const created3 = await Q.addJobs([target], { ...runOptions(), testEndpoint: 'http://127.0.0.1:8788?slow=400&run=' + Date.now() });
+  const created3 = await Q.addJobs([target], { ...runOptions(), testEndpoint: `${location.origin}?slow=400&run=` + Date.now() });
   Q.runLoop();
   await waitJob(created3[0].id, null);
   await sleep(400);
