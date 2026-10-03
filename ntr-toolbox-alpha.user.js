@@ -802,7 +802,10 @@
             const paginateHint = autoPaginate
                 ? `\n\n将自动翻到第 1/${maxPages} 页（每页点「下一页」后等新列表载入；点不到/按钮禁用/翻不动会自动停止）。`
                 : '';
-            if (!confirm(`确定要为当前页面的 ${firstPage.length} 本小说${isAppend ? '追加' : '填充'}术语表吗？\n(包含 ${Object.keys(newGlossary).length} 个术语)${paginateHint}`)) {
+            // 指南绝对禁止「改原文/插控制符操控翻译」（如 rem0 => …）：批量直写没有预览 UI，至少在确认里点名
+            const tamperedCount = Object.keys(newGlossary).filter((src) => GlossaryEngine.looksLikeSourceTampering(src)).length;
+            const tamperHint = tamperedCount > 0 ? `\n\n⚠ 其中 ${tamperedCount} 条疑似改原文/含控制符（指南绝对禁止，建议从输入里剔除）` : '';
+            if (!confirm(`确定要为当前页面的 ${firstPage.length} 本小说${isAppend ? '追加' : '填充'}术语表吗？\n(包含 ${Object.keys(newGlossary).length} 个术语)${paginateHint}${tamperHint}`)) {
                 return;
             }
 
@@ -1150,13 +1153,29 @@
         GlossaryLog.info('写入术语表', { target: GlossaryTargets.describe(target), picked: picked.length, added, overwrite: picked.length - added });
         await GlossaryTargets.takeSnapshot(target, current, `写入：新增 ${added} / 覆盖 ${picked.length - added}`);
         const merged = Object.assign({}, current);
-        picked.forEach((row) => { merged[row.src] = row.dst; });
+        picked.forEach((row) => {
+            // 指南备注约定：值写为 "译名 #简单标签"（不合格的 info 不写）
+            const value = GlossaryEngine.formatGlossaryValue(row.dst, row.type || row.info);
+            if (value === '') return;
+            const existingValue = current[row.src];
+            if (typeof existingValue === 'string') {
+                // 译名没变且本次没有新备注 → 保留站点上原有的备注（避免把手工写的 #备注洗掉）
+                const oldParts = GlossaryEngine.splitGlossaryValue(existingValue);
+                const newParts = GlossaryEngine.splitGlossaryValue(value);
+                if (newParts.note === '' && oldParts.note !== '' && oldParts.dst === newParts.dst) {
+                    merged[row.src] = `${newParts.dst} #${oldParts.note}`;
+                    return;
+                }
+            }
+            merged[row.src] = value;
+        });
         const res = await GlossaryTargets.saveGlossary(target, merged);
         if (res && res.refresh) {
             NotificationUtils.showWarning('本地卷术语表已更新：请刷新页面后生效');
         }
         return { before: current, after: merged };
     };
+
 
     // 公共：解析术语表条目，返回 [{ src, dst, type, count, context? }]
     // 支持三种来源：KWG 默认 output.json（对象数组）/ 扁平 JSON（output_kv.json 等）/ “原文 => 译文” 行
@@ -1262,6 +1281,7 @@
         settings: [
             newTextareaSetting('术语表', ''),
             newBooleanSetting('读取剪贴板', false),
+            newBooleanSetting('检查正文', true),
             newStringSetting('bind', 'none'),
         ],
         run: async function (cfg) {
@@ -1284,6 +1304,31 @@
             const count = entries.length;
             const target = await resolveGlossaryTarget();
             if (!target) return;
+            // 指南合规检查（导入路径没有提取路径的 count>0 过滤）：
+            // 逐条标注「书中未见 / 疑似改原文」，只提示不删，标记进合并弹层的 suspect 体系
+            if (count > 0 && getModuleSetting(cfg, '检查正文') !== false && target.kind !== 'local') {
+                const progress = GlossaryUI.status(`导入检查 - ${GlossaryTargets.describe(target)}`);
+                try {
+                    progress.update('抓取正文核对…');
+                    const { text: sourceText } = await loadGlossarySourceText(target, (msg) => progress.update(msg));
+                    const lines = GlossaryEngine.splitLines(sourceText);
+                    const audited = GlossaryEngine.auditImportEntries({ entries, lines });
+                    entries = audited.entries;
+                    progress.close();
+                    const parts = [];
+                    if (audited.absent > 0) parts.push(`${audited.absent} 条书中未见`);
+                    if (audited.tampered > 0) parts.push(`${audited.tampered} 条疑似改原文`);
+                    if (parts.length > 0) NotificationUtils.showWarning(`导入检查：${parts.join(' / ')}（已标记，建议剔除后再写入）`);
+                } catch (e) {
+                    progress.close();
+                    NotificationUtils.showWarning(`正文核对失败（继续导入）：${(e && e.message) || e}`);
+                }
+            } else if (count > 0 && target.kind === 'local' && getModuleSetting(cfg, '检查正文') !== false) {
+                NotificationUtils.showWarning('本地卷不支持正文核对：仅做「疑似改原文」标记');
+                entries = entries.map((entry) => GlossaryEngine.looksLikeSourceTampering(entry.src)
+                    ? { ...entry, suspect: [...(entry.suspect || []), '疑似改原文'] }
+                    : entry);
+            }
             const existing = await GlossaryTargets.loadGlossary(target);
             // 文本/剪贴板都没内容时也照常打开弹层：可以在弹层里选 JSON 文件或直接拖进去
             if (count > 0) NotificationUtils.showSuccess(`已解析 ${count} 条术语`);
@@ -4210,11 +4255,15 @@
         const computeDiff = (entries, existing) => {
             const rows = entries.map((entry) => {
                 const has = Object.prototype.hasOwnProperty.call(existing, entry.src);
+                // 站点值可能是 "译名 #备注"：比对按剥离备注后的 base 判 same/conflict
+                const existingBase = has ? GlossaryEngine.splitGlossaryValue(existing[entry.src]).dst : undefined;
+                const entryBase = GlossaryEngine.splitGlossaryValue(entry.dst).dst;
                 let status = 'add';
-                if (has && existing[entry.src] === entry.dst) status = 'same';
+                if (has && existingBase === entryBase) status = 'same';
                 else if (has) status = 'conflict';
-                const suspect = GlossaryEngine.suspectReasons(entry.src);
-                return { ...entry, existing: has ? existing[entry.src] : undefined, status, suspect };
+                // 既有形态标记（过长/像短语/带敬称/含标点）+ 模块注入的自定义标记（书中未见/疑似改原文）
+                const suspect = [...GlossaryEngine.suspectReasons(entry.src), ...(Array.isArray(entry.suspect) ? entry.suspect : [])];
+                return { ...entry, existing: has ? existing[entry.src] : undefined, status, suspect: [...new Set(suspect)] };
             });
             const covered = new Set(entries.map((e) => e.src));
             Object.keys(existing).forEach((src) => {

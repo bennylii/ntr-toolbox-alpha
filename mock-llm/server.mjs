@@ -243,6 +243,18 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 指南合规用例：PUT 术语表 → 记录写入体（断言 #备注 写入/保留）
+  if (req.method === 'PUT' && /\/glossary$/.test(url.pathname)) {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    let body = {};
+    try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { /* ignore */ }
+    stats.lastGlossaryPut = { path: url.pathname, body };
+    res.writeHead(200, { ...cors, 'content-type': 'application/json', 'cache-control': 'no-store' });
+    res.end('{}');
+    return;
+  }
+
   // 翻译 worker 用例：mock-trans* 家族的 translate-v2 契约（web 版：POST chapter-task / POST chapter 上传）
   if (req.method === 'POST' && url.pathname.startsWith('/api/') && /\/translate-v2\//.test(url.pathname)) {
     const chunks = [];
@@ -289,6 +301,13 @@ const server = http.createServer(async (req, res) => {
     const segs = url.pathname.split('/').filter(Boolean);
     const rich = /mock-src/.test(url.pathname);
     const trans = /mock-trans/.test(url.pathname);
+    const boost = /mock-boost/.test(url.pathname);
+    const noted = /mock-noted/.test(url.pathname);
+    if (/\/file$/.test(url.pathname)) {
+      res.writeHead(200, { ...cors, 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+      res.end('アルテは笑った\nオルトが来た\nアリスが魔導書を読む。\nローズも来た。\n');
+      return;
+    }
     res.writeHead(200, { ...cors, 'content-type': 'application/json', 'cache-control': 'no-store' });
     if (trans && /\/translate-v2\//.test(url.pathname)) {
       const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || 'mock-trans';
@@ -298,6 +317,14 @@ const server = http.createServer(async (req, res) => {
         glossaryUuid: TRANS_GLOSSARY_ID,
         glossary: {},
       }));
+      return;
+    }
+    if (boost && /\/chapter-task\//.test(url.pathname)) {
+      res.end(JSON.stringify({ paragraphJp: Array.from({ length: 20 }, () => 'アリスさんとローズちゃんが来た。') }));
+      return;
+    }
+    if (boost && /\/translate-v2\//.test(url.pathname)) {
+      res.end(JSON.stringify({ toc: [{ chapterId: 'cb1' }] }));
       return;
     }
     if (rich && /\/chapter-task\//.test(url.pathname)) {
@@ -315,8 +342,10 @@ const server = http.createServer(async (req, res) => {
     }
     res.end(JSON.stringify({
       providerId: segs[2] || 'mock', novelId: segs[segs.length - 1] || 'mock-novel',
-      titleZh: 'mock 测试书', titleJp: 'モックテスト', glossary: {},
-      volumeJp: rich ? [{ volumeId: 'v1', total: 2 }] : [], toc: [],
+      titleZh: 'mock 测试书', titleJp: 'モックテスト',
+      // mock-noted：带站点约定 "译名 #备注" 的术语表（指南合规用例）
+      glossary: noted ? { 'アルテ': '阿尔蒂 #女性', 'オルト': '欧尔特 #男性' } : {},
+      volumeJp: (rich || boost) ? [{ volumeId: rich ? 'v1' : 'vb1', total: 2 }] : [], toc: [],
     }));
     return;
   }
@@ -401,6 +430,21 @@ const server = http.createServer(async (req, res) => {
     choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content } }],
     usage: { prompt_tokens: Math.ceil(clip.length / 1.5), completion_tokens: content.length, total_tokens: 0 },
   });
+
+  // 增强管线：核实请求（提示词含"术语核实员"）→ 逐候选回判定。
+  // 默认全部保留；端点带 ?verify=drop-first 时首条判剔除（观察剔除链路用）
+  if (userContent.includes('术语核实员')) {
+    const candidates = [...userContent.matchAll(/^- (.+?)（出现 \d+ 行）/gm)].map((m) => m[1]);
+    const dropFirst = url.searchParams.get('verify') === 'drop-first';
+    const lines = candidates.map((src, i) => JSON.stringify({
+      src,
+      keep: !(dropFirst && i === 0),
+      type: '其他',
+      reason: dropFirst && i === 0 ? 'mock 首条剔除' : 'mock',
+    }));
+    sendJson(200, okBody(['```jsonline', ...lines, '```'].join('\n')));
+    return;
+  }
 
   // 翻译 worker 用例：翻译提示词分支（镜像站点协议：输入 "#n:原文" 行，输出等量 "#n:译文" 行）
   if (userContent.includes('你是一个轻小说翻译者') || userContent.includes('注意要保留每一段开头的编号')) {
