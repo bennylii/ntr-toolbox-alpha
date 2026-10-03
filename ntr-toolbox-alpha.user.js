@@ -1047,6 +1047,9 @@
         const budgetChars = Math.max(200, Number(getModuleSetting(cfg, '分块字数')) || 3000);
         const rpm = Math.max(0, Number(getModuleSetting(cfg, 'RPM')) || 0);
         const maxTokens = Math.max(0, Number(getModuleSetting(cfg, '输出上限')) || 0);
+        const seedPolish = getModuleSetting(cfg, '种子补漏') !== false;
+        const maxSeedRounds = Math.max(1, Number(getModuleSetting(cfg, '种子轮数')) || 3);
+        const verifyEnabled = getModuleSetting(cfg, '证据核实') !== false;
 
         let stopped = false;
         const progress = GlossaryUI.status(`AI提取术语表 - ${GlossaryTargets.describe(target)}`, { onStop: () => { stopped = true; } });
@@ -1068,26 +1071,51 @@
             const result = await GlossaryEngine.runJob({
                 lines,
                 callLLM: (messages) => requester.call(messages),
-                options: { budgetChars, maxRounds, concurrency, targetLanguage: '中文' },
+                options: { budgetChars, maxRounds, concurrency, targetLanguage: '中文', seedPolish, maxSeedRounds },
                 shouldStop: () => stopped,
                 onProgress: (p) => {
+                    // 种子补漏是收尾阶段：不参与"第几轮"和块数进度（总块数是主轮的）
+                    if (String(p.phase || '').startsWith('seed-')) {
+                        if (p.phase === 'seed-start') progress.update(`种子补漏 第 ${p.seedRound || 1} 轮：${p.seedCount} 个种子 / ${p.totalChunks} 块`);
+                        else if (p.phase !== 'seed-chunk-cached') progress.update(`种子补漏 第 ${p.seedRound || 1} 轮：第 ${(p.chunkIndex || 0) + 1} 块完成`);
+                        return;
+                    }
                     const ratio = p.totalChunks ? p.chunksDone / Math.max(1, p.totalChunks) : 0;
                     progress.update(`第 ${p.round}/${p.maxRounds} 轮 · 完成 ${p.chunksDone} 块 / 失败 ${p.chunksFailed} 块 · 待处理 ${p.pendingLines} 行`, ratio);
                 },
             });
+            // 证据化核实（可选）：对提取结果做正向判定；剔除建议只标记不删，进弹层人工复核
+            let finalEntries = result.glossary;
+            let verifyStats = null;
+            if (verifyEnabled && !stopped && finalEntries.length > 0) {
+                progress.update(`证据核实：${finalEntries.length} 条…`);
+                verifyStats = await GlossaryEngine.verifyEntries({
+                    entries: finalEntries,
+                    lines,
+                    call: (messages) => requester.call(messages),
+                    concurrency,
+                    shouldStop: () => stopped,
+                    onProgress: (p) => progress.update(`证据核实 ${p.done}/${p.total} 批（已判定 ${p.marks} 条）`, p.done / Math.max(1, p.total)),
+                });
+                finalEntries = verifyStats.entries.map((e) => (e.verifyDrop
+                    ? { ...e, suspect: [...(e.suspect || []), `核实建议剔除${e.verified && e.verified.reason ? `：${e.verified.reason}` : ''}`] }
+                    : e));
+            }
             progress.close();
 
             const failedHint = result.pendingLines > 0 ? `（${result.pendingLines} 行未能提取）` : '';
             const drop = result.dropped || {};
             const dropHint = (drop.punct || drop.honorific) ? `（清洗：整句 ${drop.punct || 0} 条 / 敬称 ${drop.honorific || 0} 条）` : '';
-            NotificationUtils.showSuccess(`提取完成：${result.glossary.length} 条术语${failedHint}${dropHint}`);
+            const seedHint = result.seedRounds > 0 ? `（种子补漏 ${result.seedRounds} 轮）` : '';
+            const verifyHint = verifyStats ? `（核实：保留 ${verifyStats.kept} / 建议剔除 ${verifyStats.dropped}${verifyStats.failedBatches ? ` / 失败 ${verifyStats.failedBatches} 批` : ''}）` : '';
+            NotificationUtils.showSuccess(`提取完成：${finalEntries.length} 条术语${failedHint}${dropHint}${seedHint}${verifyHint}`);
 
             const existing = await GlossaryTargets.loadGlossary(target);
             const mode = (getModuleSetting(cfg, '模式') || '预览') === '写入' ? 'merge' : 'preview';
             GlossaryUI.open({
-                title: `AI提取术语表 - ${target.title || GlossaryTargets.describe(target)}（${result.glossary.length} 条）`,
+                title: `AI提取术语表 - ${target.title || GlossaryTargets.describe(target)}（${finalEntries.length} 条）`,
                 target,
-                entries: result.glossary,
+                entries: finalEntries,
                 existing,
                 mode,
                 onWrite: (picked) => writeGlossaryMerged(target, picked),
@@ -1203,6 +1231,9 @@
             newNumberSetting('RPM', 0),
             newNumberSetting('逾时(秒)', 300),
             newNumberSetting('行数上限', 0),
+            newBooleanSetting('种子补漏', true),
+            newNumberSetting('种子轮数', 3),
+            newBooleanSetting('证据核实', true),
             newBooleanSetting('调试日志', false),
             newStringSetting('bind', 'none'),
         ],
@@ -2217,8 +2248,24 @@
         ].join('\n');
         const PROMPT_SUFFIX = '使用JSONLINE在代码块中输出结果，无需额外说明或解释：\n```jsonline\n{"src":"<原文>","dst":"<译文>","type":"<类型>"}\n```';
 
-        const buildPrompt = ({ chunkText, targetLanguage = '中文' }) =>
-            PROMPT_PREFIX.replace('{target_language}', targetLanguage) + '\n' + PROMPT_BASE + '\n' + PROMPT_SUFFIX + '\n文本片段：\n' + chunkText;
+        // 定向补漏（种子轮）的附加提示：只补充"确实漏了"的写法/对象，不编造译文
+        const buildFocusSection = (focus) => {
+            const items = (focus || []).slice(0, 8).map((seed) => {
+                const pattern = typeof seed === 'string' ? seed : seed.pattern;
+                const hint = typeof seed === 'string' ? '' : (seed.hint || '');
+                return `- ${pattern}${hint ? `（${hint}）` : ''}`;
+            });
+            return [
+                '本轮为定向补漏：以下词形在本片段中出现，是本轮的重点调查对象。',
+                '请特别留意它们是否还有其它写法、称谓或关联对象需要补充收录；没有独立收录价值的不要输出，不要为它们编造译文。',
+                ...items,
+            ].join('\n');
+        };
+
+        const buildPrompt = ({ chunkText, targetLanguage = '中文', focus }) => {
+            const focusSection = focus && focus.length > 0 ? buildFocusSection(focus) + '\n' : '';
+            return PROMPT_PREFIX.replace('{target_language}', targetLanguage) + '\n' + PROMPT_BASE + '\n' + PROMPT_SUFFIX + '\n' + focusSection + '文本片段：\n' + chunkText;
+        };
 
         const buildMessages = (opts) => [{ role: 'user', content: buildPrompt(opts) }];
 
@@ -2712,6 +2759,852 @@
         //   callLLM(messages) -> { ok, content, error, retryAfterMs }
         //   cache: { namespace, get(key), put(key, value) } —— 分块结果缓存，用于刷新后续跑
         //   返回 { glossary, chunksDone, chunksFailed, rounds }
+        // ---------- 术语表值格式（站点《术语表使用指南》约定） ----------
+        // 站点把备注存在值里："译名 #备注"（站点翻译时按 split('#')[0].trim() 取用）。
+        // 我们的字面匹配 / 词根派生 / 差异比对必须先剥离备注，否则带备注的术语会被误判「未落地」。
+
+        const splitGlossaryValue = (value) => {
+            const text = String(value === undefined || value === null ? '' : value);
+            const index = text.indexOf('#');
+            if (index < 0) return { dst: text.trim(), note: '' };
+            return { dst: text.slice(0, index).trim(), note: text.slice(index + 1).trim() };
+        };
+
+        // 备注必须是简单标签（指南：禁止在备注里写作文；Sakura 也只认简单备注）
+        const NOTE_MAX_CHARS = 8;
+        const isSimpleNote = (note) => {
+            const text = String(note || '').trim();
+            if (text === '') return false;
+            if (Array.from(text).length > NOTE_MAX_CHARS) return false;
+            if (/[。．！？…‥、，；：\n\r]/.test(text)) return false;
+            return true;
+        };
+
+        // 提取类型 → 简短备注的映射（写入用；不合格的 info 不写）
+        const TYPE_NOTE = {
+            '男性人名': '男性',
+            '女性人名': '女性',
+            '地名': '地名',
+            '组织': '组织',
+            '家族': '家族',
+            '特殊物品': '物品',
+            '特殊生物': '生物',
+        };
+        const formatGlossaryValue = (dst, info) => {
+            const base = String(dst || '').trim();
+            if (base === '') return '';
+            const raw = String(info || '').trim();
+            const note = TYPE_NOTE[raw] || raw;
+            return isSimpleNote(note) ? `${base} #${note}` : base;
+        };
+
+        // 疑似「改原文 / 插控制符来操控翻译」（指南绝对禁止项，如 rem0 => …）。
+        // 只标记不删：纯拉丁数字在日语正文里几乎不可能是真实术语，但误报代价交给人工判断。
+        const SOURCE_TAMPER_PATTERN = /[\u0000-\u001F\u007F]|\\[a-zA-Z]{1,2}\[|%[0-9]*\$?[sd]|\{[^}]{0,20}\}|<[^>\s]{1,20}>/;
+        const looksLikeSourceTampering = (src) => {
+            const text = String(src || '').trim();
+            if (text === '') return false;
+            if (SOURCE_TAMPER_PATTERN.test(text)) return true;
+            const hasKana = /[\u3040-\u30FF]/.test(text);
+            const hasCJK = /[\u4E00-\u9FFF]/.test(text);
+            const hasLatin = /[A-Za-z0-9]/.test(text);
+            return !hasKana && !hasCJK && hasLatin;
+        };
+
+        // 导入侧合规检查：逐条标注 suspect（书中未见 / 疑似改原文），只提示不删
+        const auditImportEntries = ({ entries, lines }) => {
+            const list = (entries || []).map((e) => ({ ...e }));
+            const checked = Array.isArray(lines) && lines.length > 0;
+            let absent = 0;
+            let tampered = 0;
+            if (checked) {
+                const patterns = list.map((e, i) => ({ key: i, text: normalize(cleanRuby(String((e && e.src) || '').trim())) }));
+                const hits = matchPatternLineIndexes(patterns, lines);
+                list.forEach((entry, i) => {
+                    if ((hits.get(i) || []).length === 0) {
+                        entry.suspect = [...(entry.suspect || []), '书中未见'];
+                        absent += 1;
+                    }
+                });
+            }
+            list.forEach((entry) => {
+                if (looksLikeSourceTampering(entry.src)) {
+                    entry.suspect = [...(entry.suspect || []), '疑似改原文'];
+                    tampered += 1;
+                }
+            });
+            return { entries: list, absent, tampered, checked };
+        };
+
+        // ---------- 验收回扫（术语在译文里的落地率） ----------
+        // 四态语义：
+        //   absent    原文未见（可能 ruby 变体/本卷不含）——不进分母
+        //   unchecked 原文出现但译文不可靠检查（dst 过短/纯标点）——不进分母
+        //   missed    原文出现且译文缺 dst —— 需要人工看的清单
+        //   landed    原文出现且译文含 dst
+        // 与提取的 count 语义不同：这里不做长词遮蔽——单个术语出现与否应独立判定；
+        // 倒排表（lineIndexFor）在无遮蔽时同样安全：含词的行的首二字符必然被建表收录（超集，不漏）。
+
+        // dst 不适合做字面检查（过短/纯标点），单独判定而不是塞进 missed 制造虚警
+        const acceptanceDstUnsafe = (dst, minDstLength) => (
+            Array.from(dst).length < minDstLength
+            || Array.from(dst).every((ch) => isPunctuation(ch) || ch === ' ' || ch === '\u3000')
+        );
+
+        // 编译验收匹配器：归一化 src/dst，拆成可检/不可检两组，保持术语表原始顺序
+        const compileAcceptanceMatcher = (entries, options) => {
+            const minDstLength = Math.max(1, Math.floor(Number(options && options.minDstLength) || 2));
+            const records = [];
+            (entries || []).forEach((raw, index) => {
+                const src = normalize(cleanRuby(String((raw && raw.src) || '').trim()));
+                const { dst: dstBase } = splitGlossaryValue((raw && raw.dst) || '');   // 剥离站点约定的 " #备注"
+                const dst = normalize(cleanRuby(dstBase));
+                if (src === '' || dst === '') return;
+                records.push({
+                    index,
+                    src,
+                    dst,
+                    info: String((raw && (raw.type || raw.info)) || '').trim(),
+                    checkable: !acceptanceDstUnsafe(dst, minDstLength),
+                });
+            });
+            return {
+                minDstLength,
+                records,
+                srcPatterns: records.map((r) => ({ key: r.index, text: r.src })),
+                dstPatterns: records.filter((r) => r.checkable).map((r) => ({ key: r.index, text: r.dst })),
+            };
+        };
+
+        // 逐词匹配（不打掩码）：返回 key -> { count, samples }，count = 含该词的行数
+        const matchGlossaryPatterns = (patterns, lines, sampleLimit) => {
+            const byPair = lineIndexFor(lines);
+            const limit = Math.max(1, Math.floor(Number(sampleLimit) || 3));
+            const result = new Map();
+            for (const pattern of patterns || []) {
+                const text = (pattern && pattern.text) || '';
+                if (text === '') { result.set(pattern.key, { count: 0, samples: [] }); continue; }
+                const bucket = text.length >= 2 ? byPair.get(text.slice(0, 2)) : null;
+                let count = 0;
+                const samples = [];
+                const visit = (i) => {
+                    if (!lines[i].includes(text)) return;
+                    count += 1;
+                    if (samples.length < limit) samples.push(lines[i]);
+                };
+                if (bucket) { for (const i of bucket) visit(i); }
+                else { lines.forEach((_, i) => visit(i)); }
+                result.set(pattern.key, { count, samples });
+            }
+            return result;
+        };
+
+        // 验收扫描：entries 术语表条目；jpLines 原文行；zhLines 译文行
+        const scanAcceptance = (params) => {
+            const { entries, jpLines, zhLines } = params || {};
+            const compiled = compileAcceptanceMatcher(entries, params);
+            const jp = matchGlossaryPatterns(compiled.srcPatterns, jpLines || [], 3);
+            const zh = matchGlossaryPatterns(compiled.dstPatterns, zhLines || [], 1);
+            const rows = compiled.records.map((record) => {
+                const srcHit = jp.get(record.index) || { count: 0, samples: [] };
+                const dstHit = zh.get(record.index) || { count: 0, samples: [] };
+                let status;
+                if (srcHit.count === 0) status = 'absent';
+                else if (!record.checkable) status = 'unchecked';
+                else if (dstHit.count > 0) status = 'landed';
+                else status = 'missed';
+                return {
+                    src: record.src, dst: record.dst, info: record.info,
+                    srcCount: srcHit.count, dstCount: dstHit.count,
+                    status, sample: srcHit.samples[0] || '', dstSample: dstHit.samples[0] || '',
+                };
+            });
+            const by = (s) => rows.filter((r) => r.status === s).length;
+            const landed = by('landed');
+            const missed = by('missed');
+            const checkable = landed + missed;
+            return {
+                rows,
+                stats: {
+                    total: rows.length, landed, missed,
+                    absent: by('absent'), unchecked: by('unchecked'),
+                    checkable, rate: checkable > 0 ? landed / checkable : 0,
+                },
+            };
+        };
+
+        // ---------- 词根化 / 实体归并（建议，不自动改表） ----------
+        // 目标：把同一族/同一体系的多个词形，归纳出一条"最短且安全"的词根，
+        // 让译名一致性和匹配覆盖一起提升。是否采纳由人在合并弹层里逐条确认——
+        // 词根会扩大字面匹配范围，新增命中必须核对样例（规则见 skills/glossary-extract/references/rule.md）。
+
+        // 两个字符串的全部极大公共连续片段（长度 ≥ minLen；不含被更长匹配包含的片段）
+        const maximalCommonSubstrings = (a, b, minLen) => {
+            const n = a.length, m = b.length;
+            const found = new Set();
+            if (n === 0 || m === 0) return [];
+            let prev = new Array(m + 1).fill(0);
+            for (let i = 1; i <= n; i++) {
+                const cur = new Array(m + 1).fill(0);
+                for (let j = 1; j <= m; j++) {
+                    if (a[i - 1] !== b[j - 1]) continue;
+                    const len = prev[j - 1] + 1;
+                    cur[j] = len;
+                    // 极大性：右边不能再延长（到达串尾或下一字符不同）
+                    const maximal = i === n || j === m || a[i] !== b[j];
+                    if (maximal && len >= minLen) found.add(a.slice(i - len, i));
+                }
+                prev = cur;
+            }
+            return [...found];
+        };
+
+        // 最长公共子串（用于推导成员译文的公共部分）
+        const longestCommonSubstring = (a, b) => {
+            const n = a.length, m = b.length;
+            let best = '', prev = new Array(m + 1).fill(0);
+            for (let i = 1; i <= n; i++) {
+                const cur = new Array(m + 1).fill(0);
+                for (let j = 1; j <= m; j++) {
+                    if (a[i - 1] !== b[j - 1]) continue;
+                    cur[j] = prev[j - 1] + 1;
+                    if (cur[j] > best.length) best = a.slice(i - cur[j], i);
+                }
+                prev = cur;
+            }
+            return best;
+        };
+
+        // 派生词根建议：entries [{src,dst}]，返回 [{root, rootDst, members:[{src,dst}], memberCount}]
+        // 安全约束（宁缺勿滥，语义核对交给合并弹层里的人工）：
+        //   1) root 不得等于任一现有条目（那样由现有条目覆盖，不需要新词根）；
+        //   2) root 必须是所有成员的共同前缀或共同后缀——中段偶合片段（如名字里的「リー」）不算词根；
+        //   3) 同一成员集合保留最长候选（更长 = 更精确；短片段才是过宽风险）
+        const deriveCommonLiteralRoots = (entries, options = {}) => {
+            const minLen = Math.max(2, Math.floor(Number(options.minLen) || 2));
+            const minMembers = Math.max(2, Math.floor(Number(options.minMembers) || 2));
+            const maxSources = Math.max(2, Math.floor(Number(options.maxSources) || 300));
+            const list = (entries || [])
+                .map((e) => ({
+                    src: normalize(cleanRuby(String((e && e.src) || '').trim())),
+                    dst: normalize(cleanRuby(splitGlossaryValue((e && e.dst) || '').dst)),   // 词根派生用剥离备注后的译名
+                }))
+                .filter((e) => e.src !== '' && e.dst !== '')
+                .sort((a, b) => Array.from(b.src).length - Array.from(a.src).length)
+                .slice(0, maxSources);
+            const srcSet = new Set(list.map((e) => e.src));
+            const candidates = new Map();
+            for (let i = 0; i < list.length; i++) {
+                for (let j = i + 1; j < list.length; j++) {
+                    for (const sub of maximalCommonSubstrings(list[i].src, list[j].src, minLen)) {
+                        let members = candidates.get(sub);
+                        if (!members) { members = new Set(); candidates.set(sub, members); }
+                        members.add(list[i].src);
+                        members.add(list[j].src);
+                    }
+                }
+            }
+            const byMemberKey = new Map();
+            for (const root of candidates.keys()) {
+                if (srcSet.has(root)) continue;
+                const members = list.filter((e) => e.src.includes(root));
+                if (members.length < minMembers) continue;
+                const allPrefix = members.every((e) => e.src.startsWith(root));
+                const allSuffix = members.every((e) => e.src.endsWith(root));
+                if (!allPrefix && !allSuffix) continue;
+                const key = members.map((e) => e.src).sort().join('\u0001');
+                const prev = byMemberKey.get(key);
+                if (!prev || Array.from(root).length > Array.from(prev.root).length) {
+                    byMemberKey.set(key, { root, members });
+                }
+            }
+            const proposals = [...byMemberKey.values()].map(({ root, members }) => {
+                let dstHint = members[0].dst;
+                for (let k = 1; k < members.length; k++) dstHint = longestCommonSubstring(dstHint, members[k].dst);
+                if (Array.from(dstHint || '').length < 2) dstHint = '';
+                return { root, rootDst: dstHint, members, memberCount: members.length };
+            });
+            proposals.sort((a, b) => b.memberCount - a.memberCount || Array.from(b.root).length - Array.from(a.root).length);
+            return proposals;
+        };
+
+        // 逐词命中行下标集合（词根核对用；与 matchGlossaryPatterns 不同：需要精确的行差集）
+        const matchPatternLineIndexes = (patterns, lines) => {
+            const byPair = lineIndexFor(lines);
+            const result = new Map();
+            for (const pattern of patterns || []) {
+                const text = (pattern && pattern.text) || '';
+                const hits = [];
+                if (text !== '') {
+                    const bucket = text.length >= 2 ? byPair.get(text.slice(0, 2)) : null;
+                    if (bucket) { for (const i of bucket) { if (lines[i].includes(text)) hits.push(i); } }
+                    else { lines.forEach((line, i) => { if (line.includes(text)) hits.push(i); }); }
+                }
+                result.set(pattern.key, hits);
+            }
+            return result;
+        };
+
+        // 核对词根覆盖：root 命中但所有成员都没命中的行 = 新增命中（采纳前必须人工看样例）
+        const verifyRootCoverage = ({ root, members, lines }) => {
+            const memberList = members || [];
+            const patterns = [{ key: 'root', text: root }]
+                .concat(memberList.map((m, i) => ({ key: `m${i}`, text: (m && m.src) || '' })));
+            const hitMap = matchPatternLineIndexes(patterns, lines || []);
+            const rootLines = hitMap.get('root') || [];
+            const memberLines = new Set();
+            memberList.forEach((m, i) => (hitMap.get(`m${i}`) || []).forEach((li) => memberLines.add(li)));
+            const extra = rootLines.filter((li) => !memberLines.has(li));
+            return {
+                rootCount: rootLines.length,
+                memberCount: memberLines.size,
+                extraCount: extra.length,
+                extraSamples: extra.slice(0, 3).map((li) => (lines || [])[li]),
+            };
+        };
+
+        // ---------- 译文反推（从 jp-zh 对齐文本反推未收录术语的译名建议） ----------
+        // 零 LLM 成本：同一原文词在一段段"原文/译文"对齐对里反复出现时，
+        // 与它共同出现的汉字片段（高覆盖 + 高特异性）就是可能的译名。
+        // 只是建议：进合并弹层由人确认，误报率高于提取（正文语义不参与判断）。
+
+        const PAIR_CJK_RUN = /[\u4e00-\u9fff]{2,12}/g;
+        const PAIR_KATA_RUN = /[ァ-ヴ][ァ-ヶー]{1,}/g;
+
+        // 解析站点 jp-zh 模式的整本文本（makeTxt 格式）→ 对齐对
+        // 结构：序言 → 每章 [# jp标题, # zh标题, jp段/zh段 交替…]；未翻译章节写「xx翻译缺失。」+ 仅原文
+        const parseParallelText = (text) => {
+            const raw = (text || '').split(/\r?\n/).map((line) => line.trim());
+            const pairs = [];
+            let chapters = 0;
+            let translationMissing = 0;
+            let chapterMissing = 0;
+            let dropped = 0;
+            let index = 0;
+            while (index < raw.length && !/^#\s/.test(raw[index])) index += 1;   // 跳过序言
+            let buffer = [];
+            let skipped = false;
+            let chapterTitle = '';
+            for (; index < raw.length; index += 1) {
+                const line = raw[index];
+                if (/^#\s/.test(line)) {
+                    if (buffer.length > 0) { dropped += buffer.length; buffer = []; }
+                    chapters += 1;
+                    chapterTitle = line.replace(/^#\s*/, '');
+                    skipped = false;
+                    if (index + 1 < raw.length && /^#\s/.test(raw[index + 1])) index += 1;   // jp-zh 双标题
+                    continue;
+                }
+                if (line === '') continue;
+                if (/翻译缺失/.test(line)) { translationMissing += 1; skipped = true; buffer = []; continue; }
+                if (/章节缺失/.test(line)) { chapterMissing += 1; skipped = true; buffer = []; continue; }
+                if (skipped) continue;
+                buffer.push(line);
+                if (buffer.length === 2) {
+                    pairs.push({ jp: buffer[0], zh: buffer[1], chapter: chapterTitle });
+                    buffer = [];
+                }
+            }
+            if (buffer.length > 0) dropped += buffer.length;
+            return { pairs, chapters, translationMissing, chapterMissing, dropped };
+        };
+
+        // 反推建议：{ pairs, glossary } → [{src, dst, pairs, support, outside, coverage, specificity, samples}]
+        const inferTranslationsFromPairs = (params) => {
+            const { pairs, glossary } = params || {};
+            const minPairs = Math.max(2, Math.floor(Number((params && params.minPairs) || 3)));
+            const maxSuggestions = Math.max(1, Math.floor(Number((params && params.maxSuggestions) || 30)));
+            const maxFrequency = Math.min(1, Number((params && params.maxFrequency) || 0.2));
+            const minCoverage = Math.min(1, Number((params && params.minCoverage) || 0.5));
+            const minSpecificity = Math.min(1, Number((params && params.minSpecificity) || 0.6));
+            const list = pairs || [];
+            if (list.length === 0) return { suggestions: [], checkedPairs: 0 };
+            const glossarySrcs = Object.keys(glossary || {});
+            const isKnown = (src) => glossarySrcs.some((s) => s === src || s.includes(src));
+            // 1) JP 侧候选：片假名串（未收录、不是已知条目的片段）
+            const candPairs = new Map();
+            list.forEach((pair, i) => {
+                const runs = new Set((pair.jp || '').match(PAIR_KATA_RUN) || []);
+                for (const raw of runs) {
+                    const cand = raw.replace(/ー+$/, '');
+                    if (Array.from(cand).length < 2 || isKnown(cand)) continue;
+                    let arr = candPairs.get(cand);
+                    if (!arr) { arr = []; candPairs.set(cand, arr); }
+                    if (arr[arr.length - 1] !== i) arr.push(i);
+                }
+            });
+            const candidates = [...candPairs.entries()]
+                .filter(([, idxs]) => idxs.length >= minPairs && idxs.length / list.length <= maxFrequency)
+                .sort((a, b) => b[1].length - a[1].length)
+                .slice(0, Math.max(maxSuggestions * 2, 40));
+            // 2) 候选对里挖汉字 n-gram（support = 覆盖的候选对数）
+            const support = new Map();
+            const perCandidate = new Map();
+            for (const [cand, idxs] of candidates) {
+                const ngrams = new Set();
+                for (const i of idxs) {
+                    const runs = (list[i].zh || '').match(PAIR_CJK_RUN) || [];
+                    for (const run of runs) {
+                        const chars = Array.from(run);
+                        // 只挖 2-4 字片段：整段（≥5 字）会把前后文语素带进来，且会在平局里压过真正的短译名
+                        for (let len = 2; len <= Math.min(4, chars.length); len++) {
+                            for (let s = 0; s + len <= chars.length; s++) ngrams.add(chars.slice(s, s + len).join(''));
+                        }
+                    }
+                }
+                perCandidate.set(cand, ngrams);
+                for (const ng of ngrams) {
+                    let set = support.get(ng);
+                    if (!set) { set = new Set(); support.set(ng, set); }
+                    for (const i of idxs) if ((list[i].zh || '').includes(ng)) set.add(i);
+                }
+            }
+            // 3) 特异性：全量译文行统计（只看 support 靠前的 n-gram，控制规模）
+            const zhLines = list.map((p) => p.zh || '');
+            const topNgrams = [...support.entries()].sort((a, b) => b[1].size - a[1].size).slice(0, 400).map(([ng]) => ng);
+            const keyOf = new Map(topNgrams.map((ng, i) => [ng, i]));
+            const lineIndexes = matchPatternLineIndexes(topNgrams.map((ng, i) => ({ key: i, text: ng })), zhLines);
+            const suggestions = [];
+            for (const [cand, idxs] of candidates) {
+                let best = null;
+                for (const ng of perCandidate.get(cand) || new Set()) {
+                    const sup = support.get(ng) ? support.get(ng).size : 0;
+                    if (sup < minPairs) continue;
+                    const hits = lineIndexes.get(keyOf.get(ng));
+                    const total = hits ? hits.length : sup;
+                    const outside = Math.max(0, total - sup);
+                    const coverage = sup / idxs.length;
+                    const specificity = sup / Math.max(1, sup + outside);
+                    if (coverage < minCoverage || specificity < minSpecificity) continue;
+                    const score = coverage * 2 + specificity + (Array.from(ng).length <= 4 ? 0.1 : 0);
+                    // 平局取更长的片段（边界更完整、过宽风险更小；「罗丝琳」优先于「丝琳」）
+                    const better = !best
+                        || score > best.score + 1e-9
+                        || (Math.abs(score - best.score) <= 1e-9 && Array.from(ng).length > Array.from(best.ng).length);
+                    if (better) {
+                        best = { ng, score, sup, outside, coverage, specificity };
+                    }
+                }
+                if (!best) continue;
+                suggestions.push({
+                    src: cand, dst: best.ng,
+                    pairs: idxs.length, support: best.sup, outside: best.outside,
+                    coverage: best.coverage, specificity: best.specificity,
+                    samples: idxs.slice(0, 3).map((i) => list[i].zh),
+                });
+            }
+            suggestions.sort((a, b) => b.support - a.support || b.coverage - a.coverage);
+            return { suggestions: suggestions.slice(0, maxSuggestions), checkedPairs: list.length };
+        };
+
+        // ---------- 修句（把未落地术语改进译文，人工审核后写回站点） ----------
+        // 输入是"未落地清单"：pair 的原文含术语 src、译文缺 dst。LLM 只做一件事——
+        // 在不动其他内容的前提下把 dst 落进译文；写回前一律经审核面板人工确认。
+
+        // 逐对定位未落地：pairs（jp/zh 已对齐）+ 术语表 → [{pairIndex, src, dst, jp, zh}]
+        const planFixTargets = ({ pairs, glossary }) => {
+            const list = pairs || [];
+            const entries = Object.keys(glossary || {}).map((src) => ({ src, dst: glossary[src] }));
+            const compiled = compileAcceptanceMatcher(entries, {});
+            if (compiled.records.length === 0 || list.length === 0) return { targets: [], checked: 0, missedTerms: 0 };
+            const jpLines = list.map((p) => p.jp || '');
+            const zhLines = list.map((p) => p.zh || '');
+            const jpIndex = matchPatternLineIndexes(compiled.srcPatterns, jpLines);
+            const targets = [];
+            const missedTerms = new Set();
+            for (const record of compiled.records) {
+                if (!record.checkable) continue;
+                for (const lineIndex of jpIndex.get(record.index) || []) {
+                    if (zhLines[lineIndex].includes(record.dst)) continue;
+                    targets.push({ pairIndex: lineIndex, src: record.src, dst: record.dst, jp: jpLines[lineIndex], zh: zhLines[lineIndex] });
+                    missedTerms.add(record.src);
+                }
+            }
+            return { targets, checked: list.length, missedTerms: missedTerms.size };
+        };
+
+        // 聚合为段落级修复行：同一段落多个漏词合并；漏词多的优先，cap 封顶
+        const buildFixRows = (targets, options = {}) => {
+            const maxParagraphs = Math.max(1, Math.floor(Number(options.maxParagraphs) || 60));
+            const byPair = new Map();
+            for (const t of targets || []) {
+                let row = byPair.get(t.pairIndex);
+                if (!row) {
+                    row = { pairIndex: t.pairIndex, jp: t.jp, zh: t.zh, missed: [] };
+                    byPair.set(t.pairIndex, row);
+                }
+                if (!row.missed.some((m) => m.src === t.src)) row.missed.push({ src: t.src, dst: t.dst });
+            }
+            return [...byPair.values()]
+                .sort((a, b) => b.missed.length - a.missed.length || a.pairIndex - b.pairIndex)
+                .slice(0, maxParagraphs);
+        };
+
+        const FIX_RULES = [
+            '你是译文术语校对员。下面给出待修段落（日文原文 + 现有译文）和必须采用的术语表（src => dst）。',
+            '要求：',
+            '1、只修正译文中术语不一致的地方：原文出现术语 src 时，译文必须使用对应的 dst，同一段落内保持一致',
+            '2、不得改变其他任何内容：不增删信息、不改语气、不改标点风格、不合并或拆分段落',
+            '3、只输出需要修改的段落；不需要修改的段落不要输出',
+            '4、用 ```jsonline 代码块输出，每行一个 JSON：{"id": <段落编号>, "text": "<修正后的完整译文>"}；编号用给定 [[n]] 中的 n',
+            '5、text 必须是该段修正后的完整译文（不是片段、不是解释说明）',
+        ].join('\n');
+
+        const buildFixPrompt = ({ rows }) => {
+            const lines = [FIX_RULES, '', '术语表（src => dst）：'];
+            const terms = new Map();
+            (rows || []).forEach((row) => (row.missed || []).forEach((m) => terms.set(m.src, m.dst)));
+            [...terms.entries()].forEach(([src, dst]) => lines.push(`${src} => ${dst}`));
+            lines.push('', '待修段落：');
+            (rows || []).forEach((row, i) => {
+                lines.push(`[[${i}]]`);
+                lines.push(`原文：${row.jp}`);
+                lines.push(`现有译文：${row.zh}`);
+                lines.push('');
+            });
+            return lines.join('\n');
+        };
+
+        // 解析修句响应：容错取 {"id":n,"text":"..."}（复用 JSONLINE 修复器）
+        const parseFixResponse = (content, options = {}) => {
+            const rowCount = Math.max(0, Math.floor(Number(options.rowCount) || 0));
+            const fixes = new Map();
+            let invalid = 0;
+            const block = /```(?:jsonline)?\s*([\s\S]*?)```/.exec(content || '');
+            const text = block ? block[1] : (content || '');
+            for (const line of text.split(/\r?\n/)) {
+                const parsed = repairJsonLine(line);
+                if (!parsed || !parsed.obj) continue;
+                const id = Number(parsed.obj.id);
+                const out = parsed.obj.text;
+                if (!Number.isInteger(id) || id < 0 || id >= rowCount || typeof out !== 'string' || out.trim() === '') {
+                    invalid += 1;
+                    continue;
+                }
+                fixes.set(id, out.trim());
+            }
+            return { fixes, invalid };
+        };
+
+        // 章节段落数组里按原文定位（同文本多处出现时按出现顺序分配，避免重复占用）
+        const locateParagraph = (paragraphJp, text, used) => {
+            const usedSet = used || new Set();
+            for (let i = 0; i < (paragraphJp || []).length; i += 1) {
+                if (usedSet.has(i)) continue;
+                if (paragraphJp[i] === text) return i;
+            }
+            return -1;
+        };
+
+        // ---------- 种子补漏（种子账本驱动的定向收敛轮） ----------
+        // 主轮跑完后，把「已发现词形」转成有具体调查目标的种子：敬称裸名 / 敬称写法 /
+        // 片假名的平假名写法 / 未收录的片假名信号串。只有真实出现在正文里的才算种子（能定向定位行）。
+        // 种子账本不落盘：由「本轮提取结果 + 已处理行」确定性重算，配合分块缓存天然支持断点续跑。
+
+        const KATAKANA_RUN = /[ァ-ヴ][ァ-ヶー]{2,}/g;   // 含长音符 ー（否则 ローズリーン 会被切断）
+        const KATAKANA_HAS = /[ァ-ヴ][ァ-ヶー]{2,}/;
+        const toHiragana = (text) => text.replace(/[ァ-ヶ]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0x60));
+
+        // 派生种子：entries 已提取条目；lines 已处理的正文行；exclude 已消费过的模式（账本）
+        const deriveSeeds = ({ entries, lines, maxSeeds = 24, exclude }) => {
+            const srcs = (entries || []).map((e) => (e && e.src) || '').filter((s) => s !== '');
+            const srcSet = new Set(srcs);
+            const seeds = [];
+            const taken = new Set();
+            const push = (pattern, kind, hint) => {
+                if (seeds.length >= maxSeeds) return;
+                if (!pattern || Array.from(pattern).length < 2 || srcSet.has(pattern) || taken.has(pattern)) return;
+                if (exclude && typeof exclude.has === 'function' && exclude.has(pattern)) return;
+                let hits = 0;
+                const samples = [];
+                for (const line of lines || []) {
+                    if (line.includes(pattern)) {
+                        hits += 1;
+                        if (samples.length < 3) samples.push(line);
+                    }
+                }
+                if (hits === 0) return; // 只在正文里真实出现的才算种子
+                taken.add(pattern);
+                seeds.push({ pattern, kind, hint, hits, samples });
+            };
+            // 1) 敬称变体 → 裸名
+            for (const e of entries || []) {
+                const m = HONORIFIC_TAIL.exec((e && e.src) || '');
+                if (m && m[1] && Array.from(m[1]).length >= 2) push(m[1], 'honorific', `${e.src} 的裸名`);
+            }
+            // 2) 裸名 → 正文中实际出现的称谓写法（含ちゃん/君/くん/先生/先輩 这类呼び方）
+            for (const e of entries || []) {
+                const src = (e && e.src) || '';
+                if (HONORIFIC_TAIL.test(src) || Array.from(src).length < 2) continue;
+                for (const suffix of ['さん', '様', '殿', '嬢', '氏', 'ちゃん', '君', 'くん', '先生', '先輩']) {
+                    push(src + suffix, 'honorific', `${src} 的称谓写法`);
+                }
+            }
+            // 3) 片假名条目 → 平假名写法（儿童语/口语变体）
+            for (const e of entries || []) {
+                const src = (e && e.src) || '';
+                if (!KATAKANA_HAS.test(src)) continue;
+                const hira = toHiragana(src);
+                if (hira !== src) push(hira, 'kana', `${src} 的平假名写法`);
+            }
+            // 4) 未收录的片假名信号串（按频次取，跳过被现有条目包含的片段）
+            const runCount = new Map();
+            for (const line of lines || []) {
+                const runs = line.match(KATAKANA_RUN) || [];
+                for (const raw of runs) {
+                    const run = raw.replace(/ー+$/, '');
+                    if (run.length < 3) continue;
+                    if (srcSet.has(run)) continue;
+                    if (srcs.some((s) => s.includes(run))) continue;
+                    runCount.set(run, (runCount.get(run) || 0) + 1);
+                }
+            }
+            [...runCount.entries()].sort((a, b) => b[1] - a[1]).forEach(([run]) => push(run, 'signal', '未收录的片假名串'));
+            return seeds;
+        };
+
+        // 定向分块：按种子聚合行，再按预算与小桶合并；同一行只进一次请求，focus 带上相关种子
+        const buildSeedChunks = (seeds, lines, budgetChars, options = {}) => {
+            const maxChunks = Math.max(1, options.maxChunks || 6);
+            const maxLinesPerSeed = Math.max(4, options.maxLinesPerSeed || 40);
+            const focusCap = Math.max(1, options.focusCap || 6);
+            const buckets = seeds.map((seed) => ({
+                seed,
+                lines: (lines || []).filter((line) => line.includes(seed.pattern)).slice(0, maxLinesPerSeed),
+            })).filter((b) => b.lines.length > 0);
+            const chunks = [];
+            let current = { lines: [], lineSet: new Set(), focus: [], chars: 0 };
+            const flush = () => {
+                if (current.lines.length > 0) {
+                    chunks.push({ index: chunks.length, lines: current.lines, text: current.lines.join('\n'), focus: current.focus });
+                }
+                current = { lines: [], lineSet: new Set(), focus: [], chars: 0 };
+            };
+            for (const bucket of buckets) {
+                if (chunks.length >= maxChunks) break;
+                const fresh = bucket.lines.filter((line) => !current.lineSet.has(line));
+                const freshChars = fresh.reduce((n, line) => n + line.length, 0);
+                const coveredByCurrent = fresh.length === 0;
+                if (current.lines.length > 0 && (current.chars + freshChars > budgetChars || current.focus.length >= focusCap)) flush();
+                for (const line of fresh) {
+                    current.lines.push(line);
+                    current.lineSet.add(line);
+                }
+                current.chars += freshChars;
+                if (current.focus.length < focusCap && (fresh.length > 0 || coveredByCurrent)) current.focus.push(bucket.seed);
+                // 单种子行数超预算：拆成多个块（同 focus），保证每块不超预算
+                if (current.chars >= budgetChars) flush();
+            }
+            flush();
+            return chunks.slice(0, maxChunks);
+        };
+
+        // ---------- 证据化核实（对候选做正向判定：收录资格/类型） ----------
+        // 提取阶段是"宁滥勿缺"的单次判断；核实阶段把每条的命中证据打包后批量送模型，
+        // 回答"是否值得收录、是什么类型"。判定为剔除的条目标 verifyDrop（保留在结果里供人工复核），
+        // 请求失败的批次 fail-open（未判定的条目一律保留）。
+
+        // 证据打包：每条候选的命中行索引与上下文样本（样本数封顶）
+        const collectEvidence = ({ entries, lines, maxSamples = 3 }) => {
+            const list = lines || [];
+            const patterns = (entries || []).map((e, i) => ({ key: i, text: normalize(cleanRuby(String((e && e.src) || '').trim())) }));
+            const hits = matchPatternLineIndexes(patterns, list);
+            return (entries || []).map((entry, i) => {
+                const indexes = hits.get(i) || [];
+                return {
+                    src: (entry && entry.src) || '',
+                    count: indexes.length,
+                    samples: indexes.slice(0, Math.max(1, maxSamples)).map((li) => list[li]),
+                };
+            });
+        };
+
+        const VERIFY_RULES = [
+            '你是术语核实员。下面是术语候选和它在正文里的出现情况。',
+            '术语表只收「多次出现的专有名词」（人名、地名、组织、家族、作品特有的物品/技能/概念）；普通名词、描述性短语、称呼、整句都不收。',
+            '逐条给出：keep（是否值得收录）、type（类型，取：男性人名/女性人名/未知性别人名/地名/家族/组织/特殊物品/特殊生物/其他）、reason（一句话理由）。',
+            '不确定时 keep 用 true——后续还有人工复核，漏收的代价更大。',
+            '用 ```jsonline 代码块输出，每行一个 JSON：{"src":"<原文>","keep":true,"type":"<类型>","reason":"<理由>"}；src 必须与给定候选完全一致。',
+        ].join('\n');
+
+        const buildVerifyPrompt = ({ items }) => {
+            const lines = [VERIFY_RULES, ''];
+            (items || []).forEach((item) => {
+                lines.push(`- ${item.src}（出现 ${item.count} 行）`);
+                (item.samples || []).slice(0, 2).forEach((sample) => lines.push(`  例：${sample}`));
+            });
+            return lines.join('\n');
+        };
+
+        // 解析核实响应；bySrc：归一化 src → 原始 src 列表（同名归一后可能对应多条）
+        const parseVerifyResponse = (content, options = {}) => {
+            const bySrc = (options && options.bySrc) || new Map();
+            const results = new Map();
+            let invalid = 0;
+            const block = /```(?:jsonline)?\s*([\s\S]*?)```/.exec(content || '');
+            const text = block ? block[1] : (content || '');
+            for (const line of text.split(/\r?\n/)) {
+                const parsed = repairJsonLine(line);
+                if (!parsed || !parsed.obj) continue;
+                const obj = parsed.obj;
+                if (typeof obj.src !== 'string' || typeof obj.keep !== 'boolean') { invalid += 1; continue; }
+                const key = normalize(cleanRuby(obj.src.trim()));
+                const originals = bySrc.get(key);
+                if (!originals || originals.length === 0) { invalid += 1; continue; }
+                const mark = {
+                    keep: obj.keep,
+                    type: typeof obj.type === 'string' ? obj.type.trim() : '',
+                    reason: typeof obj.reason === 'string' ? obj.reason.trim() : '',
+                };
+                originals.forEach((src) => results.set(src, mark));
+            }
+            return { results, invalid };
+        };
+
+        // 核实编排：分批 + 并发 lane（与 auditGlossary 同构），fail-open
+        const verifyEntries = async ({ entries, lines, call, batchSize = 20, concurrency = 2, shouldStop, onProgress }) => {
+            const list = entries || [];
+            if (list.length === 0 || typeof call !== 'function') {
+                return { entries: list, checked: 0, kept: list.length, dropped: 0, invalid: 0, failedBatches: 0 };
+            }
+            const evidence = collectEvidence({ entries: list, lines });
+            const bySrc = new Map();
+            evidence.forEach((item) => {
+                const key = normalize(cleanRuby(String(item.src || '').trim()));
+                if (!bySrc.has(key)) bySrc.set(key, []);
+                bySrc.get(key).push(item.src);
+            });
+            const size = Math.max(1, Math.floor(Number(batchSize) || 20));
+            const batches = [];
+            for (let i = 0; i < evidence.length; i += size) batches.push(evidence.slice(i, i + size));
+            const marks = new Map();
+            let invalid = 0;
+            let failedBatches = 0;
+            let done = 0;
+            let cursor = 0;
+            const lane = async () => {
+                for (;;) {
+                    if (shouldStop && shouldStop()) return;
+                    const myIndex = cursor;
+                    cursor += 1;
+                    if (myIndex >= batches.length) return;
+                    let result;
+                    try {
+                        result = await call([{ role: 'user', content: buildVerifyPrompt({ items: batches[myIndex] }) }]);
+                    } catch (e) {
+                        result = { ok: false, error: String((e && e.message) || e) };
+                    }
+                    if (result && result.ok && String(result.content || '').trim() !== '') {
+                        const parsed = parseVerifyResponse(result.content, { bySrc });
+                        invalid += parsed.invalid;
+                        for (const [src, mark] of parsed.results) marks.set(src, mark);
+                    } else {
+                        failedBatches += 1;
+                    }
+                    done += 1;
+                    if (onProgress) onProgress({ done, total: batches.length, marks: marks.size });
+                }
+            };
+            await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), batches.length) }, () => lane()));
+            let kept = 0;
+            let dropped = 0;
+            const validTypes = new Set(['男性人名', '女性人名', '未知性别人名', '地名', '家族', '组织', '特殊物品', '特殊生物', '其他']);
+            const out = list.map((entry) => {
+                const mark = marks.get(entry.src);
+                if (!mark) { kept += 1; return entry; }
+                const enriched = { ...entry, verified: mark };
+                if (!enriched.type && validTypes.has(mark.type)) enriched.type = mark.type;
+                if (mark.keep) { kept += 1; return enriched; }
+                dropped += 1;
+                return { ...enriched, verifyDrop: true };
+            });
+            return { entries: out, checked: marks.size, kept, dropped, invalid, failedBatches };
+        };
+
+        // ---------- 实体聚类（共现信号：疑似同实体多写法的候选组） ----------
+        // 纯程序信号，不做自动合并：同实体最可靠的程序证据是「反复出现在同一行」——
+        // 人名并列、称谓+本名、别称介绍句都符合；公共前后缀另由词根整理覆盖。
+        // 输出交给人工（词根整理模块展示），与"只建议不自动改"的纪律一致。
+
+        const buildEntityClusters = ({ entries, lines, minSharedLines = 2, maxClusters = 30 }) => {
+            const list = (entries || [])
+                .map((e, index) => ({ src: normalize(cleanRuby(String((e && e.src) || '').trim())), index }))
+                .filter((e) => e.src !== '' && Array.from(e.src).length >= 2);
+            if (list.length < 2) return { clusters: [], checked: list.length };
+            const bySrc = matchPatternLineIndexes(list.map((e, i) => ({ key: i, text: e.src })), lines || []);
+            const lineToEntries = new Map();
+            list.forEach((entry, i) => {
+                for (const li of bySrc.get(i) || []) {
+                    if (!lineToEntries.has(li)) lineToEntries.set(li, []);
+                    lineToEntries.get(li).push(i);
+                }
+            });
+            const pairShared = new Map();
+            const pairSamples = new Map();
+            for (const [li, indexes] of lineToEntries) {
+                if (indexes.length < 2 || indexes.length > 8) continue;   // 一行出现太多条目多半是列表页，跳过
+                for (let a = 0; a < indexes.length; a += 1) {
+                    for (let b = a + 1; b < indexes.length; b += 1) {
+                        const key = indexes[a] < indexes[b] ? `${indexes[a]}|${indexes[b]}` : `${indexes[b]}|${indexes[a]}`;
+                        pairShared.set(key, (pairShared.get(key) || 0) + 1);
+                        if (!pairSamples.has(key)) pairSamples.set(key, []);
+                        if (pairSamples.get(key).length < 3) pairSamples.get(key).push((lines || [])[li]);
+                    }
+                }
+            }
+            const parent = list.map((_, i) => i);
+            const find = (x) => { let cur = x; while (parent[cur] !== cur) cur = parent[cur]; return cur; };
+            const union = (a, b) => { const ra = find(a); const rb = find(b); if (ra !== rb) parent[rb] = ra; };
+            const threshold = Math.max(2, Math.floor(Number(minSharedLines) || 2));
+            for (const [key, shared] of pairShared) {
+                if (shared < threshold) continue;
+                const [a, b] = key.split('|').map(Number);
+                union(a, b);
+            }
+            const groups = new Map();
+            list.forEach((entry, i) => {
+                const root = find(i);
+                if (!groups.has(root)) groups.set(root, []);
+                groups.get(root).push(entry);
+            });
+            const clusters = [];
+            for (const members of groups.values()) {
+                if (members.length < 2) continue;
+                let sharedLines = 0;
+                const samples = [];
+                for (let a = 0; a < members.length; a += 1) {
+                    for (let b = a + 1; b < members.length; b += 1) {
+                        const key = members[a].index < members[b].index ? `${members[a].index}|${members[b].index}` : `${members[b].index}|${members[a].index}`;
+                        const shared = pairShared.get(key) || 0;
+                        if (shared < threshold) continue;
+                        sharedLines += shared;
+                        (pairSamples.get(key) || []).forEach((s) => samples.push(s));
+                    }
+                }
+                const srcs = members.map((m) => m.src);
+                let root = '';
+                const first = srcs[0];
+                for (let len = first.length; len >= 2; len -= 1) {
+                    const candidate = first.slice(0, len);
+                    if (srcs.every((s) => s.startsWith(candidate))) { root = candidate; break; }
+                }
+                if (!root) {
+                    for (let len = first.length; len >= 2; len -= 1) {
+                        const candidate = first.slice(-len);
+                        if (srcs.every((s) => s.endsWith(candidate))) { root = candidate; break; }
+                    }
+                }
+                clusters.push({
+                    members: srcs,
+                    sharedLines,
+                    samples: [...new Set(samples)].slice(0, 3),
+                    root,
+                });
+            }
+            clusters.sort((a, b) => b.sharedLines - a.sharedLines);
+            return { clusters: clusters.slice(0, Math.max(1, maxClusters)), checked: list.length };
+        };
+
         const runJob = async ({ lines, callLLM, options = {}, onProgress, shouldStop, cache }) => {
             const budget = options.budgetChars || 3000;
             const maxRounds = options.maxRounds || 3;
@@ -2830,13 +3723,122 @@
                 round += 1;
             }
 
+            // ---------- 种子补漏（多轮账本驱动，链式收敛） ----------
+            // 每轮：派生未消费种子 → 定向块 → 执行；种子消费入账；本轮新发现物在下一轮派生新种子。
+            // 收敛：无新种子，或轮数封顶（maxSeedRounds）。补漏尽力而为：失败不回流 pending、不阻塞完成。
+            // 账本可序列化（options.seedLedger 传入/回传），队列随任务持久化；分块缓存按 `s{轮}-{块}` 复用。
+            let seedInfo = [];
+            let polishChunks = 0;
+            let seedChunksFailed = 0;
+            const ledger = (options.seedLedger && typeof options.seedLedger === 'object')
+                ? {
+                    v: 1,
+                    consumed: Array.isArray(options.seedLedger.consumed) ? [...options.seedLedger.consumed] : [],
+                    rounds: Array.isArray(options.seedLedger.rounds) ? [...options.seedLedger.rounds] : [],
+                    done: options.seedLedger.done === true,
+                }
+                : { v: 1, consumed: [], rounds: [], done: false };
+            const consumedSeeds = new Set(ledger.consumed);
+            const maxSeedRounds = Math.max(1, Math.floor(Number(options.maxSeedRounds) || 3));
+            if (options.seedPolish !== false && pending.length === 0 && processedLines.length > 0 && !(shouldStop && shouldStop())) {
+                for (let seedRound = 0; seedRound < maxSeedRounds && !ledger.done; seedRound += 1) {
+                    if (shouldStop && shouldStop()) break;
+                    const seeds = deriveSeeds({
+                        entries: allEntries,
+                        lines: processedLines,
+                        maxSeeds: Math.max(1, options.maxSeeds || 24),
+                        exclude: consumedSeeds,
+                    });
+                    if (seeds.length === 0) { ledger.done = true; break; }   // 收敛：没有新的调查目标
+                    const directed = buildSeedChunks(seeds, processedLines, budget, {
+                        maxChunks: Math.max(1, options.maxSeedChunks || 6),
+                        maxLinesPerSeed: Math.max(4, options.maxLinesPerSeed || 40),
+                    });
+                    if (directed.length === 0) { ledger.done = true; break; }
+                    polishChunks += directed.length;
+                    seedInfo.push(...seeds.map((s) => ({ pattern: s.pattern, kind: s.kind, hits: s.hits })));
+                    report({ phase: 'seed-start', seedRound: seedRound + 1, seedCount: seeds.length, totalChunks: directed.length });
+                    GlossaryLog.info(`种子补漏 第 ${seedRound + 1} 轮`, {
+                        seeds: seeds.length, chunks: directed.length, patterns: seeds.slice(0, 8).map((s) => s.pattern),
+                    });
+                    const entriesBefore = allEntries.length;
+                    let seedCursor = 0;
+                    const seedWorker = async () => {
+                        for (;;) {
+                            if (shouldStop && shouldStop()) return;
+                            const myIndex = seedCursor;
+                            seedCursor += 1;
+                            if (myIndex >= directed.length) return;
+                            const chunk = directed[myIndex];
+                            const cacheKey = cache && cache.namespace ? `${cache.namespace}/s${seedRound}-${myIndex}` : null;
+                            if (cacheKey) {
+                                const hit = await cache.get(cacheKey).catch(() => undefined);
+                                if (hit && Array.isArray(hit.entries) && linesMatch(hit.lines, chunk.lines)) {
+                                    allEntries.push(...hit.entries);
+                                    GlossaryLog.debug('种子块缓存命中', { round: seedRound + 1, chunk: myIndex, lines: chunk.lines.length });
+                                    report({ phase: 'seed-chunk-cached', chunkIndex: myIndex });
+                                    continue;
+                                }
+                            }
+                            const seedT0 = Date.now();
+                            await limiter.wait();
+                            if (!(await waitCooldown())) return;
+                            let result;
+                            try {
+                                result = await callLLM(buildMessages({
+                                    chunkText: chunk.text,
+                                    targetLanguage: options.targetLanguage || '中文',
+                                    focus: chunk.focus,
+                                }));
+                            } catch (e) {
+                                result = { ok: false, error: String((e && e.message) || e) };
+                            }
+                            const seedOk = result && result.ok && String(result.content || '').trim() !== '';
+                            if (seedOk) {
+                                const parsed = parseResponse(result.content || '');
+                                for (const entry of parsed.entries) allEntries.push(entry);
+                                if (cacheKey) await cache.put(cacheKey, { entries: parsed.entries, lines: chunk.lines, at: Date.now() }).catch(() => { });
+                                GlossaryLog.debug('种子块完成', {
+                                    round: seedRound + 1, chunk: myIndex, ms: Date.now() - seedT0,
+                                    entries: parsed.entries.length, focus: chunk.focus.map((s) => s.pattern),
+                                });
+                            } else {
+                                seedChunksFailed += 1;
+                                if (result && result.retryAfterMs) {
+                                    cooldownUntil = Math.max(cooldownUntil, Date.now() + result.retryAfterMs);
+                                    report({ phase: 'cooldown', waitMs: result.retryAfterMs });
+                                }
+                                GlossaryLog.warn('种子块失败: ' + ((result && result.error) || '空响应'), {
+                                    round: seedRound + 1, chunk: myIndex, focus: chunk.focus.map((s) => s.pattern),
+                                });
+                            }
+                            report({ phase: 'seed-chunk-done', chunkIndex: myIndex });
+                        }
+                    };
+                    await Promise.all(Array.from({ length: Math.min(concurrency, directed.length) }, () => seedWorker()));
+                    if (shouldStop && shouldStop()) break;   // 停止：本轮不消费不记账，续跑时重放（缓存复用已完成块）
+                    seeds.forEach((s) => consumedSeeds.add(s.pattern));
+                    ledger.rounds.push({
+                        seeds: seeds.map((s) => s.pattern),
+                        chunks: directed.length,
+                        newEntries: allEntries.length - entriesBefore,
+                    });
+                    if (seedRound + 1 >= maxSeedRounds) ledger.done = true;   // 轮数封顶
+                }
+            }
+
             const glossary = postProcess(allEntries, processedLines);
-            report({ phase: 'done' });
+            report({ phase: 'done', seeds: seedInfo.length, polishChunks, seedChunksFailed, seedRounds: ledger.rounds.length });
             GlossaryLog.info('提取结束', {
                 entries: glossary.length, chunksDone, chunksFailed, rounds: round,
                 pendingLines: pending.length, processedLines: processedLines.length, dropped: { ...lastPostDrop },
+                seeds: seedInfo.length, polishChunks, seedChunksFailed, seedRounds: ledger.rounds.length,
             });
-            return { glossary, chunksDone, chunksFailed, rounds: round, pendingLines: pending.length, processedLines, dropped: { ...lastPostDrop } };
+            return {
+                glossary, chunksDone, chunksFailed, rounds: round, pendingLines: pending.length,
+                processedLines, dropped: { ...lastPostDrop }, seeds: seedInfo, polishChunks, seedChunksFailed,
+                seedLedger: ledger, seedRounds: ledger.rounds.length,
+            };
         };
 
         // 导出
@@ -2853,6 +3855,23 @@
             // 后处理
             postProcess, findBest, searchForContext, linesMatch, uncoveredLines,
             suspectReasons, postDrop: () => ({ ...lastPostDrop }),
+            // 验收回扫
+            compileAcceptanceMatcher, matchGlossaryPatterns, scanAcceptance,
+            // 词根化 / 实体归并
+            maximalCommonSubstrings, longestCommonSubstring, deriveCommonLiteralRoots,
+            matchPatternLineIndexes, verifyRootCoverage,
+            // 译文反推
+            parseParallelText, inferTranslationsFromPairs,
+            // 修句
+            planFixTargets, buildFixRows, buildFixPrompt, parseFixResponse, locateParagraph, FIX_RULES,
+            // 种子补漏
+            deriveSeeds, buildSeedChunks, buildFocusSection,
+            // 证据化核实
+            collectEvidence, buildVerifyPrompt, parseVerifyResponse, verifyEntries, VERIFY_RULES,
+            // 实体聚类
+            buildEntityClusters,
+            // 术语表值格式（指南约定）
+            splitGlossaryValue, isSimpleNote, formatGlossaryValue, looksLikeSourceTampering, auditImportEntries,
             // 请求 / 编排
             TaskLimiter, buildChatUrl, createRequester, runJob,
         };
