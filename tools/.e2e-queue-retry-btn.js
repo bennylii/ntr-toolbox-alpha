@@ -69,7 +69,7 @@ const mkJob = async (title, patch) => {
   const created = await Q.addJobs([{ kind: 'wenku', novelId: 'mock-src', title }], {
     ...Q.extractSettings(), sourceLanguage: 'JA', maxLines: 0, workerId: '',
     testModel: 'mock-glossary-1', testKey: 'x',
-    testEndpoint: 'http://127.0.0.1:8788?run=' + Date.now(),
+    testEndpoint: `${location.origin}?run=` + Date.now(),
   });
   const job = created[0];
   Object.assign(job, patch);
@@ -129,7 +129,7 @@ try {
     progress: { round: 1, maxRounds: 3, chunksDone: 2, chunksFailed: 1, pendingLines: 20, totalLines: 37, covered: 17, uncovered: 20, totalChunks: 2, chunksBase: 0, timerBase: 0, roundStartedAt: Date.now() },
   });
   // 拖慢它：后面点「开始/续跑」时要能观察到 running 过渡态
-  jobR1.options = { ...jobR1.options, testEndpoint: 'http://127.0.0.1:8788?slow=1500&run=' + Date.now() };
+  jobR1.options = { ...jobR1.options, testEndpoint: `${location.origin}?slow=1500&run=` + Date.now() };
   await Q.put(jobR1);
   const jobR2 = await mkJob('用例R2-已完成', {
     state: 'done',
@@ -348,7 +348,7 @@ try {
   const jobD = await mkJob('用例D-中途停止', {});
   await Q.put(await Q.get(jobD.id));
   const jobD2 = await Q.get(jobD.id);
-  jobD2.options = { ...jobD2.options, budgetChars: 200, maxRounds: 1, concurrency: 1, testEndpoint: 'http://127.0.0.1:8788?slow=2500&run=' + Date.now() };
+  jobD2.options = { ...jobD2.options, budgetChars: 200, maxRounds: 1, concurrency: 1, testEndpoint: `${location.origin}?slow=2500&run=` + Date.now() };
   await Q.put(jobD2);
   Q.runLoop();
   await sleep(1500);

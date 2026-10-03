@@ -262,8 +262,23 @@ const server = http.createServer(async (req, res) => {
     let body = {};
     try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { /* ignore */ }
     res.writeHead(200, { ...cors, 'content-type': 'application/json', 'cache-control': 'no-store' });
-    const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || 'mock-trans';
+    const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || (url.pathname.split('/').filter(Boolean)[3] || 'mock-novel');
     const state = transBook(novelId);
+    if (/\/chapter-task\//.test(url.pathname) && !/mock-trans/.test(novelId)) {
+      // 非 mock-trans 的书：rich 风格（25/12 段 + 对齐旧译，供修句/回扫用例）
+      const ch = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
+      const n = ch === 'ch2' ? 12 : 25;
+      const paragraphJp = Array.from({ length: n }, (_, i) => `第${i + 1}行：アリスが魔導書を読む。ローズも来た。`);
+      res.end(JSON.stringify({
+        paragraphJp,
+        oldParagraphZh: paragraphJp.map((_, i) => `第${i + 1}行：爱丽丝在阅读魔导书。罗丝也来了。`),
+        glossaryId: 'mock-gloss',
+        glossary: {},
+        oldGlossaryId: 'mock-gloss',
+        oldGlossary: {},
+      }));
+      return;
+    }
     if (/\/chapter-task\//.test(url.pathname)) {
       const chapterId = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
       const done = state.get(chapterId);
@@ -310,7 +325,7 @@ const server = http.createServer(async (req, res) => {
     }
     res.writeHead(200, { ...cors, 'content-type': 'application/json', 'cache-control': 'no-store' });
     if (trans && /\/translate-v2\//.test(url.pathname)) {
-      const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || 'mock-trans';
+      const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || (url.pathname.split('/').filter(Boolean)[3] || 'mock-novel');
       const state = transBook(novelId);
       res.end(JSON.stringify({
         toc: transChapters(novelId).map((chapterId) => ({ chapterId, titleJp: `章 ${chapterId}`, glossaryUuid: state.get(chapterId) || undefined })),

@@ -1146,6 +1146,201 @@
         }
     };
 
+    // 公共：抓验收回扫需要的「原文 + 译文」两边文本
+    // 译文获取与站点前端一致：/file 的 translations 列表参数（priority = 取第一个有译文的翻译器）
+    // 返回 { jpText, zhText, translator }；web 为整本下载，wenku 逐章取 paragraphJp/oldParagraphZh（天然对齐）
+    const loadGlossaryParallelText = async (target, translator, onProgress) => {
+        const zhTranslator = String(translator || 'gpt').trim() || 'gpt';
+        if (target.kind === 'web') {
+            const { text: jpText } = await loadGlossarySourceText(target, onProgress);
+            const filename = `zh.${String(target.title || target.novelId).replace(/[\/|\\:*?"<>]/g, '')}.txt`;
+            const params = new URLSearchParams({ mode: 'zh', translationsMode: 'priority', type: 'txt', filename });
+            params.append('translations', zhTranslator);
+            if (onProgress) onProgress(`抓取译文（${zhTranslator}）…`);
+            const res = await script.fetch(`${window.location.origin}/api/novel/${target.providerId}/${target.novelId}/file?${params}`);
+            if (!res.ok) throw new Error(`下载译文失败: HTTP ${res.status}`);
+            return { jpText, zhText: await res.text(), translator: zhTranslator };
+        }
+        if (target.kind === 'wenku') {
+            // 文库没有原文下载接口（服务端拒绝 mode=jp），沿用 source loader 的只读链路逐章取；
+            // chapter-task 固定走 gpt 路径，translator 设置对文库不生效
+            const novelRes = await script.fetch(`${window.location.origin}/api/wenku/${target.novelId}`);
+            if (!novelRes.ok) throw new Error(`读取文库信息失败: HTTP ${novelRes.status}`);
+            const novel = await novelRes.json();
+            target.title = novel.titleZh || novel.title || target.novelId;
+            const volumes = novel.volumeJp || [];
+            if (volumes.length === 0) throw new Error('该文库小说没有已上传的日文卷');
+            const jpLines = [];
+            const zhLines = [];
+            for (let vi = 0; vi < volumes.length; vi++) {
+                const volumeId = volumes[vi].volumeId;
+                if (onProgress) onProgress(`抓取正文：卷 ${vi + 1}/${volumes.length}（${volumeId}）`);
+                const taskRes = await script.fetch(`${window.location.origin}/api/wenku/${target.novelId}/translate-v2/gpt/${encodeURIComponent(volumeId)}`);
+                if (!taskRes.ok) throw new Error(`读取卷目录失败（${volumeId}）: HTTP ${taskRes.status}`);
+                const task = await taskRes.json();
+                const toc = task.toc || [];
+                for (let ci = 0; ci < toc.length; ci++) {
+                    if (onProgress && toc.length > 1) onProgress(`抓取正文：卷 ${vi + 1}/${volumes.length} · 章 ${ci + 1}/${toc.length}`);
+                    const chRes = await script.fetch(`${window.location.origin}/api/wenku/${target.novelId}/translate-v2/gpt/${encodeURIComponent(volumeId)}/chapter-task/${toc[ci].chapterId}`);
+                    if (!chRes.ok) continue;
+                    const dto = await chRes.json();
+                    const jp = dto.paragraphJp || [];
+                    const zh = Array.isArray(dto.oldParagraphZh) ? dto.oldParagraphZh : [];
+                    jp.forEach((p, i) => {
+                        jpLines.push(p);
+                        zhLines.push(typeof zh[i] === 'string' ? zh[i] : '');
+                    });
+                }
+            }
+            return { jpText: jpLines.join('\n'), zhText: zhLines.join('\n'), translator: 'gpt' };
+        }
+        throw new Error('本地卷暂不支持验收回扫：请改用网页/文库目标');
+    };
+
+    // 公共：抓 jp-zh 对齐对（译文反推 / 修句用）
+    // web 走 /file?mode=jp-zh（priority 单译文块，jp/zh 行交替）；wenku 走 chapter-task 的段落数组
+    // 每对尽量带 chapterId（修句写回定位章节用；web 用标题映射 TOC，文库循环里直接有）
+    const loadGlossaryAlignedPairs = async (target, translator, onProgress) => {
+        const zhTranslator = String(translator || 'gpt').trim() || 'gpt';
+        if (target.kind === 'web') {
+            const novelRes = await script.fetch(`${window.location.origin}/api/novel/${target.providerId}/${target.novelId}`);
+            const novel = novelRes.ok ? await novelRes.json() : {};
+            target.title = novel.titleZh || novel.titleJp || target.novelId;
+            const filename = `jz.${String(target.title).replace(/[\/|\\:*?"<>]/g, '')}.txt`;
+            const params = new URLSearchParams({ mode: 'jp-zh', translationsMode: 'priority', type: 'txt', filename });
+            params.append('translations', zhTranslator);
+            if (onProgress) onProgress(`抓取对照文本（${zhTranslator}）…`);
+            const res = await script.fetch(`${window.location.origin}/api/novel/${target.providerId}/${target.novelId}/file?${params}`);
+            if (!res.ok) throw new Error(`下载对照文本失败: HTTP ${res.status}`);
+            const parsed = GlossaryEngine.parseParallelText(await res.text());
+            const tocMap = new Map((novel.toc || []).filter((t) => t.chapterId).map((t) => [t.titleJp, t.chapterId]));
+            let unmatchedChapters = 0;
+            parsed.pairs.forEach((pair) => {
+                const chapterId = tocMap.get(pair.chapter);
+                if (chapterId) pair.chapterId = chapterId;
+                else unmatchedChapters += 1;
+            });
+            return { ...parsed, translator: zhTranslator, unmatchedChapters };
+        }
+        if (target.kind === 'wenku') {
+            const novelRes = await script.fetch(`${window.location.origin}/api/wenku/${target.novelId}`);
+            if (!novelRes.ok) throw new Error(`读取文库信息失败: HTTP ${novelRes.status}`);
+            const novel = await novelRes.json();
+            target.title = novel.titleZh || novel.title || target.novelId;
+            const volumes = novel.volumeJp || [];
+            if (volumes.length === 0) throw new Error('该文库小说没有已上传的日文卷');
+            const pairs = [];
+            let chapters = 0;
+            let translationMissing = 0;
+            for (let vi = 0; vi < volumes.length; vi++) {
+                const volumeId = volumes[vi].volumeId;
+                if (onProgress) onProgress(`抓取对照文本：卷 ${vi + 1}/${volumes.length}（${volumeId}）`);
+                const taskRes = await script.fetch(`${window.location.origin}/api/wenku/${target.novelId}/translate-v2/gpt/${encodeURIComponent(volumeId)}`);
+                if (!taskRes.ok) throw new Error(`读取卷目录失败（${volumeId}）: HTTP ${taskRes.status}`);
+                const task = await taskRes.json();
+                const toc = task.toc || [];
+                for (let ci = 0; ci < toc.length; ci++) {
+                    if (onProgress && toc.length > 1) onProgress(`抓取对照文本：卷 ${vi + 1}/${volumes.length} · 章 ${ci + 1}/${toc.length}`);
+                    const chRes = await script.fetch(`${window.location.origin}/api/wenku/${target.novelId}/translate-v2/gpt/${encodeURIComponent(volumeId)}/chapter-task/${toc[ci].chapterId}`);
+                    if (!chRes.ok) continue;
+                    const dto = await chRes.json();
+                    const jp = dto.paragraphJp || [];
+                    const zh = Array.isArray(dto.oldParagraphZh) ? dto.oldParagraphZh : [];
+                    if (jp.length > 0 && zh.length === 0) translationMissing += 1;
+                    chapters += 1;
+                    jp.forEach((paragraph, i) => {
+                        const translated = typeof zh[i] === 'string' ? zh[i] : '';
+                        if (paragraph && translated) pairs.push({
+                            jp: paragraph, zh: translated,
+                            chapter: toc[ci].title || '', chapterId: toc[ci].chapterId, volumeId,
+                        });
+                    });
+                }
+            }
+            return { pairs, chapters, translationMissing, chapterMissing: 0, dropped: 0, translator: 'gpt', unmatchedChapters: 0 };
+        }
+        throw new Error('本地卷暂不支持译文反推：请改用网页/文库目标');
+    };
+
+    // 公共：把修句结果写回站点（按章节分组；glossaryId 用章节任务返回的当前值）
+    // 站点校验两条：glossaryId 必须等于当前术语表版本（否则 400 术语表失效）、paragraphsZh 长度必须与章节段落数一致
+    const writeBackChapterFixes = async (target, translator, rows, onProgress) => {
+        const appliedIds = [];
+        const failed = [];
+        const failedIds = new Set();
+        const pushFailed = (id, reason) => {
+            if (appliedIds.includes(id) || failedIds.has(id)) return;
+            failedIds.add(id);
+            failed.push({ id, reason });
+        };
+        const groups = new Map();
+        (rows || []).forEach((row) => {
+            const key = target.kind === 'wenku' ? `${row.volumeId || ''}::${row.chapterId || ''}` : String(row.chapterId || '');
+            let group = groups.get(key);
+            if (!group) {
+                group = { chapterId: row.chapterId, volumeId: row.volumeId, chapterTitle: row.chapterTitle, rows: [] };
+                groups.set(key, group);
+            }
+            group.rows.push(row);
+        });
+        let done = 0;
+        for (const group of groups.values()) {
+            done += 1;
+            if (onProgress) onProgress(`写回章节 ${done}/${groups.size}：${group.chapterTitle || group.chapterId || '?'}`);
+            const pendingIds = [];
+            try {
+                if (!group.chapterId) throw new Error('缺少章节定位（章节标题在 TOC 里找不到）');
+                let dto;
+                if (target.kind === 'web') {
+                    const taskRes = await script.fetch(
+                        `${window.location.origin}/api/novel/${target.providerId}/${target.novelId}/translate-v2/${translator}/chapter-task/${group.chapterId}`,
+                        true,
+                        { method: 'POST' },
+                    );
+                    if (!taskRes.ok) throw new Error(`读取章节失败: HTTP ${taskRes.status}`);
+                    dto = await taskRes.json();
+                } else {
+                    const taskRes = await script.fetch(
+                        `${window.location.origin}/api/wenku/${target.novelId}/translate-v2/${translator}/${encodeURIComponent(group.volumeId)}/chapter-task/${group.chapterId}`,
+                    );
+                    if (!taskRes.ok) throw new Error(`读取章节失败: HTTP ${taskRes.status}`);
+                    dto = await taskRes.json();
+                }
+                const paragraphsJp = dto.paragraphJp || [];
+                const paragraphsZh = Array.isArray(dto.oldParagraphZh) ? dto.oldParagraphZh.slice() : [];
+                if (paragraphsZh.length !== paragraphsJp.length) throw new Error('章节原文与译文段落数不一致，跳过');
+                const used = new Set();
+                for (const row of group.rows) {
+                    const index = GlossaryEngine.locateParagraph(paragraphsJp, row.jp, used);
+                    if (index < 0) { pushFailed(row.id, '章节里找不到对应原文'); continue; }
+                    used.add(index);
+                    if (paragraphsZh[index] === row.after) { appliedIds.push(row.id); continue; }   // 已经是目标文本
+                    paragraphsZh[index] = row.after;
+                    pendingIds.push(row.id);
+                }
+                if (pendingIds.length === 0) continue;
+                const body = JSON.stringify({ glossaryId: dto.glossaryId, paragraphsZh, sakuraVersion: '0.9' });
+                const url = target.kind === 'web'
+                    ? `${window.location.origin}/api/novel/${target.providerId}/${target.novelId}/translate-v2/${translator}/chapter/${group.chapterId}`
+                    : `${window.location.origin}/api/wenku/${target.novelId}/translate-v2/${translator}/${encodeURIComponent(group.volumeId)}/chapter/${group.chapterId}`;
+                const putRes = await script.fetch(url, true, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body,
+                });
+                if (!putRes.ok) {
+                    const detail = await putRes.text().catch(() => '');
+                    throw new Error(`上传失败 HTTP ${putRes.status}${detail ? `：${String(detail).slice(0, 120)}` : ''}`);
+                }
+                appliedIds.push(...pendingIds);
+            } catch (e) {
+                const reason = (e && e.message) || String(e);
+                group.rows.forEach((row) => pushFailed(row.id, reason));
+            }
+        }
+        return { appliedIds, failed };
+    };
+
     // 公共：合并写入（快照 + 合并 + 保存）
     const writeGlossaryMerged = async (target, picked) => {
         const current = await GlossaryTargets.loadGlossary(target);
@@ -1347,6 +1542,336 @@
 
     // 同步 Daemon：把站点凭据（auth-v2 token）与工作区 GPT 翻译器配置推给本地 daemon
     // （daemon 用它们调站点 API 与 LLM；token 短时效，这里随时可重新同步）
+    // 验收回扫：纯本地计算（不调 LLM、不写站点）——拿术语表 x 原文 x 译文 算落地率
+    const moduleAcceptanceScan = {
+        name: '验收回扫',
+        type: 'onclick',
+        whitelist: ['/novel', '/wenku', '/favorite', '/workspace'],
+        needsTarget: true,
+        settings: [
+            // /file 的 translations 参数；文库路径固定 gpt，不受这里影响
+            newSelectSetting('译文来源', ['gpt', 'sakura', 'baidu', 'youdao'], 'gpt'),
+            newNumberSetting('最短译文长度', 2),
+            newBooleanSetting('只看未落地', false),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg) {
+            const target = await resolveGlossaryTarget();
+            if (!target) return;
+            const translator = getModuleSetting(cfg, '译文来源') || 'gpt';
+            const minDstLength = Math.max(1, Number(getModuleSetting(cfg, '最短译文长度')) || 2);
+            const onlyMissed = getModuleSetting(cfg, '只看未落地') === true;
+            const progress = GlossaryUI.status(`验收回扫 - ${GlossaryTargets.describe(target)}`);
+            try {
+                progress.update('读取术语表…');
+                const glossary = await GlossaryTargets.loadGlossary(target);
+                const entries = Object.keys(glossary || {}).map((src) => ({ src, dst: glossary[src] }));
+                if (entries.length === 0) {
+                    progress.close();
+                    NotificationUtils.showWarning('该目标术语表为空：先提取/导入术语再回扫');
+                    return;
+                }
+                progress.update('抓取原文与译文…');
+                const parallel = await loadGlossaryParallelText(target, translator, (msg) => progress.update(msg));
+                progress.update('扫描中…');
+                const jpLines = GlossaryEngine.splitLines(parallel.jpText);
+                const zhLines = GlossaryEngine.splitLines(parallel.zhText);
+                const result = GlossaryEngine.scanAcceptance({ entries, jpLines, zhLines, minDstLength });
+                progress.close();
+                const stats = result.stats;
+                const note = `译文来源 ${parallel.translator || translator}：原文 ${jpLines.length} 行 / 译文 ${zhLines.length} 行`
+                    + (stats.checkable === 0 ? '；没有可检条目' : '');
+                GlossaryReport.open({
+                    title: `验收回扫 - ${target.title || GlossaryTargets.describe(target)}`,
+                    rows: result.rows,
+                    stats,
+                    note,
+                    initialFilter: onlyMissed ? 'missed' : 'all',
+                });
+                NotificationUtils.showSuccess(`回扫完成：落地率 ${(stats.rate * 100).toFixed(1)}%（未落地 ${stats.missed} 条）`);
+            } catch (e) {
+                progress.close();
+                NotificationUtils.showError(`验收回扫失败：${(e && e.message) || e}`);
+            }
+        },
+    };
+
+    // 词根整理：从现有术语表派生"同族词根"建议（纯本地计算），进合并弹层由人逐条确认
+    const moduleRootConsolidate = {
+        name: '词根整理',
+        type: 'onclick',
+        whitelist: ['/novel', '/wenku', '/favorite', '/workspace'],
+        needsTarget: true,
+        settings: [
+            newNumberSetting('最少成员数', 2),
+            newNumberSetting('建议上限', 40),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg) {
+            const target = await resolveGlossaryTarget();
+            if (!target) return;
+            const minMembers = Math.max(2, Number(getModuleSetting(cfg, '最少成员数')) || 2);
+            const maxSuggestions = Math.max(1, Number(getModuleSetting(cfg, '建议上限')) || 40);
+            const progress = GlossaryUI.status(`词根整理 - ${GlossaryTargets.describe(target)}`);
+            try {
+                progress.update('读取术语表…');
+                const glossary = await GlossaryTargets.loadGlossary(target);
+                const entries = Object.keys(glossary || {}).map((src) => ({ src, dst: glossary[src] }));
+                if (entries.length < minMembers) {
+                    progress.close();
+                    NotificationUtils.showWarning('术语条目太少，没有可整理的对象');
+                    return;
+                }
+                progress.update('分析词根候选…');
+                const proposals = GlossaryEngine.deriveCommonLiteralRoots(entries, { minMembers }).slice(0, maxSuggestions);
+                progress.update('抓取正文核对新增命中…');
+                const { text } = await loadGlossarySourceText(target, (msg) => progress.update(msg));
+                const lines = GlossaryEngine.splitLines(text);
+                // 实体聚类（共现信号）：不产出可写入条目，只做"疑似同实体"提示 + 日志留证；
+                // 与词根建议不重复的（无公共前后缀）单独计数
+                const clustered = GlossaryEngine.buildEntityClusters({ entries, lines });
+                const rootSet = new Set(proposals.map((p) => p.root));
+                const aliasGroups = clustered.clusters.filter((c) => !c.root || !rootSet.has(c.root));
+                if (aliasGroups.length > 0) {
+                    GlossaryLog.info('疑似同实体（共现聚类）', aliasGroups.slice(0, 10).map((c) => ({ members: c.members, sharedLines: c.sharedLines, samples: c.samples })));
+                }
+                const clusterHint = aliasGroups.length > 0 ? `；另有 ${aliasGroups.length} 组疑似同实体（共现信号，见日志）` : '';
+                const suggestions = [];
+                let noDst = 0;
+                for (const p of proposals) {
+                    if (!p.rootDst) { noDst += 1; continue; }   // 推导不出公共译文的不进建议（避免编造）
+                    const check = GlossaryEngine.verifyRootCoverage({ root: p.root, members: p.members, lines });
+                    suggestions.push({
+                        src: p.root,
+                        dst: p.rootDst,
+                        type: `词根（${p.memberCount} 成员${check.extraCount > 0 ? `，新增命中 ${check.extraCount}` : ''}）`,
+                        count: check.rootCount,
+                        context: check.extraCount > 0 ? check.extraSamples : [],
+                    });
+                }
+                progress.close();
+                if (suggestions.length === 0) {
+                    NotificationUtils.showWarning(`没有可推导的词根建议${clusterHint || '（或都被现有条目覆盖）'}`);
+                    return;
+                }
+                GlossaryUI.open({
+                    title: `词根整理 - ${target.title || GlossaryTargets.describe(target)}（${suggestions.length} 条建议${noDst ? `，另 ${noDst} 条无公共译文未列` : ''}）`,
+                    target,
+                    entries: suggestions,
+                    existing: glossary,
+                    mode: 'merge',
+                    onWrite: (picked) => writeGlossaryMerged(target, picked),
+                });
+                NotificationUtils.showSuccess(`词根整理：${suggestions.length} 条建议（"新增命中">0 的请先看上下文再采纳）${clusterHint}`);
+            } catch (e) {
+                progress.close();
+                NotificationUtils.showError(`词根整理失败：${(e && e.message) || e}`);
+            }
+        },
+    };
+
+    // 译文反推：从 jp-zh 对齐对反推未收录术语的译名建议（纯本地计算），进合并弹层确认
+    const moduleGlossaryInfer = {
+        name: '译文反推',
+        type: 'onclick',
+        whitelist: ['/novel', '/wenku', '/favorite', '/workspace'],
+        needsTarget: true,
+        settings: [
+            newSelectSetting('译文来源', ['gpt', 'sakura', 'baidu', 'youdao'], 'gpt'),
+            newNumberSetting('最少共现次数', 3),
+            newNumberSetting('建议上限', 30),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg) {
+            const target = await resolveGlossaryTarget();
+            if (!target) return;
+            const translator = getModuleSetting(cfg, '译文来源') || 'gpt';
+            const minPairs = Math.max(2, Number(getModuleSetting(cfg, '最少共现次数')) || 3);
+            const maxSuggestions = Math.max(1, Number(getModuleSetting(cfg, '建议上限')) || 30);
+            const progress = GlossaryUI.status(`译文反推 - ${GlossaryTargets.describe(target)}`);
+            try {
+                progress.update('读取术语表…');
+                const glossary = await GlossaryTargets.loadGlossary(target);
+                progress.update('抓取对照文本…');
+                const aligned = await loadGlossaryAlignedPairs(target, translator, (msg) => progress.update(msg));
+                if (aligned.pairs.length === 0) {
+                    progress.close();
+                    NotificationUtils.showWarning('没有可用的"原文/译文"对齐对：该小说可能还没有译文，或译文来源选错了');
+                    return;
+                }
+                progress.update(`分析共现（${aligned.pairs.length} 对）…`);
+                const { suggestions } = GlossaryEngine.inferTranslationsFromPairs({
+                    pairs: aligned.pairs,
+                    glossary,
+                    minPairs,
+                    maxSuggestions,
+                });
+                progress.close();
+                if (suggestions.length === 0) {
+                    NotificationUtils.showWarning(`没有发现可反推的候选（共 ${aligned.pairs.length} 对，最少共现 ${minPairs} 次）`);
+                    return;
+                }
+                GlossaryUI.open({
+                    title: `译文反推 - ${target.title || GlossaryTargets.describe(target)}（${suggestions.length} 条建议 / ${aligned.pairs.length} 对）`,
+                    target,
+                    entries: suggestions.map((s) => ({
+                        src: s.src,
+                        dst: s.dst,
+                        type: `反推（共现 ${s.support}/${s.pairs}，特异性 ${(s.specificity * 100).toFixed(0)}%）`,
+                        count: s.support,
+                        context: s.samples,
+                    })),
+                    existing: glossary,
+                    mode: 'merge',
+                    onWrite: (picked) => writeGlossaryMerged(target, picked),
+                });
+                NotificationUtils.showSuccess(`译文反推：${suggestions.length} 条建议（启发式结果，采纳前请核对上下文）`);
+            } catch (e) {
+                progress.close();
+                NotificationUtils.showError(`译文反推失败：${(e && e.message) || e}`);
+            }
+        },
+    };
+
+    // 修句：以未落地清单为输入，LLM 只修术语不一致，审核面板确认后写回站点
+    const moduleSentenceFix = {
+        name: '修句',
+        type: 'onclick',
+        whitelist: ['/novel', '/wenku', '/favorite', '/workspace'],
+        needsTarget: true,
+        settings: [
+            newSelectSetting('译文来源', ['gpt', 'sakura', 'baidu', 'youdao'], 'gpt'),
+            newSelectSetting('翻译器', workspaceTranslatorOptions, ''),
+            newBooleanSetting('使用临时端点', false),
+            newStringSetting('临时端点', ''),
+            newStringSetting('临时模型', ''),
+            newStringSetting('临时Key', ''),
+            newNumberSetting('每批段落数', 8),
+            newNumberSetting('段落上限', 60),
+            newNumberSetting('并发', 2),
+            newNumberSetting('RPM', 0),
+            newNumberSetting('逾时(秒)', 300),
+            newNumberSetting('输出上限', 0),
+            newStringSetting('bind', 'none'),
+        ],
+        settingGroups: [
+            { id: 'testEndpoint', title: '临时端点设置（勾选后覆盖上面的翻译器）', members: ['临时端点', '临时模型', '临时Key'], enabledBy: '使用临时端点' },
+        ],
+        run: async function (cfg) {
+            const target = await resolveGlossaryTarget();
+            if (!target) return;
+            const translator = getModuleSetting(cfg, '译文来源') || 'gpt';
+            const batchSize = Math.max(1, Number(getModuleSetting(cfg, '每批段落数')) || 8);
+            const maxParagraphs = Math.max(1, Number(getModuleSetting(cfg, '段落上限')) || 60);
+            const concurrency = Math.max(1, Number(getModuleSetting(cfg, '并发')) || 2);
+            const rpm = Math.max(0, Number(getModuleSetting(cfg, 'RPM')) || 0);
+            const timeoutMs = Math.max(5, Number(getModuleSetting(cfg, '逾时(秒)')) || 300) * 1000;
+            const maxTokens = Math.max(0, Number(getModuleSetting(cfg, '输出上限')) || 0);
+            const progress = GlossaryUI.status(`修句 - ${GlossaryTargets.describe(target)}`);
+            try {
+                progress.update('读取术语表…');
+                const glossary = await GlossaryTargets.loadGlossary(target);
+                if (Object.keys(glossary || {}).length === 0) {
+                    progress.close();
+                    NotificationUtils.showWarning('术语表为空：先提取/导入术语再修句');
+                    return;
+                }
+                progress.update('抓取对照文本…');
+                const aligned = await loadGlossaryAlignedPairs(target, translator, (msg) => progress.update(msg));
+                if (aligned.pairs.length === 0) {
+                    progress.close();
+                    NotificationUtils.showWarning('没有可用的原文/译文对齐对：该小说可能还没有译文，或译文来源选错了');
+                    return;
+                }
+                progress.update('扫描未落地…');
+                const planned = GlossaryEngine.planFixTargets({ pairs: aligned.pairs, glossary });
+                if (planned.targets.length === 0) {
+                    progress.close();
+                    NotificationUtils.showSuccess(`未发现未落地术语（${aligned.pairs.length} 对，来源 ${translator}）`);
+                    return;
+                }
+                const rows = GlossaryEngine.buildFixRows(planned.targets, { maxParagraphs });
+                const workers = await resolveGlossaryWorkers(cfg);
+                if (workers.length === 0) {
+                    progress.close();
+                    NotificationUtils.showError('没有可用的翻译器：请在工作区添加 GPT 翻译器，或勾选「使用临时端点」并填好端点/模型');
+                    return;
+                }
+                const requester = GlossaryEngine.createRequester(workers, { timeoutMs, rps: concurrency, rpm, maxTokens });
+                const batches = [];
+                for (let i = 0; i < rows.length; i += batchSize) {
+                    batches.push(rows.slice(i, i + batchSize).map((row, k) => ({ row, globalId: i + k })));
+                }
+                let cursor = 0;
+                let doneBatches = 0;
+                let parseInvalid = 0;
+                let requestFailed = 0;
+                const fixes = new Map(); // globalId -> after
+                const lane = async () => {
+                    for (;;) {
+                        const myIndex = cursor;
+                        cursor += 1;
+                        if (myIndex >= batches.length) return;
+                        const batch = batches[myIndex];
+                        const prompt = GlossaryEngine.buildFixPrompt({ rows: batch.map((b) => b.row) });
+                        let result;
+                        try {
+                            result = await requester.call([{ role: 'user', content: prompt }]);
+                        } catch (e) {
+                            result = { ok: false, error: String((e && e.message) || e) };
+                        }
+                        if (result && result.ok && String(result.content || '').trim() !== '') {
+                            const parsed = GlossaryEngine.parseFixResponse(result.content, { rowCount: batch.length });
+                            parseInvalid += parsed.invalid;
+                            for (const [localId, text] of parsed.fixes) {
+                                const entry = batch[localId];
+                                if (entry) fixes.set(entry.globalId, text);
+                            }
+                        } else {
+                            requestFailed += 1;
+                        }
+                        doneBatches += 1;
+                        progress.update(`修句请求 ${doneBatches}/${batches.length} 批（已生成 ${fixes.size} 条修正）`, doneBatches / batches.length);
+                    }
+                };
+                await Promise.all(Array.from({ length: Math.min(concurrency, batches.length) }, () => lane()));
+                progress.close();
+
+                const panelRows = rows.map((row, index) => {
+                    const pair = aligned.pairs[row.pairIndex] || {};
+                    const after = fixes.get(index);
+                    return {
+                        id: index,
+                        chapterKey: pair.chapterId || pair.chapter || '',
+                        chapterId: pair.chapterId,
+                        volumeId: pair.volumeId,
+                        chapterTitle: pair.chapter || '',
+                        jp: row.jp,
+                        zh: row.zh,
+                        missed: row.missed,
+                        after: after || '',
+                        status: after ? 'changed' : 'unchanged',
+                    };
+                });
+                const changed = panelRows.filter((r) => r.status === 'changed').length;
+                GlossaryFix.open({
+                    title: `修句 - ${target.title || GlossaryTargets.describe(target)}（${changed} 段可写回 / 共 ${panelRows.length} 段）`,
+                    note: `译文来源 ${translator}：修句只改术语不一致；写回会直接更新站点译文。请求失败 ${requestFailed} 批${parseInvalid ? `，格式异常 ${parseInvalid} 条` : ''}`,
+                    rows: panelRows,
+                    onApply: (ids, onApplyProgress) => writeBackChapterFixes(
+                        target,
+                        translator,
+                        panelRows.filter((r) => ids.includes(r.id)),
+                        onApplyProgress,
+                    ),
+                });
+            } catch (e) {
+                progress.close();
+                NotificationUtils.showError(`修句失败：${(e && e.message) || e}`);
+            }
+        },
+    };
+
     const moduleDaemonSync = {
         name: '同步 Daemon',
         type: 'onclick',
@@ -1670,6 +2195,10 @@
         moduleFillGlossary,
         moduleGlossaryExtract,
         moduleGlossaryImport,
+        moduleAcceptanceScan,
+        moduleRootConsolidate,
+        moduleGlossaryInfer,
+        moduleSentenceFix,
         moduleGlossaryRollback,
         moduleGlossaryQueue,
         moduleCopyWorkersToBeta,
@@ -5323,9 +5852,370 @@
             document.body.appendChild(overlay);
         });
 
-        return { open, status, pick, computeDiff, fmtText, fmtJson, copyText, downloadText };
+        return { open, status, pick, computeDiff, fmtText, fmtJson, copyText, downloadText, ensureStyles };
     })();
     // ==GlossaryUI-END==
+
+    // ==GlossaryReport-START==
+    // 验收回扫报告面板：只做展示/筛选/导出，不做任何写入
+    const GlossaryReport = (() => {
+        const CSS_ID = 'ntr-glossary-report-css';
+        // 排序：问题优先——未落地 > 原文未见 > 不可检 > 已落地，同组按原文命中数降序
+        const STATUS_ORDER = { missed: 0, absent: 1, unchecked: 2, landed: 3 };
+        const STATUS_LABEL = { missed: '未落地', absent: '原文未见', unchecked: '不可检', landed: '已落地' };
+        const STATUS_BADGE = { missed: 'missed', absent: 'absent', unchecked: 'unchecked', landed: 'landed' };
+
+        const ensureStyles = () => {
+            if (document.getElementById(CSS_ID)) return;
+            const style = document.createElement('style');
+            style.id = CSS_ID;
+            style.textContent = `
+.ntr-g-overlay tr.status-missed td:first-child { box-shadow: inset 3px 0 0 #d0a020; }
+.ntr-g-overlay tr.status-absent td:first-child { box-shadow: inset 3px 0 0 #555; }
+.ntr-g-overlay tr.status-unchecked td:first-child { box-shadow: inset 3px 0 0 #3860a0; }
+.ntr-g-overlay tr.status-landed td:first-child { box-shadow: inset 3px 0 0 #3f9f3f; }
+.ntr-g-overlay .ntr-g-badge.missed { background: #5A4A1E; color: #FEC; }
+.ntr-g-overlay .ntr-g-badge.landed { background: #2E5A2E; color: #CFC; }
+.ntr-g-overlay .ntr-g-badge.absent { background: #333; color: #AAA; }
+.ntr-g-overlay .ntr-g-badge.unchecked { background: #24384F; color: #CDF; }
+.ntr-g-overlay .ntr-g-rate { color: #8FD08F; font-weight: bold; }
+.ntr-g-overlay td.ntr-g-num { text-align: right; color: #AAA; }
+.ntr-g-overlay td.ntr-g-dim { color: #888; }
+`;
+            document.head.appendChild(style);
+        };
+
+        const sortRows = (rows) => rows.slice().sort((a, b) =>
+            ((STATUS_ORDER[a.status] === undefined ? 9 : STATUS_ORDER[a.status]) - (STATUS_ORDER[b.status] === undefined ? 9 : STATUS_ORDER[b.status]))
+            || (b.srcCount - a.srcCount) || String(a.src).localeCompare(String(b.src)));
+
+        const filterRows = (rows, options) => {
+            const filter = (options && options.filter) || 'all';
+            const q = String((options && options.query) || '').trim().toLowerCase();
+            return rows.filter((r) => {
+                if (filter !== 'all' && r.status !== filter) return false;
+                if (q === '') return true;
+                return `${r.src}\n${r.dst}\n${r.info || ''}`.toLowerCase().includes(q);
+            });
+        };
+
+        const formatRate = (rate) => `${(Math.max(0, Math.min(1, Number(rate) || 0)) * 100).toFixed(1)}%`;
+
+        // TSV：给「导出当前列表」用，字段里的制表/换行剔掉
+        const toTsv = (rows) => {
+            const clean = (v) => String(v === undefined || v === null ? '' : v).replace(/[\t\r\n]+/g, ' ');
+            const head = ['状态', '原文', '译文', '原文命中行数', '译文命中行数', '类型', '原文样例'];
+            const body = rows.map((r) => [
+                STATUS_LABEL[r.status] || r.status, r.src, r.dst, r.srcCount, r.dstCount, r.info || '', r.sample || '',
+            ].map(clean).join('\t'));
+            return [head.join('\t'), ...body].join('\n');
+        };
+
+        const open = ({ title, rows, stats, note, initialFilter = 'all' }) => {
+            GlossaryUI.ensureStyles();
+            ensureStyles();
+            const old = document.getElementById('ntr-glossary-report-overlay');
+            if (old) old.remove();
+
+            const state = { filter: initialFilter, query: '' };
+            const overlay = document.createElement('div');
+            overlay.id = 'ntr-glossary-report-overlay';
+            overlay.className = 'ntr-g-overlay';
+            const card = document.createElement('div');
+            card.className = 'ntr-g-card';
+            overlay.appendChild(card);
+
+            const head = document.createElement('div');
+            head.className = 'ntr-g-head';
+            const titleEl = document.createElement('div');
+            titleEl.className = 'ntr-g-title';
+            titleEl.textContent = title;
+            const statsEl = document.createElement('div');
+            statsEl.className = 'ntr-g-stats';
+            head.appendChild(titleEl);
+            head.appendChild(statsEl);
+            if (note) {
+                const noteEl = document.createElement('div');
+                noteEl.className = 'ntr-g-warn';
+                noteEl.textContent = note;
+                head.appendChild(noteEl);
+            }
+            card.appendChild(head);
+
+            const toolbar = document.createElement('div');
+            toolbar.className = 'ntr-g-toolbar';
+            const filterBtns = [];
+            const mkFilter = (key, label) => {
+                const b = document.createElement('button');
+                b.className = 'ntr-g-tab';
+                b.textContent = label;
+                b.onclick = () => { state.filter = key; render(); };
+                filterBtns.push({ key, el: b });
+                toolbar.appendChild(b);
+            };
+            mkFilter('all', '全部');
+            mkFilter('missed', '未落地');
+            mkFilter('absent', '原文未见');
+            mkFilter('unchecked', '不可检');
+            mkFilter('landed', '已落地');
+            const search = document.createElement('input');
+            search.type = 'text';
+            search.placeholder = '筛选原文/译文…';
+            search.style.minWidth = '180px';
+            search.oninput = () => { state.query = search.value; render(); };
+            toolbar.appendChild(search);
+            const mkBtn = (label, fn) => { const b = document.createElement('button'); b.className = 'ntr-g-btn'; b.textContent = label; b.onclick = fn; toolbar.appendChild(b); return b; };
+            mkBtn('导出 TSV（当前列表）', () => GlossaryUI.downloadText(`验收回扫.${Date.now()}.tsv`, toTsv(filterRows(sortRows(rows), state))));
+            mkBtn('复制未落地清单', () => GlossaryUI.copyText(rows.filter((r) => r.status === 'missed').map((r) => `${r.src} => ${r.dst}${r.info ? ' #' + r.info : ''}`).join('\n')));
+            card.appendChild(toolbar);
+
+            const body = document.createElement('div');
+            body.className = 'ntr-g-body';
+            card.appendChild(body);
+
+            const foot = document.createElement('div');
+            foot.className = 'ntr-g-foot';
+            const closeBtn = document.createElement('button');
+            closeBtn.className = 'ntr-g-btn primary';
+            closeBtn.textContent = '关闭';
+            closeBtn.onclick = () => overlay.remove();
+            foot.appendChild(closeBtn);
+            card.appendChild(foot);
+
+            const RENDER_LIMIT = 2000; // 全量渲染在几千条时会卡，超出只渲染前 N 条（导出不受限）
+            const render = () => {
+                const list = filterRows(sortRows(rows), state);
+                statsEl.innerHTML = '';
+                const rateEl = document.createElement('span');
+                rateEl.className = 'ntr-g-rate';
+                rateEl.textContent = `落地率 ${formatRate(stats.rate)}`;
+                statsEl.appendChild(rateEl);
+                const detail = document.createElement('span');
+                detail.textContent = `（可检 ${stats.checkable} / 共 ${stats.total} · 未落地 ${stats.missed} · 原文未见 ${stats.absent} · 不可检 ${stats.unchecked}）`;
+                statsEl.appendChild(detail);
+                filterBtns.forEach(({ key, el }) => el.classList.toggle('active', state.filter === key));
+                body.innerHTML = '';
+                const table = document.createElement('table');
+                const thead = document.createElement('thead');
+                const hr = document.createElement('tr');
+                ['状态', '原文', '译文', '原/译命中', '类型', '原文样例'].forEach((h) => {
+                    const th = document.createElement('th');
+                    th.textContent = h;
+                    hr.appendChild(th);
+                });
+                thead.appendChild(hr);
+                table.appendChild(thead);
+                const tbody = document.createElement('tbody');
+                const mkTd = (text, cls, titleText) => {
+                    const td = document.createElement('td');
+                    if (cls) td.className = cls;
+                    td.textContent = text;
+                    if (titleText) td.title = titleText;
+                    return td;
+                };
+                list.slice(0, RENDER_LIMIT).forEach((r) => {
+                    const tr = document.createElement('tr');
+                    tr.className = 'status-' + r.status;
+                    const st = document.createElement('td');
+                    const badge = document.createElement('span');
+                    badge.className = 'ntr-g-badge ' + (STATUS_BADGE[r.status] || '');
+                    badge.textContent = STATUS_LABEL[r.status] || r.status;
+                    st.appendChild(badge);
+                    tr.appendChild(st);
+                    tr.appendChild(mkTd(r.src, '', r.sample || ''));
+                    tr.appendChild(mkTd(r.dst, '', r.dstSample || ''));
+                    tr.appendChild(mkTd(`${r.srcCount} / ${r.dstCount}`, 'ntr-g-num'));
+                    tr.appendChild(mkTd(r.info || '', 'ntr-g-dim'));
+                    tr.appendChild(mkTd(r.sample || '', 'ntr-g-dim'));
+                    tbody.appendChild(tr);
+                });
+                table.appendChild(tbody);
+                body.appendChild(table);
+                if (list.length > RENDER_LIMIT) {
+                    const hint = document.createElement('div');
+                    hint.className = 'ntr-g-warn';
+                    hint.style.padding = '8px 14px';
+                    hint.textContent = `列表过长：仅渲染前 ${RENDER_LIMIT} 条（共 ${list.length} 条），导出 TSV 不受限`;
+                    body.appendChild(hint);
+                }
+            };
+            render();
+            document.body.appendChild(overlay);
+            return { close: () => overlay.remove(), rows: () => filterRows(sortRows(rows), state) };
+        };
+
+        return { open, toTsv, sortRows, filterRows, formatRate };
+    })();
+    // ==GlossaryReport-END==
+
+    // ==GlossaryFix-START==
+    // 修句审核面板：展示"现有译文 → 修正译文"，勾选后写回站点（写回动作由模块注入）
+    const GlossaryFix = (() => {
+        const CSS_ID = 'ntr-glossary-fix-css';
+        const STATUS_LABEL = { changed: '可写回', applied: '已写回', unchanged: '无需修改', failed: '失败' };
+        const STATUS_BADGE = { changed: 'conflict', applied: 'add', unchanged: 'same', failed: 'unchecked' };
+        const ensureStyles = () => {
+            if (document.getElementById(CSS_ID)) return;
+            const style = document.createElement('style');
+            style.id = CSS_ID;
+            style.textContent = `
+.ntr-g-overlay tr.status-changed td:first-child { box-shadow: inset 3px 0 0 #d0a020; }
+.ntr-g-overlay tr.status-applied td:first-child { box-shadow: inset 3px 0 0 #3f9f3f; }
+.ntr-g-overlay tr.status-unchanged td:first-child { box-shadow: inset 3px 0 0 #555; }
+.ntr-g-overlay tr.status-failed td:first-child { box-shadow: inset 3px 0 0 #a04040; }
+.ntr-g-overlay .ntr-g-badge.changed { background: #5A4A1E; color: #FEC; }
+.ntr-g-overlay .ntr-g-badge.applied { background: #2E5A2E; color: #CFC; }
+.ntr-g-overlay .ntr-g-badge.unchanged { background: #333; color: #AAA; }
+.ntr-g-overlay .ntr-g-badge.failed { background: #5A2E2E; color: #FCC; }
+.ntr-g-overlay td.ntr-g-clip { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ntr-g-overlay td.ntr-g-fixdiff { color: #9CD09C; }
+`;
+            document.head.appendChild(style);
+        };
+
+        const open = ({ title, note, rows, onApply }) => {
+            GlossaryUI.ensureStyles();
+            ensureStyles();
+            const old = document.getElementById('ntr-glossary-fix-overlay');
+            if (old) old.remove();
+            const list = rows || [];
+            const state = { selected: new Set(list.filter((r) => r.status === 'changed').map((r) => r.id)), busy: false };
+
+            const overlay = document.createElement('div');
+            overlay.id = 'ntr-glossary-fix-overlay';
+            overlay.className = 'ntr-g-overlay';
+            const card = document.createElement('div');
+            card.className = 'ntr-g-card';
+            overlay.appendChild(card);
+
+            const head = document.createElement('div');
+            head.className = 'ntr-g-head';
+            const titleEl = document.createElement('div');
+            titleEl.className = 'ntr-g-title';
+            titleEl.textContent = title;
+            const statsEl = document.createElement('div');
+            statsEl.className = 'ntr-g-stats';
+            head.appendChild(titleEl);
+            head.appendChild(statsEl);
+            if (note) {
+                const noteEl = document.createElement('div');
+                noteEl.className = 'ntr-g-warn';
+                noteEl.textContent = note;
+                head.appendChild(noteEl);
+            }
+            card.appendChild(head);
+
+            const toolbar = document.createElement('div');
+            toolbar.className = 'ntr-g-toolbar';
+            const mkBtn = (label, fn) => { const b = document.createElement('button'); b.className = 'ntr-g-btn'; b.textContent = label; b.onclick = fn; toolbar.appendChild(b); return b; };
+            mkBtn('全选可写回', () => { list.forEach((r) => { if (r.status === 'changed') state.selected.add(r.id); }); render(); });
+            mkBtn('全不选', () => { state.selected.clear(); render(); });
+            const applyBtn = mkBtn('写回选中', async () => {
+                if (state.busy) return;
+                const picked = list.filter((r) => state.selected.has(r.id) && r.status === 'changed');
+                if (picked.length === 0) { NotificationUtils.showWarning('没有勾选可写回的段落'); return; }
+                const chapterKeys = new Set(picked.map((r) => r.chapterKey || r.chapterTitle || ''));
+                if (!window.confirm(`将写回 ${picked.length} 个段落到 ${chapterKeys.size} 个章节，直接更新站点译文。\n建议先确认这里没有站上正在跑的任务。\n\n继续？`)) return;
+                state.busy = true; render();
+                try {
+                    const result = await onApply(picked.map((r) => r.id), (msg) => { const el = overlay.querySelector('#ntr-g-fix-progress'); if (el) el.textContent = msg; });
+                    const applied = new Set(result.appliedIds || []);
+                    const failedMap = new Map((result.failed || []).map((f) => [f.id, f.reason]));
+                    list.forEach((r) => {
+                        if (applied.has(r.id)) { r.status = 'applied'; state.selected.delete(r.id); }
+                        else if (failedMap.has(r.id)) { r.status = 'failed'; r.error = failedMap.get(r.id); state.selected.delete(r.id); }
+                    });
+                    const okCount = (result.appliedIds || []).length;
+                    const failCount = (result.failed || []).length;
+                    if (failCount === 0) NotificationUtils.showSuccess(`已写回 ${okCount} 个段落`);
+                    else NotificationUtils.showWarning(`写回完成：成功 ${okCount} / 失败 ${failCount}（失败项见状态列）`);
+                } catch (e) {
+                    NotificationUtils.showError(`写回失败：${(e && e.message) || e}`);
+                } finally {
+                    state.busy = false;
+                    render();
+                }
+            });
+            mkBtn('复制修正清单', () => GlossaryUI.copyText(list.filter((r) => r.status === 'changed' || r.status === 'applied').map((r) => `【${r.chapterTitle || ''}】\n${r.jp}\n- ${r.zh}\n+ ${r.after || ''}`).join('\n\n')));
+            const progressEl = document.createElement('span');
+            progressEl.id = 'ntr-g-fix-progress';
+            progressEl.className = 'ntr-g-warn';
+            toolbar.appendChild(progressEl);
+            card.appendChild(toolbar);
+
+            const body = document.createElement('div');
+            body.className = 'ntr-g-body';
+            card.appendChild(body);
+            const foot = document.createElement('div');
+            foot.className = 'ntr-g-foot';
+            const closeBtn = document.createElement('button');
+            closeBtn.className = 'ntr-g-btn primary';
+            closeBtn.textContent = '关闭';
+            closeBtn.onclick = () => overlay.remove();
+            foot.appendChild(closeBtn);
+            card.appendChild(foot);
+
+            const render = () => {
+                const by = (s) => list.filter((r) => r.status === s).length;
+                statsEl.textContent = `共 ${list.length} 段 · 可写回 ${by('changed')} · 已写回 ${by('applied')} · 无需修改 ${by('unchanged')} · 失败 ${by('failed')} · 已勾选 ${state.selected.size}`;
+                applyBtn.disabled = state.busy || state.selected.size === 0;
+                applyBtn.textContent = state.busy ? '写回中…' : `写回选中（${state.selected.size}）`;
+                body.innerHTML = '';
+                const table = document.createElement('table');
+                const thead = document.createElement('thead');
+                const hr = document.createElement('tr');
+                ['选', '状态', '章节', '原文', '现有译文', '修正后译文', '漏词'].forEach((h) => {
+                    const th = document.createElement('th');
+                    th.textContent = h;
+                    hr.appendChild(th);
+                });
+                thead.appendChild(hr);
+                table.appendChild(thead);
+                const tbody = document.createElement('tbody');
+                list.forEach((r) => {
+                    const tr = document.createElement('tr');
+                    tr.className = 'status-' + r.status;
+                    const pick = document.createElement('td');
+                    const box = document.createElement('input');
+                    box.type = 'checkbox';
+                    box.checked = state.selected.has(r.id);
+                    box.disabled = r.status !== 'changed' || state.busy;
+                    box.onchange = () => { if (box.checked) state.selected.add(r.id); else state.selected.delete(r.id); render(); };
+                    pick.appendChild(box);
+                    tr.appendChild(pick);
+                    const st = document.createElement('td');
+                    const badge = document.createElement('span');
+                    badge.className = 'ntr-g-badge ' + (STATUS_BADGE[r.status] || '');
+                    badge.textContent = STATUS_LABEL[r.status] || r.status;
+                    if (r.status === 'failed' && r.error) badge.title = r.error;
+                    st.appendChild(badge);
+                    tr.appendChild(st);
+                    const mkClip = (text, cls, titleText) => {
+                        const td = document.createElement('td');
+                        td.className = cls || 'ntr-g-clip';
+                        td.textContent = text || '';
+                        td.title = titleText || text || '';
+                        return td;
+                    };
+                    tr.appendChild(mkClip(r.chapterTitle || '', 'ntr-g-clip'));
+                    tr.appendChild(mkClip(r.jp));
+                    tr.appendChild(mkClip(r.zh));
+                    tr.appendChild(mkClip(r.after || '', 'ntr-g-clip ntr-g-fixdiff'));
+                    tr.appendChild(mkClip((r.missed || []).map((m) => `${m.src} => ${m.dst}`).join('；')));
+                    tbody.appendChild(tr);
+                });
+                table.appendChild(tbody);
+                body.appendChild(table);
+            };
+            render();
+            document.body.appendChild(overlay);
+            return { close: () => overlay.remove(), rows: () => list };
+        };
+
+        return { open };
+    })();
+    // ==GlossaryFix-END==
+
 
     // -----------------------------------
     // Glossary Queue (持久化任务队列：IDB jobs + chunks 分块缓存，刷新后可续跑)
@@ -5396,6 +6286,9 @@
                 'RPM': 0,
                 '逾时(秒)': 300,
                 '行数上限': 0,
+                '种子补漏': true,
+                '种子轮数': 3,
+                '证据核实': true,
                 '翻译器': '',
                 '使用临时端点': false,
                 '临时端点': '',
@@ -5411,6 +6304,9 @@
                 rpm: Math.max(0, Number(o['RPM']) || 0),
                 timeoutMs: Math.max(5, Number(o['逾时(秒)']) || 300) * 1000,
                 maxLines: Number(o['行数上限']) || 0,
+                seedPolish: o['种子补漏'] !== false,
+                maxSeedRounds: Math.max(1, Number(o['种子轮数']) || 3),
+                verify: o['证据核实'] !== false,
                 workerId: o['翻译器'] || '',
                 testEndpoint: o['使用临时端点'] ? (o['临时端点'] || '') : '',
                 testModel: o['临时模型'] || '',
@@ -5710,6 +6606,9 @@
                         maxRounds: options.maxRounds,
                         concurrency: options.concurrency,
                         targetLanguage: '中文',
+                        seedPolish: options.seedPolish !== false,
+                        maxSeedRounds: Math.max(1, Number(options.maxSeedRounds) || 3),
+                        seedLedger: job.seedLedger || undefined,
                     },
                     shouldStop: () => stopRequested,
                     cache: {
@@ -5722,9 +6621,10 @@
                         const prev = job.progress || {};
                         // 收尾报告里 round 已经 +1，别把它当成"换了新的一轮"
                         const isDone = p.phase === 'done';
-                        const roundChanged = !isDone && prev.round !== p.round;
+                        const isSeedPhase = String(p.phase || '').startsWith('seed-');
+                        const roundChanged = !isDone && !isSeedPhase && prev.round !== p.round;
                         // 缓存命中是瞬时的：不参与计时（否则速度会被算得虚高），但不算"没完成"
-                        const cachedReplay = p.phase === 'chunk-cached';
+                        const cachedReplay = p.phase === 'chunk-cached' || p.phase === 'seed-chunk-cached';
                         const timerReset = !isDone && (cachedReplay || p.phase === 'round-start' || roundChanged);
                         const roundStartedAt = timerReset ? Date.now() : (prev.roundStartedAt || Date.now());
                         const timerBase = timerReset ? (p.chunksDone || 0) : (prev.timerBase || 0);
@@ -5762,8 +6662,40 @@
                 // 只补未覆盖的行 → 结果要和已有条目合并：
                 // 已有 src 保留（那部分正文没重跑），新补的条目按全书正文重新计数
                 // （引擎只在"本次要跑的行"上统计次数，补跑会让次数偏小）
+                // 证据化核实（可选）：只核实本次新提取的条目（已有条目在历史轮次核实过）
+                let newEntries = result.glossary;
+                let verifyStats = null;
+                if (options.verify !== false && !stopRequested && newEntries.length > 0) {
+                    verifyStats = await GlossaryEngine.verifyEntries({
+                        entries: newEntries,
+                        lines,
+                        call: (messages) => requester.call(messages),
+                        concurrency: options.concurrency,
+                        shouldStop: () => stopRequested,
+                        onProgress: (p) => GlossaryLog.debug('核实进度', p),
+                    });
+                    newEntries = verifyStats.entries.map((e) => (e.verifyDrop
+                        ? { ...e, suspect: [...(e.suspect || []), `核实建议剔除${e.verified && e.verified.reason ? `：${e.verified.reason}` : ''}`] }
+                        : e));
+                    GlossaryLog.info('证据核实', {
+                        id: job.id, checked: verifyStats.checked, kept: verifyStats.kept,
+                        dropped: verifyStats.dropped, invalid: verifyStats.invalid, failedBatches: verifyStats.failedBatches,
+                    });
+                }
+                job.seedLedger = result.seedLedger || null;
+                job.boost = {
+                    seedRounds: result.seedRounds || 0,
+                    seedChunks: result.polishChunks || 0,
+                    seedFailed: result.seedChunksFailed || 0,
+                    verifyDrops: verifyStats ? verifyStats.dropped : 0,
+                    verifyFailedBatches: verifyStats ? verifyStats.failedBatches : 0,
+                };
+
+                // 只补未覆盖的行 → 结果要和已有条目合并：
+                // 已有 src 保留（那部分正文没重跑），新补的条目按全书正文重新计数
+                // （引擎只在"本次要跑的行"上统计次数，补跑会让次数偏小）
                 let merged = prevEntries.slice();
-                const added = result.glossary.filter((e) => !merged.some((prev) => prev.src === e.src));
+                const added = newEntries.filter((e) => !merged.some((prev) => prev.src === e.src));
                 if (added.length > 0) merged = merged.concat(added);
                 if (merged.length > 0) merged = GlossaryEngine.searchForContext(merged, lines);
 
@@ -5796,13 +6728,26 @@
                     let autoWritten = false;
                     if (qs['自动确认纯新增']) {
                         const existing = await GlossaryTargets.loadGlossary(job.target);
-                        const { stats } = GlossaryUI.computeDiff(merged, existing);
-                        if (stats.conflict === 0 && stats.same === 0 && stats.add > 0) {
-                            const picked = merged.filter((e) => !e.partial).map((e) => ({ src: e.src, dst: e.dst, type: e.type }));
+                        // 核实建议剔除的条目不参与自动写入（保留在任务里供人工复核）
+                        const candidates = merged.filter((e) => !e.verifyDrop);
+                        const verifyDropped = merged.length - candidates.length;
+                        const { stats } = GlossaryUI.computeDiff(candidates, existing);
+                        // 指南门槛：全部条目通过零成本检查（无形态可疑、非改原文）才允许免审写入；否则留在「待确认」
+                        const guideBlocked = candidates.filter((e) => e.partial
+                            || GlossaryEngine.suspectReasons(e.src).length > 0
+                            || GlossaryEngine.looksLikeSourceTampering(e.src));
+                        if (stats.conflict === 0 && stats.same === 0 && stats.add > 0 && guideBlocked.length === 0) {
+                            const picked = candidates.filter((e) => !e.partial).map((e) => ({ src: e.src, dst: e.dst, type: e.type }));
                             if (picked.length > 0) {
                                 await writeGlossaryMerged(job.target, picked);
                                 autoWritten = true;
+                                if (verifyDropped > 0) GlossaryLog.info('自动确认：核实剔除条目不写入', { id: job.id, dropped: verifyDropped });
                             }
+                        } else if (guideBlocked.length > 0) {
+                            GlossaryLog.info('自动确认被指南门槛拦下，转人工确认', {
+                                id: job.id, blocked: guideBlocked.length,
+                                samples: guideBlocked.slice(0, 5).map((e) => e.src),
+                            });
                         }
                     }
                     job.state = autoWritten ? 'done' : 'review';
@@ -5880,6 +6825,8 @@
             job.resultCount = 0;
             job.progress = null;
             job.everFailed = false;
+            job.seedLedger = null;   // 重跑 = 全部重来：种子账本一并清空
+            job.boost = null;
             job.state = 'pending';
             job.error = null;
             await put(job);
@@ -7666,6 +8613,15 @@
         parseGlossaryText,
         parseGlossaryEntries,
         syncWorkspaceTranslators,
+        GlossaryReport,
+        GlossaryFix,
+        loadGlossaryParallelText,
+        loadGlossaryAlignedPairs,
+        writeBackChapterFixes,
+        deriveSeeds: GlossaryEngine.deriveSeeds,
+        buildSeedChunks: GlossaryEngine.buildSeedChunks,
+        deriveCommonLiteralRoots: GlossaryEngine.deriveCommonLiteralRoots,
+        verifyRootCoverage: GlossaryEngine.verifyRootCoverage,
     };
     // 队列自动续跑（含刷新后接管中断任务）
     GlossaryQueue.init(script);
