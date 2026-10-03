@@ -1269,6 +1269,37 @@
         },
     };
 
+    // 同步 Daemon：把站点凭据（auth-v2 token）与工作区 GPT 翻译器配置推给本地 daemon
+    // （daemon 用它们调站点 API 与 LLM；token 短时效，这里随时可重新同步）
+    const moduleDaemonSync = {
+        name: '同步 Daemon',
+        type: 'onclick',
+        whitelist: ['/novel', '/wenku', '/favorite', '/workspace'],
+        settings: [
+            newStringSetting('Daemon 地址', 'http://127.0.0.1:7331'),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg) {
+            const base = (getModuleSetting(cfg, 'Daemon 地址') || '').trim().replace(/\/$/, '');
+            if (!base) { NotificationUtils.showError('未配置 Daemon 地址（如 http://127.0.0.1:7331）'); return; }
+            let token = '';
+            try { token = (JSON.parse(localStorage.getItem('auth-v2')) || {}).token || ''; } catch (e) { }
+            if (!token) { NotificationUtils.showError('读不到站点凭据（auth-v2）：请先在站点登录'); return; }
+            const workers = readWorkspaceGptWorkers();
+            try {
+                const res = await fetch(`${base}/auth`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token, workers, origin: window.location.origin }),
+                });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                NotificationUtils.showSuccess(`已同步到 Daemon：凭据 + ${workers.length} 个翻译器`);
+            } catch (e) {
+                NotificationUtils.showError(`同步失败：${(e && e.message) || e}（daemon 是否在跑？node daemon/index.mjs serve）`);
+            }
+        },
+    };
+
     const moduleGlossaryRollback = {
         name: '回滚术语表',
         type: 'onclick',
@@ -1566,6 +1597,7 @@
         moduleGlossaryRollback,
         moduleGlossaryQueue,
         moduleCopyWorkersToBeta,
+        moduleDaemonSync,
         moduleWorkspaceSync,
         moduleSyncStorage,
     ];

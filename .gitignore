@@ -28,3 +28,8 @@ queue-translator-open.png
 
 # 第三方小说正文夹具（.verify-search-real.mjs 用），仅本地保留、不入公开库
 tools/.sakura-real-jp.txt
+
+# daemon 运行产物（生成物与本地库不入库）
+daemon/.engine.mjs
+daemon/*.db
+daemon/*.db-*

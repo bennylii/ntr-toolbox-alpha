@@ -180,6 +180,23 @@ function decideFault(url, headers) {
 
 let stats = { requests: 0, byMode: {}, entries: 0, inflightNow: 0, maxInflight: 0, jobsNow: 0, maxJobs: 0, busyRejects: 0, startedAt: Date.now() };
 
+// 翻译 worker 用例的假站点状态（模块级：跨请求持久）：
+// - 章节 t1/t2/t3（或 -r 系列的 r1/r2/r3）；预置 t3 = 已用当前术语表翻译（应被跳过）
+// - 上传会把章节标记为「已用当前术语表」，重跑即跳过；换一个 novelId 即全新状态
+const TRANS_GLOSSARY_ID = 'g-current';
+const transStates = new Map();
+const transBook = (novelId) => {
+  if (!transStates.has(novelId)) {
+    const state = new Map();
+    if (!/-r/.test(novelId)) state.set('t3', TRANS_GLOSSARY_ID);
+    transStates.set(novelId, state);
+  }
+  return transStates.get(novelId);
+};
+const transChapters = (novelId) => (/-r/.test(novelId) ? ['r1', 'r2', 'r3'] : ['t1', 't2', 't3']);
+const transParagraphCount = (chapterId) => (chapterId.endsWith('1') ? 6 : chapterId.endsWith('2') ? 4 : 2);
+const transParagraphs = (chapterId) => Array.from({ length: transParagraphCount(chapterId) }, (_, i) => `第${i + 1}行：アリスが魔導書を読む。`);
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || HOST}`);
   const headers = req.headers;
@@ -226,12 +243,63 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 翻译 worker 用例：mock-trans* 家族的 translate-v2 契约（web 版：POST chapter-task / POST chapter 上传）
+  if (req.method === 'POST' && url.pathname.startsWith('/api/') && /\/translate-v2\//.test(url.pathname)) {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    let body = {};
+    try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { /* ignore */ }
+    res.writeHead(200, { ...cors, 'content-type': 'application/json', 'cache-control': 'no-store' });
+    const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || 'mock-trans';
+    const state = transBook(novelId);
+    if (/\/chapter-task\//.test(url.pathname)) {
+      const chapterId = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
+      const done = state.get(chapterId);
+      const paragraphs = transParagraphs(chapterId);
+      res.end(JSON.stringify({
+        paragraphJp: paragraphs,
+        oldParagraphZh: done ? paragraphs.map((_, i) => `【已译】第${i + 1}行`) : null,
+        glossaryId: TRANS_GLOSSARY_ID,
+        glossary: {},
+        oldGlossaryId: done || null,
+        oldGlossary: {},
+      }));
+      return;
+    }
+    if (/\/chapter\//.test(url.pathname)) {
+      const chapterId = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
+      state.set(chapterId, body.glossaryId || TRANS_GLOSSARY_ID);
+      stats.lastChapterUpload = {
+        path: url.pathname,
+        chapterId,
+        glossaryId: body.glossaryId,
+        count: Array.isArray(body.paragraphsZh) ? body.paragraphsZh.length : 0,
+        preview: Array.isArray(body.paragraphsZh) ? body.paragraphsZh.slice(0, 2) : [],
+      };
+      res.end(JSON.stringify({ jp: 1, zh: 1 }));
+      return;
+    }
+    res.end('{}');
+    return;
+  }
+
   // 离线 e2e 用：站点的小说 DTO 假数据（读术语表走这里）。只处理 GET，写入永远不落到这里。
   // 特例：novelId = mock-src 的文库书带「一卷一章」的假正文（针对取文链路/队列跑的用例），别的仍是空 DTO
   if (req.method === 'GET' && /^\/api\/(novel|wenku)\//.test(url.pathname)) {
     const segs = url.pathname.split('/').filter(Boolean);
     const rich = /mock-src/.test(url.pathname);
+    const trans = /mock-trans/.test(url.pathname);
     res.writeHead(200, { ...cors, 'content-type': 'application/json', 'cache-control': 'no-store' });
+    if (trans && /\/translate-v2\//.test(url.pathname)) {
+      const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || 'mock-trans';
+      const state = transBook(novelId);
+      res.end(JSON.stringify({
+        toc: transChapters(novelId).map((chapterId) => ({ chapterId, titleJp: `章 ${chapterId}`, glossaryUuid: state.get(chapterId) || undefined })),
+        glossaryUuid: TRANS_GLOSSARY_ID,
+        glossary: {},
+      }));
+      return;
+    }
     if (rich && /\/chapter-task\//.test(url.pathname)) {
       const ch = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
       const n = ch === 'ch2' ? 12 : 25;
@@ -333,6 +401,18 @@ const server = http.createServer(async (req, res) => {
     choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content } }],
     usage: { prompt_tokens: Math.ceil(clip.length / 1.5), completion_tokens: content.length, total_tokens: 0 },
   });
+
+  // 翻译 worker 用例：翻译提示词分支（镜像站点协议：输入 "#n:原文" 行，输出等量 "#n:译文" 行）
+  if (userContent.includes('你是一个轻小说翻译者') || userContent.includes('注意要保留每一段开头的编号')) {
+    const numbered = [...userContent.matchAll(/^#(\d+)[:：](.*)$/gm)].map((m) => ({ id: Number(m[1]), text: m[2] }));
+    const glossaryLines = [...userContent.matchAll(/^.+ => .+$/gm)].length;
+    stats.lastTranslate = { lines: numbered.length, glossaryLines };
+    const out = numbered.length > 0
+      ? numbered.map((line) => `#${line.id}:【模拟译】第${line.id}段：这是由本地模拟端点生成的译文。`)
+      : ['#1:【模拟译】这是由本地模拟端点生成的译文。'];
+    sendJson(200, okBody(out.join('\n')));
+    return;
+  }
 
   // 单槽位上游：一个任务占槽期间，新请求直接 429"busy"（模拟浏览器 UI 中继 / 单并发本地模型）
   // 槽位按"任务工时"（slow 毫秒）计时：即使客户端提前超时放弃，槽位仍被继续占用——真实上游的活不会因客户端断开而停止
