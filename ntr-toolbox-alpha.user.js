@@ -6213,22 +6213,22 @@
         }
 
         pollKeepModules() {
-            this.configuration.modules.forEach((mod) => {
-                if (mod.type === 'keep' && this.keepActiveSet.has(mod.name) && typeof mod.run === 'function') {
-                    mod.run(mod);
-                }
-            });
+            for (const mod of this.configuration.modules) {
+                if (mod.type !== 'keep') continue;
+                if (!this.keepActiveSet.has(mod.name)) continue;
+                if (typeof mod.run !== 'function') continue;
+                mod.run(mod);
+            }
         }
 
         // 自动化入口：绕过域门槛与白名单，按名直接执行
         runModule(name) {
-            this.configuration.modules
-                .filter((mod) => mod.name == name)
-                .forEach((mod) => {
-                    if (typeof mod.run === 'function') {
-                        mod.run(mod, true);
-                    }
-                });
+            for (const mod of this.configuration.modules) {
+                if (mod.name != name) continue;
+                if (typeof mod.run === 'function') {
+                    mod.run(mod, true);
+                }
+            }
         }
 
         updateModuleVisibility() {
@@ -6254,6 +6254,15 @@
             };
         }
 
+        // 登录后各角在最小化时的回位坐标：取当前面板 rect 与登记时的锚点，
+        // 返回"贴回原角"之后的 [left, top]（px 数值）
+        static CORNER_PLACEMENTS = {
+            'top-left': (rect, anchor) => [anchor.x, anchor.y],
+            'top-right': (rect, anchor) => [anchor.x - rect.width, anchor.y],
+            'bottom-left': (rect, anchor) => [anchor.x, anchor.y - rect.height],
+            'bottom-right': (rect, anchor) => [anchor.x - rect.width, anchor.y - rect.height],
+        };
+
         setMinimizedState(newVal) {
             if (this.isMinimized === newVal) return;
             const anchor = this.getAnchorCornerInfo(this.panel.getBoundingClientRect());
@@ -6271,33 +6280,15 @@
                 this.infoBar.style.display = 'flex';
             }
 
-            // 等 310ms（transition 收尾）再按锚角把面板贴回原来的角，夹紧视口并持久化
+            // 等 310ms（transition 收尾）再按登记的锚角回位：查表得目标坐标，夹进视口并落盘
             setTimeout(() => {
                 const newRect = this.panel.getBoundingClientRect();
-                let left, top;
-                switch (anchor.corner) {
-                    case 'top-left':
-                        left = anchor.x;
-                        top = anchor.y;
-                        break;
-                    case 'top-right':
-                        left = anchor.x - newRect.width;
-                        top = anchor.y;
-                        break;
-                    case 'bottom-left':
-                        left = anchor.x;
-                        top = anchor.y - newRect.height;
-                        break;
-                    case 'bottom-right':
-                        left = anchor.x - newRect.width;
-                        top = anchor.y - newRect.height;
-                        break;
-                    default:
-                        left = parseFloat(this.panel.style.left) || newRect.left;
-                        top = parseFloat(this.panel.style.top) || newRect.top;
-                }
-                left = Math.min(Math.max(left, 0), window.innerWidth - newRect.width);
-                top = Math.min(Math.max(top, 0), window.innerHeight - newRect.height);
+                const place = NTRToolBox.CORNER_PLACEMENTS[anchor.corner];
+                const [rawLeft, rawTop] = place
+                    ? place(newRect, anchor)
+                    : [parseFloat(this.panel.style.left) || newRect.left, parseFloat(this.panel.style.top) || newRect.top];
+                const left = Math.min(Math.max(rawLeft, 0), window.innerWidth - newRect.width);
+                const top = Math.min(Math.max(rawTop, 0), window.innerHeight - newRect.height);
                 this.panel.style.left = left + 'px';
                 this.panel.style.top = top + 'px';
                 localStorage.setItem('ntr-panel-position', JSON.stringify({
@@ -6323,7 +6314,8 @@
         }
 
         delay(ms) {
-            return new Promise((r) => setTimeout(r, ms));
+            // keep 型模块的轮内等待（自动重试的轮间隙等）：到点再继续
+            return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
         }
     }
 
