@@ -33,3 +33,7 @@ tools/.sakura-real-jp.txt
 daemon/.engine.mjs
 daemon/*.db
 daemon/*.db-*
+
+# A/B 度量工具的草稿产物
+tools/.ab-report.json
+tools/.ab-fixture.txt
