@@ -9,7 +9,7 @@ const CORS = {
   'Access-Control-Max-Age': '600',
 };
 
-export function startServer({ store, pipeline, port = 7331, log = console }) {
+export function startServer({ store, pipeline, glossaryPipeline, port = 7331, log = console }) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
     const send = (code, obj) => { res.writeHead(code, { ...CORS, 'content-type': 'application/json' }); res.end(JSON.stringify(obj, null, 2)); };
@@ -33,6 +33,10 @@ export function startServer({ store, pipeline, port = 7331, log = console }) {
         send(200, { ok: true, progress: store.listProgress(url.searchParams.get('book') || '') });
         return;
       }
+      if (req.method === 'GET' && url.pathname === '/proposals') {
+        send(200, { ok: true, proposals: store.listProposals(url.searchParams.get('book')) });
+        return;
+      }
       if (req.method === 'POST' && url.pathname === '/auth') {
         const chunks = [];
         for await (const c of req) chunks.push(c);
@@ -49,9 +53,15 @@ export function startServer({ store, pipeline, port = 7331, log = console }) {
         for await (const c of req) chunks.push(c);
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
         if (!body.bookKey) { send(400, { ok: false, error: '缺少 bookKey' }); return; }
-        if (body.level) pipeline.options.level = body.level;
-        pipeline.runBook(body.bookKey).catch((e) => log.log(`[run] ${body.bookKey} 失败: ${(e && e.message) || e}`));
-        send(202, { ok: true, accepted: true, bookKey: body.bookKey });
+        const job = body.job === 'glossary' ? 'glossary' : 'translate';
+        if (job === 'glossary') {
+          if (!glossaryPipeline) { send(400, { ok: false, error: '术语管线未装配' }); return; }
+          glossaryPipeline.runBook(body.bookKey).catch((e) => log.log(`[run] ${body.bookKey} 失败: ${(e && e.message) || e}`));
+        } else {
+          if (body.level) pipeline.options.level = body.level;
+          pipeline.runBook(body.bookKey).catch((e) => log.log(`[run] ${body.bookKey} 失败: ${(e && e.message) || e}`));
+        }
+        send(202, { ok: true, accepted: true, bookKey: body.bookKey, job });
         return;
       }
       send(404, { ok: false, error: `not found: ${url.pathname}` });

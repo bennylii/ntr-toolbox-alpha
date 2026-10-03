@@ -5,7 +5,8 @@ import { DatabaseSync } from 'node:sqlite';
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS books (
   key TEXT PRIMARY KEY, kind TEXT, providerId TEXT, novelId TEXT, origin TEXT,
-  title TEXT, sourceLanguage TEXT DEFAULT 'JA', state TEXT DEFAULT 'idle', lastRunAt INTEGER
+  title TEXT, sourceLanguage TEXT DEFAULT 'JA',
+  lastTextHash TEXT, state TEXT DEFAULT 'idle', lastRunAt INTEGER
 );
 CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, bookKey TEXT, job TEXT, startedAt INTEGER,
@@ -18,6 +19,15 @@ CREATE TABLE IF NOT EXISTS progress (
 CREATE TABLE IF NOT EXISTS segcache (
   bookKey TEXT, segKey TEXT, zhJson TEXT, updateAt INTEGER,
   PRIMARY KEY (bookKey, segKey)
+);
+CREATE TABLE IF NOT EXISTS chunks (
+  bookKey TEXT, id TEXT, json TEXT, PRIMARY KEY (bookKey, id)
+);
+CREATE TABLE IF NOT EXISTS ledger (bookKey TEXT PRIMARY KEY, json TEXT, updateAt INTEGER);
+CREATE TABLE IF NOT EXISTS snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, bookKey TEXT, at INTEGER, glossaryJson TEXT, note TEXT);
+CREATE TABLE IF NOT EXISTS proposals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, bookKey TEXT, at INTEGER, kind TEXT,
+  entriesJson TEXT, note TEXT, status TEXT DEFAULT 'open'
 );
 CREATE TABLE IF NOT EXISTS metrics (ts INTEGER PRIMARY KEY, rss REAL, heap REAL);
 CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT);
@@ -54,12 +64,15 @@ export class Store {
   getBook(key) { return this.db.prepare('SELECT * FROM books WHERE key = ?').get(key) || null; }
   listBooks() { return this.db.prepare('SELECT * FROM books ORDER BY key').all(); }
   setBookTitle(key, title) { this.db.prepare('UPDATE books SET title = ? WHERE key = ?').run(title, key); }
+  setTextHash(key, hash) { this.db.prepare('UPDATE books SET lastTextHash = ? WHERE key = ?').run(hash, key); }
   setBookState(key, state) { this.db.prepare('UPDATE books SET state = ?, lastRunAt = ? WHERE key = ?').run(state, Date.now(), key); }
   forgetBook(key) {
     for (const sql of [
       'DELETE FROM books WHERE key = ?',
       'DELETE FROM progress WHERE bookKey = ?',
       'DELETE FROM segcache WHERE bookKey = ?',
+      'DELETE FROM chunks WHERE bookKey = ?',
+      'DELETE FROM ledger WHERE bookKey = ?',
       'DELETE FROM locks WHERE bookKey = ?',
     ]) this.db.prepare(sql).run(key);
   }
@@ -88,6 +101,57 @@ export class Store {
       .run(bookKey, segKey, JSON.stringify(zhLines), Date.now());
   }
   segCount(bookKey) { return this.db.prepare('SELECT COUNT(*) c FROM segcache WHERE bookKey = ?').get(bookKey).c; }
+
+  // ---- 分块缓存（daemon 侧断点续跑） ----
+  getChunk(bookKey, id) {
+    const row = this.db.prepare('SELECT json FROM chunks WHERE bookKey = ? AND id = ?').get(bookKey, id);
+    return row ? JSON.parse(row.json) : undefined;
+  }
+  putChunk(bookKey, id, value) {
+    this.db.prepare('INSERT INTO chunks(bookKey, id, json) VALUES(?, ?, ?) ON CONFLICT(bookKey, id) DO UPDATE SET json = excluded.json')
+      .run(bookKey, id, JSON.stringify(value));
+  }
+  chunkCount(bookKey) { return this.db.prepare('SELECT COUNT(*) c FROM chunks WHERE bookKey = ?').get(bookKey).c; }
+
+  // ---- 种子账本 ----
+  getLedger(bookKey) {
+    const row = this.db.prepare('SELECT json FROM ledger WHERE bookKey = ?').get(bookKey);
+    return row ? JSON.parse(row.json) : null;
+  }
+  setLedger(bookKey, ledger) {
+    this.db.prepare('INSERT INTO ledger(bookKey, json, updateAt) VALUES(?, ?, ?) ON CONFLICT(bookKey) DO UPDATE SET json = excluded.json, updateAt = excluded.updateAt')
+      .run(bookKey, JSON.stringify(ledger), Date.now());
+  }
+
+  // ---- 快照（写回前自动留存，回滚用） ----
+  addSnapshot(bookKey, glossary, note) {
+    const r = this.db.prepare('INSERT INTO snapshots(bookKey, at, glossaryJson, note) VALUES(?, ?, ?, ?)')
+      .run(bookKey, Date.now(), JSON.stringify(glossary), note || '');
+    return Number(r.lastInsertRowid);
+  }
+  listSnapshots(bookKey) {
+    return this.db.prepare('SELECT id, at, note FROM snapshots WHERE bookKey = ? ORDER BY id DESC').all(bookKey);
+  }
+  getSnapshot(id) {
+    const row = this.db.prepare('SELECT * FROM snapshots WHERE id = ?').get(id);
+    return row ? { ...row, glossary: JSON.parse(row.glossaryJson) } : null;
+  }
+
+  // ---- 提案（未达标条目：人工复核通道） ----
+  addProposal({ bookKey, kind, entries, note }) {
+    const r = this.db.prepare('INSERT INTO proposals(bookKey, at, kind, entriesJson, note) VALUES(?, ?, ?, ?, ?)')
+      .run(bookKey, Date.now(), kind || 'glossary', JSON.stringify(entries || []), note || '');
+    return Number(r.lastInsertRowid);
+  }
+  listProposals(bookKey) {
+    const rows = bookKey
+      ? this.db.prepare("SELECT * FROM proposals WHERE bookKey = ? ORDER BY id DESC LIMIT 50").all(bookKey)
+      : this.db.prepare("SELECT * FROM proposals ORDER BY id DESC LIMIT 50").all();
+    return rows.map((r) => ({ ...r, entries: JSON.parse(r.entriesJson || '[]') }));
+  }
+  closeProposal(id) {
+    this.db.prepare("UPDATE proposals SET status = 'closed' WHERE id = ?").run(id);
+  }
 
   // ---- runs / metrics ----
   startRun(bookKey, job) {

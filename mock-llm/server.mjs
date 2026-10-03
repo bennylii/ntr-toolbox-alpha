@@ -188,12 +188,12 @@ const transStates = new Map();
 const transBook = (novelId) => {
   if (!transStates.has(novelId)) {
     const state = new Map();
-    if (!/-r/.test(novelId)) state.set('t3', TRANS_GLOSSARY_ID);
+    if (!/mock-trans-r/.test(novelId)) state.set('t3', TRANS_GLOSSARY_ID);
     transStates.set(novelId, state);
   }
   return transStates.get(novelId);
 };
-const transChapters = (novelId) => (/-r/.test(novelId) ? ['r1', 'r2', 'r3'] : ['t1', 't2', 't3']);
+const transChapters = (novelId) => (/mock-trans-r/.test(novelId) ? ['r1', 'r2', 'r3'] : ['t1', 't2', 't3']);
 const transParagraphCount = (chapterId) => (chapterId.endsWith('1') ? 6 : chapterId.endsWith('2') ? 4 : 2);
 const transParagraphs = (chapterId) => Array.from({ length: transParagraphCount(chapterId) }, (_, i) => `第${i + 1}行：アリスが魔導書を読む。`);
 
