@@ -23,7 +23,7 @@ node daemon/index.mjs prompt    show|set|clear               # 提示词模板�
 node daemon/index.mjs glossary-io import|export              # LG 术语表互通（JSON；写站点=快照+回读校验）
 node daemon/index.mjs translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 node daemon/index.mjs watch     [--interval 30]    # 常驻：定期按 expire 档补翻
-node daemon/index.mjs serve     [--port 7331]      # 控制面 /status /runs /progress /proposals /auth /run（/run 单队列串行）
+node daemon/index.mjs serve     [--port 7331]      # 控制台 /ui + 控制面 /status /runs /auth /run …（/run 单队列串行）
 node daemon/index.mjs status
 node daemon/index.mjs forget    <bookKey>
 ```
@@ -31,6 +31,19 @@ node daemon/index.mjs forget    <bookKey>
 全局旗标（调度器，见下节）：`--max-in-flight N`、`--rpm N`、`--transport-retries N`、`--max-prompt-chars N`、`--strict-prompt`。
 
 典型流程：`serve`（或 `watch`）常驻 → 浏览器点「同步 Daemon」推凭据与翻译器 → `add` 登记书 → `translate`。
+
+## 控制台（设置 GUI）
+
+`node daemon/index.mjs serve` 后打开 <http://127.0.0.1:7331/ui>：
+
+- **任务**：选书派发 `translate / glossary / check`（档位、限章数、提案开关），查看队列与最近 run；
+- **设置**：调度器参数（maxInFlight / rpm / 传输重试 / 提示词上限 / strict）保存后立即生效；站点 origin；凭据与翻译器状态（推送仍在站点页面点「同步 Daemon」）；
+- **规则**：pre/post 替换、保留段的增删启停；
+- **提示词**：按书/全局编辑四槽（base 必须含 `{format_rules}`，空槽=默认）；
+- **书籍**：URL 登记 / 忘记；
+- **状态**：llm 统计（并发峰值/冷却/重试）、用量、RSS 采样。
+
+安全：跨域仅放行 `n.novelia.cc` 与 `127.0.0.1/localhost`（其它 Origin 的写请求与预检直接 403）；服务只监听 127.0.0.1。
 
 ## 调度与限流（默认单线程，适配 Gemini 逆向 / 单槽上游）
 

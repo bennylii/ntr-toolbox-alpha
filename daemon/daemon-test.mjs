@@ -369,6 +369,78 @@ await t('export：现术语表 → LG JSON，往返导入 diff 为空', async ()
   assert.equal(plan.additions.length + plan.updates.length, 0, JSON.stringify(plan));
 });
 
+console.log('== 控制台 GUI（/ui + 设置/规则/提示词/书籍 CRUD + CORS 白名单） ==');
+await t('/ui 返回页面；设置读写热更新调度器', async () => {
+  const sch = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW('u1', 'uk1')], maxInFlight: 1 } });
+  const server = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline: null, checkPipeline: null, scheduler: sch, port: 7348, log: quiet });
+  try {
+    const ui = await fetch('http://127.0.0.1:7348/ui');
+    assert.equal(ui.status, 200);
+    assert.ok((await ui.text()).includes('NTR Daemon'), '页面内容');
+    const settings = await fetch('http://127.0.0.1:7348/settings').then((r) => r.json());
+    assert.equal(settings.ok, true);
+    assert.ok(Array.isArray(settings.settings.workers) && settings.settings.workers[0].key.includes('…'), JSON.stringify(settings.settings.workers));
+    const saved = await fetch('http://127.0.0.1:7348/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ llm: { maxInFlight: 3, transportRetries: 2, maxPromptChars: 9000, strictPrompt: false, rpm: 0 } }),
+    }).then((r) => r.json());
+    assert.equal(saved.ok, true);
+    assert.equal(sch.stats().maxInFlight, 3, '调度器热更新');
+    assert.equal(store.getConfig('llm').maxPromptChars, 9000);
+  } finally { server.close(); }
+});
+await t('规则 / 提示词 / 书籍 的 HTTP CRUD', async () => {
+  const server = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline: null, checkPipeline: null, scheduler: null, port: 7349, log: quiet });
+  const base = 'http://127.0.0.1:7349';
+  const post = (path, body) => fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
+  try {
+    const added = await post('/rules', { action: 'add', kind: 'post_replacement', pattern: 'GUI_X', replacement: 'GUI_Y' });
+    assert.ok(added.id > 0);
+    let rules = (await fetch(base + '/rules').then((r) => r.json())).rules;
+    assert.ok(rules.some((x) => x.id === added.id && x.enabled === 1));
+    await post('/rules', { action: 'toggle', id: added.id, enabled: false });
+    rules = (await fetch(base + '/rules').then((r) => r.json())).rules;
+    assert.equal(rules.find((x) => x.id === added.id).enabled, 0);
+    await post('/rules', { action: 'delete', id: added.id });
+    rules = (await fetch(base + '/rules').then((r) => r.json())).rules;
+    assert.ok(!rules.some((x) => x.id === added.id));
+
+    await post('/prompts', { bookKey: '', slot: 'base', text: '界面风格。{format_rules}' });
+    const prompts = await fetch(base + '/prompts?book=').then((r) => r.json());
+    assert.ok(prompts.rows.some((x) => x.slot === 'base' && x.text.includes('界面风格')));
+    assert.ok(prompts.formatRules && prompts.defaults.base.includes('{format_rules}'));
+    await post('/prompts', { action: 'clear', bookKey: '', slot: 'base' });
+    assert.ok(!(await fetch(base + '/prompts?book=').then((r) => r.json())).rows.some((x) => x.slot === 'base'));
+
+    const bad = await post('/prompts', { bookKey: '', slot: 'nope', text: 'x' });
+    assert.equal(bad.ok, false, '非法 slot 拒绝');
+
+    const bookAdded = await post('/books', { action: 'add', url: 'https://n.novelia.cc/novel/syosetu/n0000gui' });
+    assert.equal(bookAdded.key, 'web:syosetu/n0000gui');
+    assert.ok(store.getBook('web:syosetu/n0000gui'), '登记落库');
+    await post('/books', { action: 'forget', key: 'web:syosetu/n0000gui' });
+    assert.equal(store.getBook('web:syosetu/n0000gui'), null, '忘记生效');
+  } finally { server.close(); }
+});
+await t('CORS 白名单：站点/本机放行，其它 Origin 的写请求 403', async () => {
+  const server = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline: null, checkPipeline: null, scheduler: null, port: 7350, log: quiet });
+  const base = 'http://127.0.0.1:7350';
+  try {
+    const allowed = await fetch(base + '/settings', { headers: { Origin: 'https://n.novelia.cc' } });
+    assert.equal(allowed.headers.get('access-control-allow-origin'), 'https://n.novelia.cc');
+    const denied = await fetch(base + '/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example' }, body: '{}',
+    });
+    assert.equal(denied.status, 403, JSON.stringify(await denied.json()));
+    const pre = await fetch(base + '/run', {
+      method: 'OPTIONS', headers: { Origin: 'https://evil.example', 'Access-Control-Request-Method': 'POST' },
+    });
+    assert.equal(pre.status, 403);
+    const okRead = await fetch(base + '/ui');
+    assert.equal(okRead.status, 200, '同源/无 Origin 直连不受影响');
+  } finally { server.close(); }
+});
+
 console.log('== 控制面 ==');
 await t('server：/status 有书与进度、/auth 更新凭据', async () => {
   const server = await startServer({ store, pipeline: mkPipeline({}), port: 7342, log: { log: () => { }, error: () => { } } });

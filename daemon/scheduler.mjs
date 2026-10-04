@@ -84,6 +84,20 @@ export class LlmScheduler {
     this._index = -1;
   }
 
+  // 运行中热更新参数（GUI/控制面用）：maxInFlight 变化会即时调整许可池
+  setOptions(partial = {}) {
+    this.options = { ...this.options, ...partial };
+    if (partial.maxInFlight !== undefined) {
+      const max = Math.max(1, Number(this.options.maxInFlight) || 1);
+      this.options.maxInFlight = max;
+      this._permits = Math.max(0, max - this._inFlight);
+      while (this._permits > 0 && this._waiters.length > 0) {
+        this._permits -= 1;
+        this._waiters.shift().resolve();
+      }
+    }
+  }
+
   _pickWorker() {
     const n = this.workers.length;
     if (n === 0) return null;
