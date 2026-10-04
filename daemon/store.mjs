@@ -321,6 +321,13 @@ export class Store {
   closeProposal(id) {
     this.db.prepare("UPDATE proposals SET status = 'closed' WHERE id = ?").run(id);
   }
+  getProposal(id) {
+    const row = this.db.prepare('SELECT * FROM proposals WHERE id = ?').get(Number(id) || 0);
+    return row ? { ...row, entries: JSON.parse(row.entriesJson || '[]') } : null;
+  }
+  setProposalStatus(id, status) {
+    this.db.prepare('UPDATE proposals SET status = ? WHERE id = ?').run(String(status || 'closed'), Number(id) || 0);
+  }
 
   // ---- runs / metrics ----
   startRun(bookKey, job) {

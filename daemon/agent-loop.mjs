@@ -48,7 +48,7 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
     if (tool.requiresApproval && opt.approvalMode === 'manual') {
       let preview = null;
       if (typeof tool.preview === 'function') {
-        try { preview = tool.preview(call.args, ctx); } catch { preview = null; }
+        try { preview = await tool.preview(call.args, ctx); } catch (e) { preview = { error: String((e && e.message) || e) }; }
       }
       const { id, promise } = sessionApi.ask({
         sessionId: ctx.sessionId,

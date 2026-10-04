@@ -21,7 +21,9 @@ const { createAgentLlm } = await imp('agent-llm.mjs');
 const { createAgentLoop } = await imp('agent-loop.mjs');
 const { doingTool, askUserTool } = await imp('agent-tools.mjs');
 const { createReadTools } = await imp('agent-tools-read.mjs');
+const { createWriteTools } = await imp('agent-tools-write.mjs');
 const { createSkillCatalog } = await imp('agent-skills.mjs');
+const { createJobQueue } = await imp('job-queue.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
@@ -574,6 +576,149 @@ await t('list_snapshots：返回某书快照列表', async () => {
   store.addSnapshot('wenku:mock-boost', { 'テスト': '测试' }, 'a2-e2e');
   const parsed = await runToolOnce('list_snapshots', { book: 'wenku:mock-boost' }, { books: true });
   assert.ok(parsed.result.count >= 1, JSON.stringify(parsed.result));
+});
+
+console.log('== Agent 执行/写入工具（A3：审批 + 单队列 + 快照/回读） ==');
+const writeTools = createWriteTools();
+const qTranslate = mkPipeline({});
+const qCheck = new CheckPipeline({ store, engine, makeClient, log: quiet });
+const qGlossary = new GlossaryPipeline({ store, engine, workers, makeClient, log: quiet });
+const agentQueue = createJobQueue({
+  resolveRunner: (job) => ({ translate: qTranslate, check: qCheck, glossary: qGlossary }[job]),
+  log: quiet,
+});
+const agentSkills = createSkillCatalog({ roots: [path.join(repoRoot, 'skills')], log: quiet });
+const runWriteToolOnce = async (toolName, args, { approve = true, tools = writeTools } = {}) => {
+  const q = `?toolcall=${toolName}&toolargs=${encodeURIComponent(JSON.stringify(args))}`;
+  const scheduler = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW(`wt-${toolName}`, 'wtkey', q)], maxInFlight: 1 } });
+  const llm = createAgentLlm({ scheduler, log: quiet });
+  const loop = createAgentLoop({
+    store, chat: llm.chat, takeUsage: llm.takeUsage, tools: [...tools, doingTool], log: quiet,
+    options: {
+      deps: { engine, makeClient, skills: agentSkills, enqueue: (payload) => agentQueue.enqueue(payload) },
+    },
+  });
+  const sessionId = store.createAgentSession({ bookKey: '', title: `wt:${toolName}` });
+  const events = [];
+  const r = await loop.runTurn(sessionId, `执行 ${toolName}`, {
+    onEvent: (e) => {
+      events.push(e);
+      if (e.type === 'decision') setTimeout(() => loop.resolveDecision(e.decisionId, approve ? 'allowed' : 'rejected'), 0);
+    },
+  });
+  const toolRow = store.listAgentMessages(sessionId).find((x) => x.role === 'tool');
+  return { r, parsed: JSON.parse(toolRow.content), events, sessionId };
+};
+await t('run_check：只读质检经单队列执行（无需审批）', async () => {
+  const { parsed, events } = await runWriteToolOnce('run_check', { book: CHECK_KEY, limit: 5 });
+  assert.equal(parsed.ok, true, JSON.stringify(parsed));
+  assert.equal(parsed.result.state, 'done', JSON.stringify(parsed.result));
+  assert.ok(parsed.result.stats.codes.GLOSSARY >= 1, JSON.stringify(parsed.result.stats));
+  assert.ok(!events.some((e) => e.type === 'decision'), '只读工具不应产生审批');
+});
+await t('run_translate：拒绝审批 → 不入队、不执行', async () => {
+  const key = `web:mock/mock-trans-w-${RUN}`;
+  store.upsertBook({ key, kind: 'web', providerId: 'mock', novelId: `mock-trans-w-${RUN}`, origin: MOCK, title: '' });
+  const before = agentQueue.list().length;
+  const { parsed, events } = await runWriteToolOnce('run_translate', { book: key, level: 'expire', maxChapters: 1 }, { approve: false });
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.error, 'approval_denied', JSON.stringify(parsed));
+  assert.equal(agentQueue.list().length, before, '拒绝后不应入队');
+  assert.ok(events.some((e) => e.type === 'decision' && e.preview && e.preview.action === '翻译并上传译文'));
+});
+await t('run_translate：放行 → 入队执行并回传 stats', async () => {
+  const key = `web:mock/mock-trans-w-${RUN}`;
+  const { parsed } = await runWriteToolOnce('run_translate', { book: key, level: 'expire', maxChapters: 1 });
+  assert.equal(parsed.ok, true, JSON.stringify(parsed));
+  assert.equal(parsed.result.state, 'done', JSON.stringify(parsed.result));
+  assert.ok(parsed.result.stats.uploaded >= 1, JSON.stringify(parsed.result.stats));
+});
+await t('glossary_apply：preview 给出真实 diff；放行后快照+写入+回读校验；拦截条目跳过', async () => {
+  const key = `web:mock/mock-import-w-${RUN}`;
+  store.upsertBook({ key, kind: 'web', providerId: 'mock', novelId: `mock-import-w-${RUN}`, origin: MOCK, title: '' });
+  const { parsed, events } = await runWriteToolOnce('glossary_apply', {
+    book: key,
+    entries: [
+      { src: 'アルテ', dst: '阿尔蒂', info: '女性' },
+      { src: 'rem0', dst: '不该写', info: '' },
+    ],
+  });
+  assert.equal(parsed.ok, true, JSON.stringify(parsed));
+  assert.equal(parsed.result.applied, 1, JSON.stringify(parsed.result));
+  assert.equal(parsed.result.verified, true, JSON.stringify(parsed.result));
+  assert.equal(parsed.result.skipped.length, 1, JSON.stringify(parsed.result.skipped));
+  const decision = events.find((e) => e.type === 'decision');
+  assert.ok(decision && decision.preview && decision.preview.additionsTotal === 1, JSON.stringify(decision && decision.preview));
+  const stats = await mockStats();
+  assert.ok(/mock-import-w/.test(stats.lastGlossaryPut.path) && stats.lastGlossaryPut.body['アルテ'] === '阿尔蒂 #女性', JSON.stringify(stats.lastGlossaryPut.body));
+});
+await t('glossary_rollback：回滚到先前快照（写前自动再存一份）', async () => {
+  const key = `web:mock/mock-import-w-${RUN}`;
+  const client = makeClient(store.getBook(key));
+  const applied = await runWriteToolOnce('glossary_apply', { book: key, entries: [{ src: 'ローズ', dst: '罗丝琳', info: '' }] });
+  assert.equal(applied.parsed.result.applied, 1, JSON.stringify(applied.parsed));
+  const beforeRollback = await client.getGlossary(store.getBook(key));
+  assert.ok(Object.keys(beforeRollback).includes('ローズ') && beforeRollback['アルテ'], JSON.stringify(beforeRollback));
+  const targetId = store.listSnapshots(key)[0].id;   // 「ローズ」写入前的快照 = { アルテ }
+  const rolled = await runWriteToolOnce('glossary_rollback', { book: key, snapshotId: targetId });
+  assert.equal(rolled.parsed.ok, true, JSON.stringify(rolled.parsed));
+  assert.equal(rolled.parsed.result.verified, true, JSON.stringify(rolled.parsed.result));
+  assert.ok(rolled.parsed.result.autoSnapshotId > 0, '回滚前应自动存快照');
+  const now = await client.getGlossary(store.getBook(key));
+  assert.ok(!Object.keys(now).includes('ローズ'), JSON.stringify(now));
+  assert.equal(now['アルテ'], '阿尔蒂 #女性', JSON.stringify(now));
+});
+await t('set_prompt / set_rule / delete_rule / close_proposal：本地写操作走审批或自动', async () => {
+  const promptRun = await runWriteToolOnce('set_prompt', { bookKey: '', slot: 'thinking', text: '先自查一遍再回答。' });
+  assert.equal(promptRun.parsed.ok, true, JSON.stringify(promptRun.parsed));
+  assert.ok(store.listPrompts('').some((r) => r.slot === 'thinking' && r.text.includes('自查')), JSON.stringify(store.listPrompts('')));
+  store.clearPrompt('', 'thinking');
+
+  const ruleRun = await runWriteToolOnce('set_rule', { kind: 'post_replacement', pattern: '统一检查词', replacement: '统一检查词' });
+  assert.ok(ruleRun.parsed.result.id > 0, JSON.stringify(ruleRun.parsed));
+  const ruleId = ruleRun.parsed.result.id;
+  assert.ok(store.listRules('').some((r) => r.id === ruleId));
+  const delRun = await runWriteToolOnce('delete_rule', { id: ruleId });
+  assert.equal(delRun.parsed.ok, true, JSON.stringify(delRun.parsed));
+  assert.ok(!store.listRules('').some((r) => r.id === ruleId));
+
+  const proposalId = store.addProposal({ bookKey: 'wenku:mock-boost', kind: 'glossary', entries: [{ src: 'x', dst: 'y' }], note: 'a3' });
+  const closeRun = await runWriteToolOnce('close_proposal', { id: proposalId });
+  assert.equal(closeRun.parsed.ok, true, JSON.stringify(closeRun.parsed));
+  assert.equal(store.getProposal(proposalId).status, 'closed');
+  assert.ok(!closeRun.events.some((e) => e.type === 'decision'), 'close_proposal 为本地状态，自动执行');
+});
+await t('控制面：/snapshots/restore 与 /proposals/close|apply', async () => {
+  const bookKey = `web:mock/mock-import-h-${RUN}`;
+  store.upsertBook({ key: bookKey, kind: 'web', providerId: 'mock', novelId: `mock-import-h-${RUN}`, origin: MOCK, title: '' });
+  const client = makeClient(store.getBook(bookKey));
+  await client.putGlossaryRaw(store.getBook(bookKey), { '基': '基准值' });
+  const snapId = store.addSnapshot(bookKey, { '基': '基准值' }, 'http-e2e');
+  await client.putGlossaryRaw(store.getBook(bookKey), { '基': '被改' });
+  const proposalId = store.addProposal({ bookKey, kind: 'glossary', entries: [{ src: '追加', dst: '追加译', type: '女性人名' }], note: 'http' });
+  const server = await startServer({
+    store, pipeline: mkPipeline({}), glossaryPipeline: null, checkPipeline: null, scheduler: null,
+    queue: agentQueue, makeClient, engine, port: 7351, log: quiet,
+  });
+  const post = (path, body) => fetch(`http://127.0.0.1:7351${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then((r) => r.json());
+  try {
+    const restored = await post('/snapshots/restore', { book: bookKey, snapshotId: snapId });
+    assert.equal(restored.ok, true, JSON.stringify(restored));
+    assert.equal(restored.verified, true, JSON.stringify(restored));
+    assert.deepEqual(await client.getGlossary(store.getBook(bookKey)), { '基': '基准值' });
+
+    const applied = await post('/proposals/apply', { id: proposalId });
+    assert.equal(applied.ok, true, JSON.stringify(applied));
+    assert.equal(applied.applied, 1, JSON.stringify(applied));
+    assert.equal(store.getProposal(proposalId).status, 'applied');
+    assert.ok(Object.keys(await client.getGlossary(store.getBook(bookKey))).includes('追加'));
+
+    const closed = await post('/proposals/close', { id: proposalId, status: 'closed' });
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    assert.equal(store.getProposal(proposalId).status, 'closed');
+  } finally { server.close(); }
 });
 
 console.log('== 控制面 ==');
