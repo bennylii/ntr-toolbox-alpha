@@ -7,6 +7,9 @@ const CORS = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'authorization, content-type',
   'Access-Control-Max-Age': '600',
+  // HTTPS 站点页面访问本机 daemon 走 Chrome 本地网络访问（LNA/PNA）预检：应答同意头，
+  // 否则真实站点（https）里 fetch http://127.0.0.1 直接失败（http 页面的 mock 车道不受影响）。
+  'Access-Control-Allow-Private-Network': 'true',
 };
 
 export function startServer({ store, pipeline, glossaryPipeline, port = 7331, log = console }) {

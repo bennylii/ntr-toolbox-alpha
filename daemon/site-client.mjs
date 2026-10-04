@@ -81,10 +81,19 @@ export class SiteClient {
     return out;
   }
 
+  // /file 必须带 filename（站点 controller 无默认值，缺了 404）；剔除书名里的路径不安全字符
+  #fileQuery(prefix, book, params) {
+    const safe = String(book.novelId || 'book').replace(/[/|\\:*?"<>]/g, '');
+    const query = new URLSearchParams({ mode: params.mode, translationsMode: params.translationsMode, type: 'txt', filename: `${prefix}.${safe}.txt` });
+    if (params.translations) query.append('translations', params.translations);
+    return query.toString();
+  }
+
   // 整本原文（web：/file?mode=jp；wenku：逐卷逐章 paragraphJp）
   async getBookText(book, onProgress) {
     if (book.kind === 'web') {
-      return this.getText(`/api/novel/${book.providerId}/${book.novelId}/file?mode=jp&translationsMode=parallel&type=txt`);
+      const q = this.#fileQuery('jp', book, { mode: 'jp', translationsMode: 'parallel' });
+      return this.getText(`/api/novel/${book.providerId}/${book.novelId}/file?${q}`);
     }
     const novel = await this.getWenku(book.novelId);
     const volumes = novel.volumeJp || [];
@@ -106,7 +115,8 @@ export class SiteClient {
   // 对齐对（验收回扫用）：web 走 /file?mode=jp-zh + 引擎解析；wenku 走 chapter-task 段落数组
   async getAlignedPairs(book, onProgress) {
     if (book.kind === 'web') {
-      const text = await this.getText(`/api/novel/${book.providerId}/${book.novelId}/file?mode=jp-zh&translationsMode=priority&translations=gpt&type=txt`);
+      const q = this.#fileQuery('jpzh', book, { mode: 'jp-zh', translationsMode: 'priority', translations: 'gpt' });
+      const text = await this.getText(`/api/novel/${book.providerId}/${book.novelId}/file?${q}`);
       const parsed = this.engine.parseParallelText(text);
       const novel = await this.getNovel(book.providerId, book.novelId);
       const tocMap = new Map((novel.toc || []).filter((t) => t.chapterId).map((t) => [t.titleJp, t.chapterId]));
@@ -139,7 +149,8 @@ export class SiteClient {
   // 整本译文（验收回扫的 zh 侧；web 用 mode=zh，wenku 用 chapter-task 的 oldParagraphZh）
   async getBookZhText(book, onProgress) {
     if (book.kind === 'web') {
-      return this.getText(`/api/novel/${book.providerId}/${book.novelId}/file?mode=zh&translationsMode=priority&translations=gpt&type=txt`);
+      const q = this.#fileQuery('zh', book, { mode: 'zh', translationsMode: 'priority', translations: 'gpt' });
+      return this.getText(`/api/novel/${book.providerId}/${book.novelId}/file?${q}`);
     }
     const novel = await this.getWenku(book.novelId);
     const volumes = novel.volumeJp || [];

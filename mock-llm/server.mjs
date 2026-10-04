@@ -319,6 +319,8 @@ const server = http.createServer(async (req, res) => {
     const boost = /mock-boost/.test(url.pathname);
     const noted = /mock-noted/.test(url.pathname);
     if (/\/file$/.test(url.pathname)) {
+      // 与真实站点一致：/file 必须带 filename，缺了 404（真机测试发现的契约）
+      if (!url.searchParams.get('filename')) { res.writeHead(404, cors); res.end(''); return; }
       res.writeHead(200, { ...cors, 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
       res.end('アルテは笑った\nオルトが来た\nアリスが魔導書を読む。\nローズも来た。\n');
       return;
