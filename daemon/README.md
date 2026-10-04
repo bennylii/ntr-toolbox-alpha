@@ -66,7 +66,8 @@ node daemon/index.mjs forget    <bookKey>
 - **循环**：系统提示 + 历史 → 模型 → 顺序派发工具 → 回填 `role:'tool'` 结果 → 直到无工具调用；单轮步数上限 24（可配）、支持中止与失败续聊。
 - **会话**：`agent_sessions/agent_messages/agent_decisions` 落 SQLite；时间线全量保留，超阈值时把旧段摘要化（`summaryUpTo` 之后才进模型）。`--session <id>` 续用上次会话。
 - **审批**：默认 manual —— 标记 `requiresApproval` 的工具（写术语表/回滚/改规则与提示词等）会挂起为 decision，CLI 里 y/N 确认；`--auto` 跳过审批（等价 auto 模式）。追问（`ask_user`）同样是 decision。
-- **v1 工具**：`doing`（进度）、`ask_user`（追问）；A2/A3 起追加只读（书目/正文/译文/质量/提案/技能）与执行、写入类工具。
+- **工具（A1/A2）**：只读 —— `list_books`、`book_status`、`read_book`（按行窗口）、`read_translations`（对齐对窗口）、`list_proposals`、`list_snapshots`、`quality_report`（七码只读报告）、`list_skills`、`read_skill`；交互 —— `doing`（进度）、`ask_user`（追问）。执行与写入类（`run_translate`/`run_glossary`/`run_check`、术语 apply/rollback、规则与提示词写入）在 A3 加入，默认需审批。
+- **技能**：`skills/` 下的 SKILL.md 包会作为目录注入系统提示，模型用 `read_skill` 读取正文与 `references/**`；现有 glossary-extract / acceptance-scan / text-preserve，另加 glossary-workflow / translation-workflow / quality-workflow 三份工作流技能。
 
 ## 文本处理链（预处理 / 后处理）
 
@@ -128,5 +129,6 @@ node daemon/processors-test.mjs         # 处理链单测（占位符/保留段/
 node daemon/prompt-test.mjs             # 提示词模板单测（默认逐字一致/回退/槽位；无需 mock）
 node daemon/glossary-io-test.mjs        # LG 互通单测（解析/分流/往返；无需 mock）
 node daemon/agent-test.mjs              # Agent 单测（参数解析/裁剪/会话/压缩/决策/循环；无需 mock）
+node daemon/agent-skills-test.mjs       # 技能目录单测（frontmatter/发现/读取/逃逸；无需 mock）
 MOCK_ORIGIN=http://127.0.0.1:8790 node daemon/daemon-test.mjs   # 冒烟：全管线/跳过/续跑/控制面/调度器/质检/处理链/模板/互通/助手
 ```

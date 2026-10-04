@@ -22,7 +22,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const imp = (name) => import(pathToFileURL(path.join(here, name)).href);
 const { Store } = await imp('store.mjs');
-const { loadEngine } = await imp('engine.mjs');
+const { loadEngine, repoRoot } = await imp('engine.mjs');
 const { SiteClient } = await imp('site-client.mjs');
 const { TranslationPipeline } = await imp('translate-pipeline.mjs');
 const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
@@ -32,6 +32,8 @@ const { parseBookUrl } = await imp('book-url.mjs');
 const { createAgentLlm } = await imp('agent-llm.mjs');
 const { createAgentLoop } = await imp('agent-loop.mjs');
 const { doingTool, askUserTool } = await imp('agent-tools.mjs');
+const { createReadTools } = await imp('agent-tools-read.mjs');
+const { createSkillCatalog } = await imp('agent-skills.mjs');
 const { templateFromStore, DEFAULT_TEMPLATE, PROMPT_SLOTS } = await imp('prompt.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
@@ -118,16 +120,20 @@ const glossaryPipeline = new GlossaryPipeline({
 const checkPipeline = new CheckPipeline({ store, engine, makeClient, log });
 
 // Agent（工具调用模型；翻译/术语管线各自的调度器不受影响）
+const skillCatalog = createSkillCatalog({ roots: [path.join(repoRoot, 'skills')], log });
+const readTools = createReadTools({ store, engine, makeClient, log });
 const agentLlm = createAgentLlm({ scheduler, log });
 const agentLoop = createAgentLoop({
   store,
   chat: agentLlm.chat,
   takeUsage: agentLlm.takeUsage,
-  tools: [doingTool, askUserTool],
+  tools: [...readTools, doingTool, askUserTool],
   log,
   options: {
     approvalMode: flags.auto === true ? 'auto' : 'manual',
     bookKey: typeof flags.book === 'string' ? flags.book : '',
+    extraSystem: skillCatalog.promptText(),
+    deps: { engine, makeClient, skills: skillCatalog },
   },
 });
 
