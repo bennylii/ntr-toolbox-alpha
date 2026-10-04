@@ -7,6 +7,7 @@
 //   check [--book key] [--codes A,B] [--limit N] [--propose] [--tsv]   质检（七码报告；propose 出提案）
 //   rules list|add|rm|enable|disable   文本处理链规则（pre/post 替换、保留段）
 //   prompt show|set|clear   提示词模板（prefix/base/thinking/suffix；base 必须含 {format_rules}）
+//   glossary-io import|export   LG 术语表互通（JSON；写站点=快照+全量替换+回读校验）
 //   translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 //   watch [--interval 分钟]  常驻：定期按 expire 档补翻未译/过期章节
 //   serve [--port 7331]     本机控制面（/status /progress /auth /run）
@@ -25,6 +26,7 @@ const { SiteClient } = await imp('site-client.mjs');
 const { TranslationPipeline } = await imp('translate-pipeline.mjs');
 const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
 const { CheckPipeline, samplesToTsv } = await imp('check-pipeline.mjs');
+const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
 const { templateFromStore, DEFAULT_TEMPLATE, PROMPT_SLOTS } = await imp('prompt.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
@@ -250,6 +252,60 @@ switch (command) {
     }
     break;
   }
+  case 'glossary-io': {
+    const sub = args[1] || '';
+    const file = args[2];
+    const ioBookKey = typeof flags.book === 'string' ? flags.book : '';
+    const ioBook = ioBookKey ? store.getBook(ioBookKey) : null;
+    if (!ioBook) { log.error(`用法: glossary-io <import|export> --book <key>（book 不存在: ${ioBookKey || '(缺 --book)'}）`); break; }
+    const ioClient = makeClient(ioBook);
+    if (sub === 'import') {
+      if (!file) { log.error('用法: glossary-io import <file.json> --book <key> [--apply] [--propose]'); break; }
+      const parsed = parseLgGlossary(fs.readFileSync(file, 'utf8'));
+      const current = await ioClient.getGlossary(ioBook);
+      const plan = planImport({ entries: parsed.entries, currentGlossary: current, engine });
+      log.log(`解析 ${parsed.entries.length} 条（重复覆盖 ${parsed.duplicates.length}）：新增 ${plan.additions.length}、更新 ${plan.updates.length}、已存在相同 ${plan.same.length}、门槛拦截 ${plan.skipped.length}、regex 分流 ${plan.regexRules.length}`);
+      plan.skipped.slice(0, 10).forEach((s) => log.log(`  拦截 ${s.src}：${s.reasons.join('、')}`));
+      if (plan.noteIgnored.length > 0) log.log(`  注意：${plan.noteIgnored.length} 条带 case_sensitive 标记（站点术语表为纯文本匹配，标记已忽略）`);
+      if (plan.regexRules.length > 0) {
+        if (flags.apply === true) {
+          for (const r of plan.regexRules) store.addRule({ bookKey: '', kind: 'pre_replacement', pattern: r.src, replacement: r.dst, regex: 1, enabled: 0, note: 'LG 导入（默认禁用，确认后启用）' });
+          log.log(`regex 条目已入 rules（默认禁用）${plan.regexRules.length} 条`);
+        } else {
+          log.log(`regex 条目 ${plan.regexRules.length} 条未入库（--apply 时写入，默认禁用）`);
+        }
+      }
+      if (flags.propose === true && (plan.skipped.length > 0 || plan.updates.length > 0)) {
+        const id = store.addProposal({
+          bookKey: ioBook.key,
+          kind: 'import',
+          entries: [
+            ...plan.skipped.map((s) => ({ src: s.src, dst: s.dst, type: s.info, suspect: s.reasons })),
+            ...plan.updates.map((u) => ({ src: u.src, dst: u.value, type: '', suspect: [`覆盖现值「${u.before}」`] })),
+          ],
+          note: `LG 导入待审（新增 ${plan.additions.length} 条可直接应用）`,
+        });
+        log.log(`已生成提案 #${id}`);
+      }
+      if (flags.apply !== true) { log.log('dry-run：未写站点（加 --apply 执行）'); break; }
+      const result = await applyImport({ store, client: ioClient, book: ioBook, plan, currentGlossary: current, note: `LG 导入 ${file}` });
+      log.log(`已应用 ${result.applied} 条（新增 ${result.added} / 更新 ${result.updated}，快照 #${result.snapshotId}，回读校验${result.verified ? '通过' : '失败'}，现 ${result.afterCount} 条）`);
+      if (!result.verified) log.error('回读校验失败：站点内容与预期不一致，可用快照回滚');
+    } else if (sub === 'export') {
+      const current = await ioClient.getGlossary(ioBook);
+      const list = toLgGlossary(current, engine);
+      const text = JSON.stringify(list, null, 2);
+      if (typeof flags.out === 'string' && flags.out !== 'true') {
+        fs.writeFileSync(flags.out, text);
+        log.log(`已导出 ${list.length} 条 → ${flags.out}`);
+      } else {
+        log.log(text);
+      }
+    } else {
+      log.error('用法: glossary-io import <file.json> | export [--out <file>]（均需 --book <key>）');
+    }
+    break;
+  }
   case 'translate': {
     await runBooks(flags.book);
     break;
@@ -300,6 +356,6 @@ switch (command) {
     break;
   }
   default:
-    log.error(`未知命令: ${command}（可用 auth/add/run/check/rules/prompt/translate/watch/serve/status/forget）`);
+    log.error(`未知命令: ${command}（可用 auth/add/run/check/rules/prompt/glossary-io/translate/watch/serve/status/forget）`);
     process.exit(2);
 }

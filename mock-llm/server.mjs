@@ -150,6 +150,7 @@ function decideFault(url, headers) {
   const q = url.searchParams;
   if (q.get('reset') === '1') {
     scriptCounters.clear();
+    glossaryStore.clear();
     stats = { requests: 0, byMode: {}, keys: {}, entries: 0, inflightNow: 0, maxInflight: 0, jobsNow: 0, maxJobs: 0, busyRejects: 0, startedAt: Date.now() };
     return { mode: 'ok' };
   }
@@ -185,6 +186,8 @@ function decideFault(url, headers) {
 // ---------------- HTTP ----------------
 
 let stats = { requests: 0, byMode: {}, keys: {}, entries: 0, inflightNow: 0, maxInflight: 0, jobsNow: 0, maxJobs: 0, busyRejects: 0, startedAt: Date.now() };
+// PUT 过的术语表按书路径持久（GET DTO 回读；仅 mock，进程内）
+const glossaryStore = new Map();
 
 // 翻译 worker 用例的假站点状态（模块级：跨请求持久）：
 // - 章节 t1/t2/t3（或 -r 系列的 r1/r2/r3）；预置 t3 = 已用当前术语表翻译（应被跳过）
@@ -256,6 +259,7 @@ const server = http.createServer(async (req, res) => {
     let body = {};
     try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { /* ignore */ }
     stats.lastGlossaryPut = { path: url.pathname, body };
+    glossaryStore.set(url.pathname.replace(/\/glossary$/, ''), body);
     res.writeHead(200, { ...cors, 'content-type': 'application/json', 'cache-control': 'no-store' });
     res.end('{}');
     return;
@@ -394,9 +398,11 @@ const server = http.createServer(async (req, res) => {
       providerId: segs[2] || 'mock', novelId: segs[segs.length - 1] || 'mock-novel',
       titleZh: 'mock 测试书', titleJp: 'モックテスト',
       // mock-noted：带站点约定 "译名 #备注" 的术语表（指南合规用例）；mock-check：质检用例术语表
-      glossary: check
-        ? { 'アルテ': '阿尔蒂 #女性', 'ローズ': '罗丝琳 #女性' }
-        : (noted ? { 'アルテ': '阿尔蒂 #女性', 'オルト': '欧尔特 #男性' } : {}),
+      // PUT 过的书优先回读持久值（glossary-io 回读校验用例）
+      glossary: glossaryStore.get(url.pathname.replace(/\/$/, ''))
+        || (check
+          ? { 'アルテ': '阿尔蒂 #女性', 'ローズ': '罗丝琳 #女性' }
+          : (noted ? { 'アルテ': '阿尔蒂 #女性', 'オルト': '欧尔特 #男性' } : {})),
       volumeJp: (rich || boost) ? [{ volumeId: rich ? 'v1' : 'vb1', total: 2 }] : [], toc: [],
     }));
     return;

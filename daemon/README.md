@@ -20,6 +20,7 @@ node daemon/index.mjs run       [--book key]       # 术语管线：提取→核
 node daemon/index.mjs check     [--book key] [--codes A,B] [--limit N] [--propose] [--tsv]   # 质检：七码报告
 node daemon/index.mjs rules     list|add|rm|enable|disable   # 文本处理链规则（pre/post 替换、保留段）
 node daemon/index.mjs prompt    show|set|clear               # 提示词模板（prefix/base/thinking/suffix）
+node daemon/index.mjs glossary-io import|export              # LG 术语表互通（JSON；写站点=快照+回读校验）
 node daemon/index.mjs translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 node daemon/index.mjs watch     [--interval 30]    # 常驻：定期按 expire 档补翻
 node daemon/index.mjs serve     [--port 7331]      # 控制面 /status /runs /progress /proposals /auth /run（/run 单队列串行）
@@ -59,6 +60,19 @@ node daemon/index.mjs forget    <bookKey>
 - `thinking` 非空时以「【思考指引】」追加到用户消息最前（协议行不受影响）；
 - 管理：`node daemon/index.mjs prompt show [--book key]`、`prompt set --slot base --text '…{format_rules}'`（或 `--file`）、`prompt clear --slot base`。
 
+## LG 术语表互通
+
+```
+node daemon/index.mjs glossary-io import <lg.json> --book <key>            # dry-run：只出 diff 报告
+node daemon/index.mjs glossary-io import <lg.json> --book <key> --apply    # 快照 → 全量替换 → 回读校验
+node daemon/index.mjs glossary-io export --book <key> [--out <lg.json>]    # 导出为 LG JSON
+```
+
+- 导入格式：LG 的 JSON 数组 `[{src,dst,info,regex,case_sensitive}]` 或 `{src: dst}` 映射；
+- `regex: true` 条目 → `rules` 表（kind=pre_replacement，**默认禁用**，确认后 `rules enable <id>`）；`case_sensitive` 标记忽略（站点术语表为纯文本匹配）；
+- 其余条目 = 术语表候选（值 = `dst #info`）；改原文/可疑条目默认跳过并计入报告，`--propose` 时进提案；
+- `xlsx` 与 `.lg` 工程文件暂不支持（列为可选）。
+
 ## 真机契约备忘（mock 已同步改严）
 
 - `GET /api/novel/{p}/{id}/file` 必须带 `filename` 参数，缺了 404（`createFileUrl` 的 `filename` 无默认值）；
@@ -86,5 +100,8 @@ node daemon/index.mjs forget    <bookKey>
 PORT=8790 node mock-llm/server.mjs     # mock（翻译用例：POST translate-v2 + 翻译提示词分支）
 node daemon/translate-test.mjs          # 纯函数单测（分段/提示词/解析/重试/二分）
 node daemon/quality-test.mjs            # 质检纯函数单测（七码 + 批量报告；无需 mock）
-MOCK_ORIGIN=http://127.0.0.1:8790 node daemon/daemon-test.mjs   # 冒烟：全管线/跳过/续跑/控制面/调度器/质检
+node daemon/processors-test.mjs         # 处理链单测（占位符/保留段/替换表/标点；无需 mock）
+node daemon/prompt-test.mjs             # 提示词模板单测（默认逐字一致/回退/槽位；无需 mock）
+node daemon/glossary-io-test.mjs        # LG 互通单测（解析/分流/往返；无需 mock）
+MOCK_ORIGIN=http://127.0.0.1:8790 node daemon/daemon-test.mjs   # 冒烟：全管线/跳过/续跑/控制面/调度器/质检/处理链/模板/互通
 ```
