@@ -33,6 +33,14 @@ export const UI_HTML = `<!doctype html>
   .muted { color: #8b98a5; font-size: 12px; }
   .ok { color: #7fd88f; } .bad { color: #ff8a8a; }
   code { background: #0d1116; padding: 1px 5px; border-radius: 4px; }
+  .agent-log { max-height: 440px; overflow: auto; display: flex; flex-direction: column; gap: 6px; padding: 6px 2px; }
+  .agent-line { white-space: pre-wrap; word-break: break-word; }
+  .agent-line.user { color: #9fd1ff; }
+  .agent-line.assistant { color: #e6e9ee; }
+  .agent-line.muted { color: #8b98a5; font-size: 12px; }
+  .agent-tool { border: 1px solid #2c3946; border-radius: 6px; padding: 6px 8px; background: #131a21; font-size: 13px; }
+  .agent-decision { border: 1px solid #7a5a2a; border-radius: 8px; padding: 8px 10px; margin-top: 8px; background: #1c1a14; }
+  .agent-preview { max-height: 220px; overflow: auto; background: #0d1116; padding: 8px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; }
   #toast { position: fixed; right: 16px; bottom: 16px; background: #215a8f; color: #fff; padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 60vw; }
   #toast.show { opacity: 1; }
 </style>
@@ -43,7 +51,8 @@ export const UI_HTML = `<!doctype html>
   <span class="stat" id="hdr"></span>
 </header>
 <nav>
-  <button data-tab="jobs" class="active">任务</button>
+  <button data-tab="agent" class="active">助手</button>
+  <button data-tab="jobs">任务</button>
   <button data-tab="settings">设置</button>
   <button data-tab="rules">规则</button>
   <button data-tab="prompts">提示词</button>
@@ -51,7 +60,7 @@ export const UI_HTML = `<!doctype html>
   <button data-tab="status">状态</button>
 </nav>
 <main>
-  <section id="tab-jobs" class="active">
+  <section id="tab-jobs">
     <fieldset><legend>派发任务</legend>
       <label>书 <select id="job-book"></select></label>
       <label>任务 <select id="job-kind"><option value="translate">翻译 translate</option><option value="glossary">术语管线 glossary</option><option value="check">质检 check</option></select></label>
@@ -120,6 +129,25 @@ export const UI_HTML = `<!doctype html>
   <section id="tab-status">
     <fieldset><legend>概览</legend><div id="status-box"></div></fieldset>
   </section>
+  <section id="tab-agent" class="active">
+    <fieldset><legend>会话</legend>
+      <label>会话 <select id="agent-sessions" style="min-width: 220px"></select></label>
+      <button class="act ghost" id="agent-new">新会话</button>
+      <label><input type="checkbox" id="agent-auto"> 自动批准写入（不弹确认）</label>
+      <button class="act danger" id="agent-stop" disabled>停止</button>
+      <div class="muted" id="agent-status"></div>
+      <div class="muted" id="agent-doing"></div>
+    </fieldset>
+    <fieldset><legend>对话</legend>
+      <div id="agent-log" class="agent-log"></div>
+      <div id="agent-decision" class="agent-decision" style="display: none"></div>
+      <div style="display: flex; gap: 8px; margin-top: 8px">
+        <textarea id="agent-input" placeholder="输入消息（Enter 发送，Shift+Enter 换行）" style="min-height: 64px"></textarea>
+        <button class="act" id="agent-send" style="align-self: flex-end">发送</button>
+      </div>
+      <div class="muted">助手可读书目/正文/译文/质检，执行翻译与术语管线，写术语表/回滚/改规则前会请求审批。</div>
+    </fieldset>
+  </section>
 </main>
 <div id="toast"></div>
 <script>
@@ -144,6 +172,7 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': 
 document.querySelectorAll('nav button').forEach((btn) => btn.addEventListener('click', () => {
   document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('active', b === btn));
   document.querySelectorAll('section').forEach((s) => s.classList.toggle('active', s.id === 'tab-' + btn.dataset.tab));
+  if (btn.dataset.tab === 'agent') { agentInit(); return; }
   refresh();
 }));
 
@@ -295,7 +324,164 @@ $('job-run').addEventListener('click', async () => {
   } catch (e) { toast(e.message, true); }
 });
 
+// ---------------- 助手（Agent） ----------------
+let AGENT = { session: localStorage.getItem('ntr-daemon-agent-session') || '', es: null, polling: null, messages: [], pending: null, running: false, usage: null, transport: '' };
+function agentLine(text, cls) { const d = document.createElement('div'); d.className = 'agent-line ' + (cls || ''); d.textContent = text; return d; }
+function renderAgentMessages() {
+  const box = $('agent-log');
+  box.innerHTML = '';
+  for (const m of AGENT.messages) {
+    if (m.role === 'user') { box.appendChild(agentLine('你：' + m.content, 'user')); continue; }
+    if (m.role === 'assistant') {
+      if (m.content) box.appendChild(agentLine('助手：' + m.content, 'assistant'));
+      (m.toolCalls || []).forEach(function (tc) {
+        const card = document.createElement('div'); card.className = 'agent-tool';
+        card.textContent = '工具：' + tc.name + ' ' + JSON.stringify(tc.args || {});
+        const result = AGENT.messages.find(function (x) { return x.role === 'tool' && x.toolCallId === tc.id; });
+        const r = document.createElement('div'); r.className = 'muted';
+        r.textContent = result ? ('结果：' + String(result.content || '').slice(0, 300)) : '（等待结果…）';
+        card.appendChild(r); box.appendChild(card);
+      });
+      continue;
+    }
+    if (m.role === 'tool') {
+      const known = AGENT.messages.some(function (x) { return x.role === 'assistant' && (x.toolCalls || []).some(function (tc) { return tc.id === m.toolCallId; }); });
+      if (!known) box.appendChild(agentLine('工具结果：' + String(m.content || '').slice(0, 200), 'muted'));
+    }
+  }
+  box.scrollTop = box.scrollHeight;
+}
+function renderAgentDecision() {
+  const panel = $('agent-decision');
+  const d = AGENT.pending;
+  if (!d) { panel.style.display = 'none'; panel.innerHTML = ''; return; }
+  panel.style.display = 'block';
+  panel.innerHTML = '';
+  panel.appendChild(agentLine(d.kind === 'write' ? '需要审批' : '需要回答', 'assistant'));
+  const body = document.createElement('pre'); body.className = 'agent-preview';
+  body.textContent = JSON.stringify(d.payload, null, 2);
+  panel.appendChild(body);
+  const row = document.createElement('div');
+  if (d.kind === 'question') {
+    ((d.payload && d.payload.options) || []).forEach(function (o) {
+      const b = document.createElement('button'); b.className = 'act'; b.textContent = o.label || o.id;
+      b.addEventListener('click', function () { agentResolve(d.id, 'allowed', { selected: o.id }); });
+      row.appendChild(b);
+    });
+    const custom = document.createElement('input'); custom.type = 'text'; custom.placeholder = '或直接输入回答';
+    const sendCustom = document.createElement('button'); sendCustom.className = 'act ghost'; sendCustom.textContent = '回答';
+    sendCustom.addEventListener('click', function () { if (custom.value.trim() !== '') agentResolve(d.id, 'allowed', { custom: custom.value.trim() }); });
+    row.appendChild(custom); row.appendChild(sendCustom);
+  } else {
+    const allow = document.createElement('button'); allow.className = 'act'; allow.textContent = '允许本次';
+    allow.addEventListener('click', function () { agentResolve(d.id, 'allowed', { via: 'ui' }); });
+    const reject = document.createElement('button'); reject.className = 'act danger'; reject.textContent = '拒绝';
+    reject.addEventListener('click', function () { agentResolve(d.id, 'rejected', { via: 'ui' }); });
+    row.appendChild(allow); row.appendChild(reject);
+  }
+  panel.appendChild(row);
+}
+async function agentResolve(id, status, resolution) {
+  try { await post('/agent/decision', { id: id, status: status, resolution: resolution || null }); toast(status === 'allowed' ? '已允许' : '已拒绝'); }
+  catch (e) { toast(e.message, true); }
+  agentRefresh();
+}
+function renderAgentStatus() {
+  $('agent-status').textContent = (AGENT.running ? '进行中…' : '空闲') +
+    ' · 会话 ' + (AGENT.session ? AGENT.session.slice(0, 8) : '—') +
+    ' · 请求 ' + (AGENT.usage ? AGENT.usage.requests : 0) +
+    ' · tokens ' + (AGENT.usage ? (AGENT.usage.promptTokens + AGENT.usage.completionTokens) : 0) +
+    (AGENT.transport ? ' · ' + AGENT.transport : '');
+}
+async function agentSnapshot() {
+  if (!AGENT.session) return;
+  const data = await api('/agent/snapshot?session=' + encodeURIComponent(AGENT.session));
+  AGENT.messages = data.messages || [];
+  AGENT.pending = data.pendingDecision || null;
+  AGENT.running = !!data.running;
+  AGENT.usage = data.usage || null;
+  AGENT.transport = '在线';
+  renderAgentMessages(); renderAgentDecision(); renderAgentStatus();
+  $('agent-send').disabled = AGENT.running;
+  $('agent-stop').disabled = !AGENT.running;
+}
+async function agentRefresh() { try { await agentSnapshot(); } catch (e) { AGENT.transport = '离线：' + e.message; renderAgentStatus(); } }
+function agentSetSession(id) {
+  AGENT.session = id || '';
+  if (id) localStorage.setItem('ntr-daemon-agent-session', id); else localStorage.removeItem('ntr-daemon-agent-session');
+  AGENT.messages = []; AGENT.pending = null;
+  if (AGENT.es) { AGENT.es.close(); AGENT.es = null; }
+  if (AGENT.polling) { clearInterval(AGENT.polling); AGENT.polling = null; }
+  if (id) { agentOpenStream(); agentRefresh(); }
+}
+function agentOpenStream() {
+  if (!AGENT.session || typeof EventSource === 'undefined') { agentStartPolling(); return; }
+  try {
+    const es = new EventSource('/agent/events?session=' + encodeURIComponent(AGENT.session) + '&since=0');
+    AGENT.es = es;
+    es.onmessage = function (e) {
+      let ev = null; try { ev = JSON.parse(e.data); } catch (err) { return; }
+      if (ev.type === 'doing') { $('agent-doing').textContent = '进度：' + (ev.text || ''); }
+      if (['user_message', 'assistant_message', 'tool_result', 'turn_end', 'decision', 'decision_resolved', 'question', 'error'].indexOf(ev.type) >= 0) agentRefresh();
+    };
+    es.onerror = function () { try { es.close(); } catch (err) { } AGENT.es = null; agentStartPolling(); };
+  } catch (e) { agentStartPolling(); }
+}
+function agentStartPolling() {
+  if (AGENT.polling) return;
+  AGENT.polling = setInterval(agentRefresh, 1500);
+  agentRefresh();
+}
+function renderAgentSessions(list) {
+  const sel = $('agent-sessions');
+  sel.innerHTML = (list || []).map(function (x) { return '<option value="' + esc(x.id) + '">' + esc(String(x.title || x.id).slice(0, 30)) + (x.running ? '（进行中）' : '') + '</option>'; }).join('');
+  if (AGENT.session) sel.value = AGENT.session;
+}
+async function agentInit() {
+  try {
+    const cfg = await api('/agent/config');
+    $('agent-auto').checked = cfg.approvalMode === 'auto';
+    const list = cfg.sessions || [];
+    renderAgentSessions(list);
+    if (AGENT.session && !list.some(function (x) { return x.id === AGENT.session; })) {
+      AGENT.transport = '会话已不存在，请新建';
+      agentSetSession('');
+      renderAgentStatus();
+      return;
+    }
+    if (!AGENT.session) { AGENT.transport = '没有会话：点「新会话」开始'; renderAgentStatus(); return; }
+    agentRefresh();
+  } catch (e) { toast(e.message, true); }
+}
+$('agent-new').addEventListener('click', async function () {
+  try { const r = await post('/agent/session', { title: '新会话' }); agentSetSession(r.sessionId); agentInit(); }
+  catch (e) { toast(e.message, true); }
+});
+$('agent-sessions').addEventListener('change', function () { agentSetSession($('agent-sessions').value); });
+$('agent-auto').addEventListener('change', async function () {
+  try { await post('/agent/config', { approvalMode: $('agent-auto').checked ? 'auto' : 'manual' }); toast('审批模式已更新'); } catch (e) { toast(e.message, true); }
+});
+$('agent-stop').addEventListener('click', async function () {
+  try { await post('/agent/stop', { session: AGENT.session }); toast('已请求停止'); agentRefresh(); } catch (e) { toast(e.message, true); }
+});
+async function agentSend() {
+  const input = $('agent-input');
+  const text = input.value.trim();
+  if (text === '') return;
+  input.value = '';
+  try {
+    if (!AGENT.session) { const r = await post('/agent/session', { title: text.slice(0, 30) }); agentSetSession(r.sessionId); }
+    await post('/agent/message', { session: AGENT.session, message: text, approvalMode: $('agent-auto').checked ? 'auto' : 'manual' });
+    $('agent-doing').textContent = '';
+    agentRefresh();
+  } catch (e) { toast(e.message, true); }
+}
+$('agent-send').addEventListener('click', agentSend);
+$('agent-input').addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); agentSend(); } });
+setInterval(function () { if (document.getElementById('tab-agent').classList.contains('active') && AGENT.session && !AGENT.polling) agentRefresh(); }, 4000);
+
 refresh(); loadSettings(); loadRules(); loadPrompts();
+agentInit();
 setInterval(() => { if ($('tab-jobs').classList.contains('active') || $('tab-status').classList.contains('active')) refresh(); }, 4000);
 </script>
 </body>

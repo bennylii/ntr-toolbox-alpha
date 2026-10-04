@@ -23,6 +23,7 @@ const { doingTool, askUserTool } = await imp('agent-tools.mjs');
 const { createReadTools } = await imp('agent-tools-read.mjs');
 const { createWriteTools } = await imp('agent-tools-write.mjs');
 const { createSkillCatalog } = await imp('agent-skills.mjs');
+const { createAgentEvents } = await imp('agent-events.mjs');
 const { createJobQueue } = await imp('job-queue.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
@@ -718,6 +719,146 @@ await t('控制面：/snapshots/restore 与 /proposals/close|apply', async () =>
     const closed = await post('/proposals/close', { id: proposalId, status: 'closed' });
     assert.equal(closed.ok, true, JSON.stringify(closed));
     assert.equal(store.getProposal(proposalId).status, 'closed');
+  } finally { server.close(); }
+});
+
+console.log('== Agent 控制台（A4：HTTP/SSE/审批/停止） ==');
+const pollUntil = async (fn, ms = 12000) => {
+  const t0 = Date.now();
+  for (;;) {
+    const v = await fn();
+    if (v) return v;
+    if (Date.now() - t0 > ms) return null;
+    await new Promise((r) => setTimeout(r, 120));
+  }
+};
+const mkAgentServer = async (port, toolcallQuery, tools) => {
+  const scheduler = new LlmScheduler({
+    engine, store, log: quiet,
+    options: { workers: [mkW(`au${port}`, 'aukey', toolcallQuery)], maxInFlight: 1 },
+  });
+  const llm = createAgentLlm({ scheduler, log: quiet });
+  const events = createAgentEvents();
+  const loop = createAgentLoop({
+    store, chat: llm.chat, takeUsage: llm.takeUsage, tools, log: quiet,
+    options: { deps: { engine, makeClient, skills: agentSkills, enqueue: (p) => agentQueue.enqueue(p) } },
+  });
+  const server = await startServer({
+    store, pipeline: null, glossaryPipeline: null, checkPipeline: null, scheduler: null,
+    queue: agentQueue, makeClient, engine, agentLoop: loop, agentEvents: events, port, log: quiet,
+  });
+  return { server, loop, events };
+};
+const agentFetch = (port, path, body) => fetch(`http://127.0.0.1:${port}${path}`, body === undefined
+  ? undefined
+  : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
+
+await t('HTTP：建会话 → 发消息 → 轮询到终态（工具调用与用量可见）', async () => {
+  const { server } = await mkAgentServer(7360, '?toolcall=doing', [...writeTools, doingTool]);
+  try {
+    const cfg = await agentFetch(7360, '/agent/config');
+    assert.equal(cfg.ok, true);
+    assert.ok(Array.isArray(cfg.tools) && cfg.tools.includes('doing') && cfg.tools.includes('glossary_apply'), JSON.stringify(cfg.tools));
+    const created = await agentFetch(7360, '/agent/session', { title: 'a4' });
+    const sessionId = created.sessionId;
+    assert.ok(sessionId);
+    const accepted = await agentFetch(7360, '/agent/message', { session: sessionId, message: '你好', approvalMode: 'auto' });
+    assert.equal(accepted.accepted, true, JSON.stringify(accepted));
+    const snap = await pollUntil(async () => {
+      const s = await agentFetch(7360, `/agent/snapshot?session=${encodeURIComponent(sessionId)}`);
+      return (!s.running && s.messages.length >= 4) ? s : null;
+    });
+    assert.ok(snap, '应到达终态');
+    assert.deepEqual(snap.messages.map((m) => m.role), ['user', 'assistant', 'tool', 'assistant']);
+    assert.ok(String(snap.messages[3].content).includes('完成（mock）'), snap.messages[3].content);
+    assert.ok(snap.usage.requests >= 1, JSON.stringify(snap.usage));
+    const sessions = await agentFetch(7360, '/agent/sessions');
+    assert.ok(sessions.sessions.some((x) => x.id === sessionId));
+  } finally { server.close(); }
+});
+await t('SSE：/agent/events 重放历史事件（含 user/assistant/tool 事件）', async () => {
+  const { server } = await mkAgentServer(7361, '?toolcall=doing', [...writeTools, doingTool]);
+  try {
+    const { sessionId } = await agentFetch(7361, '/agent/session', { title: 'sse' });
+    await agentFetch(7361, '/agent/message', { session: sessionId, message: '走一遍', approvalMode: 'auto' });
+    await pollUntil(async () => {
+      const s = await agentFetch(7361, `/agent/snapshot?session=${encodeURIComponent(sessionId)}`);
+      return !s.running && s.messages.length >= 4;
+    });
+    const controller = new AbortController();
+    const res = await fetch(`http://127.0.0.1:7361/agent/events?session=${encodeURIComponent(sessionId)}&since=0`, { signal: controller.signal });
+    assert.equal(res.status, 200);
+    assert.ok(String(res.headers.get('content-type')).includes('text/event-stream'), res.headers.get('content-type'));
+    const reader = res.body.getReader();
+    const { value } = await reader.read();
+    const chunk = Buffer.from(value || []).toString('utf8');
+    controller.abort();
+    assert.ok(chunk.includes('"type":"user_message"'), chunk.slice(0, 300));
+    assert.ok(chunk.includes('"type":"assistant_message"'), chunk.slice(0, 300));
+    assert.ok(chunk.includes('"type":"tool_result"'), chunk.slice(0, 300));
+  } finally { server.close(); }
+});
+await t('审批：manual 模式挂起 → GUI 决定 allowed 后执行，rejected 不执行', async () => {
+  let executed = 0;
+  const probe = {
+    name: 'write_probe', description: '写探针', parameters: { type: 'object', properties: {} },
+    requiresApproval: true, preview: () => ({ action: '写探针', diff: 'probe' }),
+    async execute() { executed += 1; return { ok: true, wrote: 1 }; },
+  };
+  const { server } = await mkAgentServer(7362, '?toolcall=write_probe', [probe]);
+  try {
+    const { sessionId } = await agentFetch(7362, '/agent/session', { title: 'approve' });
+    await agentFetch(7362, '/agent/message', { session: sessionId, message: '写一下', approvalMode: 'manual' });
+    const pending = await pollUntil(async () => {
+      const s = await agentFetch(7362, `/agent/snapshot?session=${encodeURIComponent(sessionId)}`);
+      return s.pendingDecision || null;
+    });
+    assert.ok(pending && pending.kind === 'write', JSON.stringify(pending));
+    assert.equal(pending.payload.preview.action, '写探针');
+    const resolved = await agentFetch(7362, '/agent/decision', { id: pending.id, status: 'allowed', resolution: { via: 'test' } });
+    assert.equal(resolved.ok, true, JSON.stringify(resolved));
+    const done = await pollUntil(async () => {
+      const s = await agentFetch(7362, `/agent/snapshot?session=${encodeURIComponent(sessionId)}`);
+      return (!s.running && s.pendingDecision === null && s.messages.some((m) => m.role === 'tool')) ? s : null;
+    });
+    assert.ok(done, '审批后应执行完成');
+    assert.equal(executed, 1);
+    assert.ok(done.messages.some((m) => m.role === 'tool' && m.content.includes('"wrote":1')), JSON.stringify(done.messages.map((m) => m.content)));
+
+    const { sessionId: s2 } = await agentFetch(7362, '/agent/session', { title: 'reject' });
+    await agentFetch(7362, '/agent/message', { session: s2, message: '再写', approvalMode: 'manual' });
+    const pending2 = await pollUntil(async () => {
+      const s = await agentFetch(7362, `/agent/snapshot?session=${encodeURIComponent(s2)}`);
+      return s.pendingDecision || null;
+    });
+    await agentFetch(7362, '/agent/decision', { id: pending2.id, status: 'rejected' });
+    const done2 = await pollUntil(async () => {
+      const s = await agentFetch(7362, `/agent/snapshot?session=${encodeURIComponent(s2)}`);
+      return (!s.running && s.pendingDecision === null && s.messages.some((m) => m.role === 'tool')) ? s : null;
+    });
+    assert.ok(done2, '拒绝后也应结束');
+    assert.equal(executed, 1, '拒绝后不应执行');
+    assert.ok(done2.messages.some((m) => m.role === 'tool' && m.content.includes('approval_denied')), JSON.stringify(done2.messages.map((m) => m.content)));
+  } finally { server.close(); }
+});
+await t('停止：/agent/stop 取消挂起追问与当前轮', async () => {
+  const question = '{"question":"选哪个？","options":[{"id":"a","label":"A"}]}';
+  const { server } = await mkAgentServer(7363, `?toolcall=ask_user&toolargs=${encodeURIComponent(question)}`, [askUserTool]);
+  try {
+    const { sessionId } = await agentFetch(7363, '/agent/session', { title: 'stop' });
+    await agentFetch(7363, '/agent/message', { session: sessionId, message: '问一下', approvalMode: 'manual' });
+    const pending = await pollUntil(async () => {
+      const s = await agentFetch(7363, `/agent/snapshot?session=${encodeURIComponent(sessionId)}`);
+      return s.pendingDecision || null;
+    });
+    assert.ok(pending && pending.kind === 'question', JSON.stringify(pending));
+    const stopped = await agentFetch(7363, '/agent/stop', { session: sessionId });
+    assert.equal(stopped.stopped, true);
+    const after = await pollUntil(async () => {
+      const s = await agentFetch(7363, `/agent/snapshot?session=${encodeURIComponent(sessionId)}`);
+      return (!s.running && s.pendingDecision === null) ? s : null;
+    });
+    assert.ok(after, '停止后应回到空闲');
   } finally { server.close(); }
 });
 
