@@ -7,7 +7,9 @@
 //
 // 故障注入（可加在 endpoint URL 上，也可用请求头 x-mock-fail）：
 //   ?fail=429              总是回 429（带 Retry-After: 2）
-//   ?fail=429&n=2          前 2 次 429，之后正常
+//   ?fail=429&n=2          前 2 次 429，之后正常（n 对任意 fail 模式生效）
+//   ?fail=429ra            429 但正文不含 rate-limit 关键词（Retry-After: 1，调度器用例）
+//   ?failkey=k1&fail=...   仅当 Authorization 的 key 等于 k1 时应用该故障（key 池用例）
 //   ?fail=timeout          永不响应（客户端超时）
 //   ?fail=abort            回一半断流
 //   ?fail=truncate         最后一行 JSON 被截断
@@ -148,7 +150,7 @@ function decideFault(url, headers) {
   const q = url.searchParams;
   if (q.get('reset') === '1') {
     scriptCounters.clear();
-    stats = { requests: 0, byMode: {}, entries: 0, inflightNow: 0, maxInflight: 0, jobsNow: 0, maxJobs: 0, busyRejects: 0, startedAt: Date.now() };
+    stats = { requests: 0, byMode: {}, keys: {}, entries: 0, inflightNow: 0, maxInflight: 0, jobsNow: 0, maxJobs: 0, busyRejects: 0, startedAt: Date.now() };
     return { mode: 'ok' };
   }
 
@@ -167,8 +169,12 @@ function decideFault(url, headers) {
   const fail = headerFault || q.get('fail') || GLOBAL_FAIL || 'ok';
   const n = Number(q.get('n') || 0);
 
-  if (fail === '429' && n > 0) {
-    const key = 'n429:' + n;
+  // 只对指定 key 生效的故障（调度器 key 池用例）：?failkey=k1&fail=429ra
+  const failKey = q.get('failkey');
+  if (failKey && String(headers.authorization || '').replace(/^Bearer\s+/i, '') !== failKey) return { mode: 'ok' };
+
+  if (n > 0) {
+    const key = 'n:' + url.search;   // 按完整 query 计数（同 URL 共享，不同用例互不干扰）
     const i = scriptCounters.get(key) || 0;
     scriptCounters.set(key, i + 1);
     if (i >= n) return { mode: 'ok' };
@@ -178,7 +184,7 @@ function decideFault(url, headers) {
 
 // ---------------- HTTP ----------------
 
-let stats = { requests: 0, byMode: {}, entries: 0, inflightNow: 0, maxInflight: 0, jobsNow: 0, maxJobs: 0, busyRejects: 0, startedAt: Date.now() };
+let stats = { requests: 0, byMode: {}, keys: {}, entries: 0, inflightNow: 0, maxInflight: 0, jobsNow: 0, maxJobs: 0, busyRejects: 0, startedAt: Date.now() };
 
 // 翻译 worker 用例的假站点状态（模块级：跨请求持久）：
 // - 章节 t1/t2/t3（或 -r 系列的 r1/r2/r3）；预置 t3 = 已用当前术语表翻译（应被跳过）
@@ -407,6 +413,10 @@ const server = http.createServer(async (req, res) => {
   stats.byMode[mode] = (stats.byMode[mode] || 0) + 1;
   stats.inflightNow = (stats.inflightNow || 0) + 1;
   stats.maxInflight = Math.max(stats.maxInflight || 0, stats.inflightNow);
+  // 按 key 计数（调度器接口池用例；测试用假 key，真 key 不会出现在这里）
+  const authKey = String(headers.authorization || '').replace(/^Bearer\s+/i, '') || '(none)';
+  stats.keys = stats.keys || {};
+  stats.keys[authKey] = (stats.keys[authKey] || 0) + 1;
   // 供测试断言请求体形状（例如「输出上限」不发送时不带 max_tokens）
   stats.lastBody = {
     model: body.model,
@@ -494,6 +504,11 @@ const server = http.createServer(async (req, res) => {
   switch (mode) {
     case '429': {
       sendJson(429, { error: { message: 'mock rate limit', type: 'rate_limit_exceeded' } }, { 'retry-after': '2' });
+      return;
+    }
+    case '429ra': {
+      // 429 但正文不含 rate-limit 关键词：引擎按 Retry-After 原值等待（调度器限流/重试用例，快）
+      sendJson(429, { error: { message: 'mock throttled' } }, { 'retry-after': '1' });
       return;
     }
     case 'timeout': {

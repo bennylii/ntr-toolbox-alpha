@@ -107,7 +107,11 @@ async function translateLines(lines, context) {
   if (context.signal && context.signal.aborted) throw new Error('aborted');
   const messages = buildTranslateMessages(lines, context.glossary);
   const result = await context.call(messages);
-  if (!result || !result.ok) throw new Error((result && result.error) || '请求失败');
+  if (!result || !result.ok) {
+    const err = new Error((result && result.error) || '请求失败');
+    if (result && result.retryAfterMs) err.retryAfterMs = result.retryAfterMs;   // 调度器重试耗尽后仍失败：给调用方等待依据
+    throw err;
+  }
   return parseTranslateAnswer(String(result.content || ''), lines);
 }
 
@@ -145,6 +149,10 @@ export async function translateSegment(lines, context) {
       const message = (err && err.message) || String(err);
       if (context.signal && context.signal.aborted) throw err;
       log(`翻译错误：${message}`);
+      // 上游限流/超时（带 retryAfterMs）时先按给出时间等待再重试，避免连续重锤
+      if (context.wait && err && err.retryAfterMs) {
+        try { await context.wait(err.retryAfterMs); } catch (e) { throw err; }
+      }
       retry += 1;
       continue;
     }

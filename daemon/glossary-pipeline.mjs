@@ -4,9 +4,10 @@
 // 内存纪律：正文只在 run 内以局部变量存在，阶段结束即弃；任何阶段超内存阈值立即停止
 // （外部看门狗负责拉起进程，状态都在 SQLite 里）。
 import crypto from 'node:crypto';
+import { LlmScheduler } from './scheduler.mjs';
 
 export class GlossaryPipeline {
-  constructor({ store, engine, workers, makeClient, log = console, options = {} }) {
+  constructor({ store, engine, workers, scheduler, makeClient, log = console, options = {} }) {
     this.store = store;
     this.engine = engine;
     this.workers = workers || [];
@@ -23,20 +24,27 @@ export class GlossaryPipeline {
       rssLimitMB: 500,
       ...options,
     };
+    this.scheduler = scheduler || new LlmScheduler({
+      engine,
+      store,
+      log,
+      options: { workers: this.workers },
+    });
   }
 
-  memoryOk() {
-    return process.memoryUsage().rss / 1e6 <= this.options.rssLimitMB;
+  memoryOk(limitMB) {
+    return process.memoryUsage().rss / 1e6 <= (limitMB || this.options.rssLimitMB);
   }
 
-  async runBook(bookKey, { signal } = {}) {
+  async runBook(bookKey, { signal, options } = {}) {
+    const opt = { ...this.options, ...(options || {}) };
     const holder = `daemon:${process.pid}`;
     if (!this.store.acquireLock(bookKey, holder)) throw new Error('同书已有运行器在跑（锁被占用）；确认油猴队列没在跑同一本');
-    const runId = this.store.startRun(bookKey);
+    const runId = this.store.startRun(bookKey, 'glossary');
     const t0 = Date.now();
     let requests = 0;
-    const overBudget = () => this.options.maxRequests > 0 && requests >= this.options.maxRequests;
-    const shouldStop = () => (signal ? signal.aborted : false) || overBudget() || !this.memoryOk();
+    const overBudget = () => opt.maxRequests > 0 && requests >= opt.maxRequests;
+    const shouldStop = () => (signal ? signal.aborted : false) || overBudget() || !this.memoryOk(opt.rssLimitMB);
     try {
       const book = this.store.getBook(bookKey);
       if (!book) throw new Error(`book 不存在: ${bookKey}`);
@@ -60,17 +68,16 @@ export class GlossaryPipeline {
       if (lines.length === 0) throw new Error('正文为空或语言过滤后无内容');
       this.log.log(`[extract] ${lines.length} 行`);
 
-      const requester = this.engine.createRequester(this.workers, { timeoutMs: 300000, rps: this.options.concurrency });
       const result = await this.engine.runJob({
         lines,
-        callLLM: (messages) => { requests += 1; return requester.call(messages); },
+        callLLM: (messages) => { requests += 1; return this.scheduler.call(messages, { signal }); },
         options: {
-          budgetChars: this.options.budgetChars,
-          maxRounds: this.options.maxRounds,
-          concurrency: this.options.concurrency,
+          budgetChars: opt.budgetChars,
+          maxRounds: opt.maxRounds,
+          concurrency: opt.concurrency,
           targetLanguage: '中文',
-          seedPolish: this.options.seedPolish,
-          maxSeedRounds: this.options.maxSeedRounds,
+          seedPolish: opt.seedPolish,
+          maxSeedRounds: opt.maxSeedRounds,
           seedLedger: this.store.getLedger(bookKey) || undefined,
         },
         shouldStop,
@@ -94,12 +101,12 @@ export class GlossaryPipeline {
       // ---- VERIFY（证据化核实；fail-open） ----
       let entries = result.glossary;
       let verifyStats = null;
-      if (this.options.verify !== false && entries.length > 0 && !shouldStop()) {
+      if (opt.verify !== false && entries.length > 0 && !shouldStop()) {
         verifyStats = await this.engine.verifyEntries({
           entries,
           lines,
-          call: (messages) => { requests += 1; return requester.call(messages); },
-          concurrency: this.options.concurrency,
+          call: (messages) => { requests += 1; return this.scheduler.call(messages, { signal }); },
+          concurrency: opt.concurrency,
           shouldStop,
           onProgress: (p) => this.log.log(`[verify] ${p.done}/${p.total} 批（判定 ${p.marks} 条）`),
         });
@@ -110,8 +117,8 @@ export class GlossaryPipeline {
 
       // ---- 与站点现有术语表合并（已有条目保留原值/原备注，新增条目待定） ----
       // 测试钩子：smoke 往候选里注入额外条目以驱动提案分支（正常运行为空）
-      if (Array.isArray(this.options.testExtraEntries) && this.options.testExtraEntries.length > 0) {
-        entries.push(...this.options.testExtraEntries.map((e) => ({ ...e })));
+      if (Array.isArray(opt.testExtraEntries) && opt.testExtraEntries.length > 0) {
+        entries.push(...opt.testExtraEntries.map((e) => ({ ...e })));
       }
       const merged = Object.keys(currentGlossary).map((src) => ({ src, dst: currentGlossary[src] }));
       const added = [];
@@ -190,6 +197,8 @@ export class GlossaryPipeline {
       this.store.setBookState(bookKey, state);
       throw e;
     } finally {
+      const usage = this.scheduler.takeUsage();
+      if (usage.requests > 0) this.store.addUsage({ bookKey, runId, job: 'glossary', ...usage });
       this.store.releaseLock(bookKey, holder);
     }
   }

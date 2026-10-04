@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS proposals (
   entriesJson TEXT, note TEXT, status TEXT DEFAULT 'open'
 );
 CREATE TABLE IF NOT EXISTS metrics (ts INTEGER PRIMARY KEY, rss REAL, heap REAL);
+CREATE TABLE IF NOT EXISTS usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, bookKey TEXT, runId INTEGER, job TEXT,
+  requests INTEGER, promptTokens INTEGER, completionTokens INTEGER, at INTEGER
+);
 CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS locks (bookKey TEXT PRIMARY KEY, holder TEXT, at INTEGER);
 `;
@@ -172,6 +176,21 @@ export class Store {
   }
   metricsSummary() {
     return this.db.prepare('SELECT ts, rss, heap FROM metrics ORDER BY ts DESC LIMIT 24').all().reverse();
+  }
+
+  // ---- 用量（调度器记账；每轮 run 落一行） ----
+  addUsage({ bookKey, runId = 0, job = '', requests = 0, promptTokens = 0, completionTokens = 0 }) {
+    this.db.prepare('INSERT INTO usage(bookKey, runId, job, requests, promptTokens, completionTokens, at) VALUES(?, ?, ?, ?, ?, ?, ?)')
+      .run(bookKey || '', runId || 0, job || '', requests || 0, promptTokens || 0, completionTokens || 0, Date.now());
+  }
+  usageSummary(bookKey, limit = 20) {
+    return bookKey
+      ? this.db.prepare('SELECT * FROM usage WHERE bookKey = ? ORDER BY id DESC LIMIT ?').all(bookKey, limit)
+      : this.db.prepare('SELECT * FROM usage ORDER BY id DESC LIMIT ?').all(limit);
+  }
+  usageTotals(bookKey) {
+    const sql = 'SELECT COUNT(*) rows, COALESCE(SUM(requests), 0) requests, COALESCE(SUM(promptTokens), 0) promptTokens, COALESCE(SUM(completionTokens), 0) completionTokens FROM usage';
+    return bookKey ? this.db.prepare(`${sql} WHERE bookKey = ?`).get(bookKey) : this.db.prepare(sql).get();
   }
 
   // ---- 锁（同书互斥；崩溃遗留超时自动失效） ----

@@ -16,6 +16,7 @@ const { loadEngine } = await imp('engine.mjs');
 const { SiteClient } = await imp('site-client.mjs');
 const { TranslationPipeline } = await imp('translate-pipeline.mjs');
 const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
+const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
 
 let pass = 0;
@@ -93,6 +94,123 @@ await t('续跑：仅补剩余 2 章，段缓存复用（已完成章的段不�
   const again = await mkPipeline({}).runBook(`web:mock/${TRANS_R_BOOK}`);
   assert.equal(again.stats.uploaded, 0);
   assert.equal(again.stats.requests, 0, '全部完成 + toc 已当前 → 零请求');
+});
+
+console.log('== 调度器（P1：全局并发门 / key 池 / 限流 / 用量） ==');
+const quiet = { log: () => { }, error: () => { } };
+const mkW = (id, key, extra = '') => ({ id, model: 'mock-glossary-1', endpoint: `${MOCK}/v1${extra}`, key });
+const mockStats = () => fetch(`${MOCK}/__stats`).then((r) => r.json());
+const resetMock = () => fetch(`${MOCK}/v1/chat/completions?reset=1`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', Authorization: 'Bearer reset-key' },
+  body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: 'reset' }] }),
+});
+const HELLO = [{ role: 'user', content: 'hello' }];
+
+await t('调度器：全局并发峰值 = 1（5 个并发请求）', async () => {
+  await resetMock();
+  const sch = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW('s1', 'sk1', '?slow=250')], maxInFlight: 1, transportRetries: 0 } });
+  await Promise.all(Array.from({ length: 5 }, () => sch.call(HELLO)));
+  const stats = await mockStats();
+  assert.equal(stats.maxInflight, 1, JSON.stringify({ maxInflight: stats.maxInflight }));
+  assert.equal(sch.stats().maxObservedInFlight, 1);
+});
+await t('调度器：对照组 maxInFlight=2 时峰值为 2（探针有效）', async () => {
+  await resetMock();
+  const sch = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW('s2', 'sk2', '?slow=250')], maxInFlight: 2, transportRetries: 0 } });
+  await Promise.all(Array.from({ length: 4 }, () => sch.call(HELLO)));
+  const stats = await mockStats();
+  assert.equal(stats.maxInflight, 2, JSON.stringify({ maxInflight: stats.maxInflight }));
+});
+await t('调度器：key 冷却轮换（k1 被限流 → 重试换 k2）', async () => {
+  await resetMock();
+  const sch = new LlmScheduler({
+    engine, store, log: quiet,
+    options: { workers: [mkW('a', 'k1', '?failkey=k1&fail=429ra&n=1'), { ...mkW('b', 'k2', '?failkey=k1&fail=429ra&n=1') }], maxInFlight: 1, transportRetries: 1, cooldownSteps: [60000] },
+  });
+  const res = await sch.call(HELLO);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(res.workerId, 'b', '限流后应换到 k2');
+  const stats = await mockStats();
+  assert.equal(stats.keys.k1, 1, JSON.stringify(stats.keys));
+  assert.equal(stats.keys.k2, 1, JSON.stringify(stats.keys));
+  assert.equal(sch.stats().byWorker.a.failures, 1, JSON.stringify(sch.stats().byWorker));
+});
+await t('调度器：遵循 Retry-After（429ra 一次 → 等待后重试成功）', async () => {
+  const sch = new LlmScheduler({
+    engine, store, log: quiet,
+    options: { workers: [mkW('r', 'rk', '?fail=429ra&n=1')], maxInFlight: 1, transportRetries: 2, cooldownSteps: [1500] },
+  });
+  const t0 = Date.now();
+  const res = await sch.call(HELLO);
+  const ms = Date.now() - t0;
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.ok(ms >= 900, `应等待 Retry-After（实测 ${ms}ms）`);
+  assert.equal(sch.stats().transportRetries, 1, JSON.stringify(sch.stats()));
+});
+await t('调度器：传输重试耗尽即失败（不无限重试）', async () => {
+  const sch = new LlmScheduler({
+    engine, store, log: quiet,
+    options: { workers: [mkW('x', 'xk', '?fail=429ra')], maxInFlight: 1, transportRetries: 1, cooldownSteps: [800] },
+  });
+  const res = await sch.call(HELLO);
+  assert.equal(res.ok, false, JSON.stringify(res));
+  assert.ok(/429/.test(res.error || ''), JSON.stringify(res));
+  assert.equal(sch.stats().transportRetries, 1, JSON.stringify(sch.stats()));
+});
+await t('调度器：RPM 节流（120 rpm → 两次派发间隔 ≥ 0.35s）', async () => {
+  const sch = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW('p', 'pk')], maxInFlight: 1, rpm: 120 } });
+  await sch.call(HELLO);
+  const t0 = Date.now();
+  await sch.call(HELLO);
+  const ms = Date.now() - t0;
+  assert.ok(ms >= 350, `节流未生效（实测 ${ms}ms）`);
+});
+await t('调度器：提示词超限（严格模式直接失败、不发请求）', async () => {
+  await resetMock();
+  const before = (await mockStats()).requests;
+  const sch = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW('g', 'gk')], maxInFlight: 1, maxPromptChars: 100, strictPrompt: true } });
+  const res = await sch.call([{ role: 'user', content: 'x'.repeat(500) }]);
+  assert.equal(res.ok, false, JSON.stringify(res));
+  assert.ok(/prompt-too-long/.test(res.error || ''), JSON.stringify(res));
+  assert.equal((await mockStats()).requests, before, '严格模式不应发出请求');
+  assert.ok(sch.stats().promptTooLong >= 1);
+});
+await t('调度器：用量按 run 落库（usage 表）', async () => {
+  const bookKey = `web:mock/mock-trans-u-${RUN}`;
+  store.upsertBook({ key: bookKey, kind: 'web', providerId: 'mock', novelId: `mock-trans-u-${RUN}`, origin: MOCK, title: '' });
+  const p = mkPipeline({});
+  await p.runBook(bookKey);
+  const rows = store.usageSummary(bookKey);
+  assert.ok(rows.length >= 1 && rows[0].requests > 0 && rows[0].promptTokens > 0, JSON.stringify(rows));
+  const totals = store.usageTotals(bookKey);
+  assert.ok(totals.rows >= 1 && totals.requests > 0, JSON.stringify(totals));
+});
+await t('控制面：/auth 热更新 workers、/run 单队列串行', async () => {
+  const sch = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW('z', 'zk')], maxInFlight: 1 } });
+  const server = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline: null, scheduler: sch, port: 7346, log: quiet });
+  const auth = await fetch('http://127.0.0.1:7346/auth', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: 'test-token', workers: [mkW('h1', 'hk1'), mkW('h2', 'hk2')] }),
+  }).then((r) => r.json());
+  assert.equal(auth.workers, 2);
+  assert.equal(sch.stats().workers, 2, '热更新立即生效');
+  const bookKey = `web:mock/${TRANS_BOOK}`;
+  const post = (b) => fetch('http://127.0.0.1:7346/run', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b),
+  }).then((r) => r.json());
+  const r1 = await post({ bookKey, job: 'translate' });
+  const r2 = await post({ bookKey, job: 'translate' });
+  assert.ok(r1.id > 0 && r2.id > r1.id, JSON.stringify({ r1, r2 }));
+  let states = [];
+  for (let i = 0; i < 100; i += 1) {
+    const list = await fetch('http://127.0.0.1:7346/runs').then((r) => r.json());
+    const items = list.runs.filter((x) => x.id === r1.id || x.id === r2.id);
+    if (items.length === 2 && items.every((x) => x.state === 'done' || x.state === 'failed')) { states = items.map((x) => x.state); break; }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.equal(states.length, 2, '两个 run 都应到达终态（队列串行执行）');
+  server.close();
 });
 
 console.log('== 控制面 ==');

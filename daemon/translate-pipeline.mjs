@@ -1,13 +1,17 @@
 // daemon/translate-pipeline.mjs —— GPT 翻译 worker（站点工作区浏览器 worker 的 Node 替代）
-// 流程：getTranslateTask → pin glossaryUuid → 逐章：chapter-task → 分段并发翻译（段缓存落库）
+// 流程：getTranslateTask → pin glossaryUuid → 逐章：chapter-task → 分段翻译（段缓存落库，经全局调度器）
 //        → 合并 → 上传（带当前 glossaryId）→ 进度落库 → 丢弃本章文本
 // 语义与站点一致：expire/normal/all 档位、oldGlossaryId === glossaryId 的章节跳过、401 → need-auth。
 // 内存纪律：段落/译文只在单章作用域内存在，上传后随作用域释放（工作区泄漏的正面修复）。
+// 调度纪律：所有 LLM 请求经 LlmScheduler（默认全局单线程）；本次 run 的选项以参数覆盖，不改共享配置。
 import crypto from 'node:crypto';
 import { segmentLines, translateSegment } from './translate.mjs';
+import { LlmScheduler } from './scheduler.mjs';
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export class TranslationPipeline {
-  constructor({ store, engine, workers, makeClient, log = console, options = {} }) {
+  constructor({ store, engine, workers, scheduler, makeClient, log = console, options = {} }) {
     this.store = store;
     this.engine = engine;
     this.workers = workers || [];
@@ -16,16 +20,22 @@ export class TranslationPipeline {
     this.options = {
       translatorId: 'gpt',
       level: 'expire',        // expire | normal | all
-      concurrency: 2,         // 段级并发
+      concurrency: 2,         // 段级并发（受调度器全局在途上限约束）
       maxChapters: 0,         // >0 时本次最多上传 N 章（测试钩子/小步快跑）
       rssLimitMB: 500,
       timeoutMs: 300000,
       ...options,
     };
+    this.scheduler = scheduler || new LlmScheduler({
+      engine,
+      store,
+      log,
+      options: { timeoutMs: this.options.timeoutMs, workers: this.workers },
+    });
   }
 
-  memoryOk() {
-    return process.memoryUsage().rss / 1e6 <= this.options.rssLimitMB;
+  memoryOk(limitMB) {
+    return process.memoryUsage().rss / 1e6 <= (limitMB || this.options.rssLimitMB);
   }
 
   // 目标筛选（与站点 TranslateWeb/Wenku 的档位语义一致）
@@ -41,8 +51,9 @@ export class TranslationPipeline {
     return targets;
   }
 
-  async runBook(bookKey, { signal } = {}) {
-    const { translatorId, level, concurrency } = this.options;
+  async runBook(bookKey, { signal, options } = {}) {
+    const opt = { ...this.options, ...(options || {}) };
+    const { translatorId, level, concurrency } = opt;
     const holder = `daemon:${process.pid}`;
     if (!this.store.acquireLock(bookKey, holder)) throw new Error('同书已有运行器在跑（锁被占用）；确认浏览器/其他会话没在跑同一本');
     const runId = this.store.startRun(bookKey, 'translate');
@@ -50,8 +61,8 @@ export class TranslationPipeline {
     let requests = 0;
     let uploads = 0;
     const shouldStop = () => (signal ? signal.aborted : false)
-      || !this.memoryOk()
-      || (this.options.maxChapters > 0 && uploads >= this.options.maxChapters);
+      || !this.memoryOk(opt.rssLimitMB)
+      || (opt.maxChapters > 0 && uploads >= opt.maxChapters);
     try {
       const book = this.store.getBook(bookKey);
       if (!book) throw new Error(`book 不存在: ${bookKey}`);
@@ -69,8 +80,7 @@ export class TranslationPipeline {
       for (const task of tasks) targets.push(...this.planTargets(task.toc, { ...task, level }));
       this.log.log(`[translate] ${book.key}：level=${level} 目标 ${targets.length} 章（合计 ${tasks.reduce((n, t) => n + (t.toc || []).length, 0)} 章）`);
 
-      const requester = this.engine.createRequester(this.workers, { timeoutMs: this.options.timeoutMs, rps: concurrency, rpm: 0 });
-      const call = (messages) => { requests += 1; return requester.call(messages); };
+      const call = (messages) => { requests += 1; return this.scheduler.call(messages, { signal }); };
 
       let doneChapters = 0;
       let skipped = 0;
@@ -113,6 +123,7 @@ export class TranslationPipeline {
                 call,
                 glossary,
                 signal,
+                wait: (ms) => sleep(ms),   // 传输层重试耗尽后的等待（调度器也会在派发前按冷却等待）
                 log: (msg) => this.log.log(`[translate] ${chapterKey} ${msg}`),
               });
               this.store.putSeg(bookKey, segKey, zh);
@@ -154,6 +165,8 @@ export class TranslationPipeline {
       this.store.setBookState(bookKey, state);
       throw err;
     } finally {
+      const usage = this.scheduler.takeUsage();
+      if (usage.requests > 0) this.store.addUsage({ bookKey, runId, job: 'translate', ...usage });
       this.store.releaseLock(bookKey, holder);
     }
   }

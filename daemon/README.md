@@ -19,12 +19,26 @@ node daemon/index.mjs add       <novel-url>        # 登记（/novel/{provider}/
 node daemon/index.mjs run       [--book key]       # 术语管线：提取→核实→回扫→直写/提案（含快照）
 node daemon/index.mjs translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 node daemon/index.mjs watch     [--interval 30]    # 常驻：定期按 expire 档补翻
-node daemon/index.mjs serve     [--port 7331]      # 控制面 /status /progress /auth /run
+node daemon/index.mjs serve     [--port 7331]      # 控制面 /status /runs /progress /proposals /auth /run（/run 单队列串行）
 node daemon/index.mjs status
 node daemon/index.mjs forget    <bookKey>
 ```
 
+全局旗标（调度器，见下节）：`--max-in-flight N`、`--rpm N`、`--transport-retries N`、`--max-prompt-chars N`、`--strict-prompt`。
+
 典型流程：`serve`（或 `watch`）常驻 → 浏览器点「同步 Daemon」推凭据与翻译器 → `add` 登记书 → `translate`。
+
+## 调度与限流（默认单线程，适配 Gemini 逆向 / 单槽上游）
+
+所有 LLM 调用都经 `daemon/scheduler.mjs`（规格 `docs/cleanroom/spec-06-llm-scheduler.md`）：
+
+- **全局并发门**：`--max-in-flight N`（默认 1）——同刻最多 N 个在途请求、FIFO 排队；劈半重试、提取、核实同样受管；
+- **接口池**：多 worker（同端点多 key）轮转；单 key 连续失败按 15s/30s/60s 阶梯冷却，成功清零；全部冷却时等待最早解冻者；
+- **上游限流**：遵循 Retry-After / `retryAfterMs`（下限 1s、上限 300s）；传输层最多 `--transport-retries N`（默认 3）次，等待发生在并发额度之外；凭据类错误不重试；
+- **RPM 节流**：`--rpm N`（默认 0 = 不限）；
+- **上下文守卫**：`--max-prompt-chars N`（默认 12000，≈16K token 内）超限只告警；`--strict-prompt` 时直接失败、不发请求；
+- **用量记账**：上游 `usage` 优先、缺失按字符估算；每轮 run 落 `usage` 表，`status` 汇总；
+- 持久配置：`config.llm = { maxInFlight, rpm, transportRetries, maxPromptChars, strictPrompt }`（CLI 旗标优先）。
 
 ## 真机契约备忘（mock 已同步改严）
 
