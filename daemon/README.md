@@ -21,6 +21,7 @@ node daemon/index.mjs check     [--book key] [--codes A,B] [--limit N] [--propos
 node daemon/index.mjs rules     list|add|rm|enable|disable   # 文本处理链规则（pre/post 替换、保留段）
 node daemon/index.mjs prompt    show|set|clear               # 提示词模板（prefix/base/thinking/suffix）
 node daemon/index.mjs glossary-io import|export              # LG 术语表互通（JSON；写站点=快照+回读校验）
+node daemon/index.mjs agent     [--book key] [--message "..."] [--session id] [--auto]   # 本地助手（工具调用）
 node daemon/index.mjs translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 node daemon/index.mjs watch     [--interval 30]    # 常驻：定期按 expire 档补翻
 node daemon/index.mjs serve     [--port 7331]      # 控制台 /ui + 控制面 /status /runs /auth /run …（/run 单队列串行）
@@ -56,6 +57,16 @@ node daemon/index.mjs forget    <bookKey>
 - **上下文守卫**：`--max-prompt-chars N`（默认 12000，≈16K token 内）超限只告警；`--strict-prompt` 时直接失败、不发请求；
 - **用量记账**：上游 `usage` 优先、缺失按字符估算；每轮 run 落 `usage` 表，`status` 汇总；
 - 持久配置：`config.llm = { maxInFlight, rpm, transportRetries, maxPromptChars, strictPrompt }`（CLI 旗标优先）。
+
+## Agent（本地助手，工具调用）
+
+`node daemon/index.mjs agent`（缺 `--message` 进交互模式；`/stop` 中止当前轮、`/exit` 退出）。
+
+- **模型要求**：OpenAI 兼容 Chat Completions 且支持 `tools/tool_calls`（建议与翻译池分开配置：助手/术语走工具模型，翻译仍走逆向 Gemini 单线程）；请求同样经调度器（并发门/冷却/限速/RPM 与用量记账）。
+- **循环**：系统提示 + 历史 → 模型 → 顺序派发工具 → 回填 `role:'tool'` 结果 → 直到无工具调用；单轮步数上限 24（可配）、支持中止与失败续聊。
+- **会话**：`agent_sessions/agent_messages/agent_decisions` 落 SQLite；时间线全量保留，超阈值时把旧段摘要化（`summaryUpTo` 之后才进模型）。`--session <id>` 续用上次会话。
+- **审批**：默认 manual —— 标记 `requiresApproval` 的工具（写术语表/回滚/改规则与提示词等）会挂起为 decision，CLI 里 y/N 确认；`--auto` 跳过审批（等价 auto 模式）。追问（`ask_user`）同样是 decision。
+- **v1 工具**：`doing`（进度）、`ask_user`（追问）；A2/A3 起追加只读（书目/正文/译文/质量/提案/技能）与执行、写入类工具。
 
 ## 文本处理链（预处理 / 后处理）
 
@@ -116,5 +127,6 @@ node daemon/quality-test.mjs            # 质检纯函数单测（七码 + 批�
 node daemon/processors-test.mjs         # 处理链单测（占位符/保留段/替换表/标点；无需 mock）
 node daemon/prompt-test.mjs             # 提示词模板单测（默认逐字一致/回退/槽位；无需 mock）
 node daemon/glossary-io-test.mjs        # LG 互通单测（解析/分流/往返；无需 mock）
-MOCK_ORIGIN=http://127.0.0.1:8790 node daemon/daemon-test.mjs   # 冒烟：全管线/跳过/续跑/控制面/调度器/质检/处理链/模板/互通
+node daemon/agent-test.mjs              # Agent 单测（参数解析/裁剪/会话/压缩/决策/循环；无需 mock）
+MOCK_ORIGIN=http://127.0.0.1:8790 node daemon/daemon-test.mjs   # 冒烟：全管线/跳过/续跑/控制面/调度器/质检/处理链/模板/互通/助手
 ```
