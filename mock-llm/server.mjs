@@ -18,6 +18,8 @@
 //   ?fail=think            返回含 <think> 段与推理前缀
 //   ?slow=1500             延迟 1.5s 再响应
 //   ?script=429,429,ok,truncate,ok   按请求顺序消费的脚本（第 N 次请求用第 N 项）
+//   ?toolcall=a,b   Agent 工具调用用例：按已出现的 tool 结果数返回下一个工具调用；用完则给最终文本
+//   ?toolargs={...} 或 [ {...}, {...} ]   工具参数（对象共用/数组按轮次）；?toolargraw=<raw> 造非法 JSON
 //   ?variant=unstable      每次请求对部分条目换一个 dst（测多轮投票）
 //   ?reset=1               重置统计
 // 统计：GET /__stats
@@ -506,6 +508,54 @@ const server = http.createServer(async (req, res) => {
       reason: dropFirst && i === 0 ? 'mock 首条剔除' : 'mock',
     }));
     sendJson(200, okBody(['```jsonline', ...lines, '```'].join('\n')));
+    return;
+  }
+
+  // Agent 工具调用用例：?toolcall=doing,ask_user（按已出现的 tool 结果数决定本轮返回哪个工具调用；没有下一个则给最终答复）
+  //   ?toolargs={"text":"..."}（对象=所有调用共用；数组=按轮次取）  ?toolargraw=<原样字符串>（造非法 JSON 用）
+  const toolScript = url.searchParams.get('toolcall');
+  if (toolScript) {
+    const names = toolScript.split(',').map((s) => s.trim()).filter(Boolean);
+    const toolRounds = (body.messages || []).filter((m) => m.role === 'tool').length;
+    stats.lastTools = (body.tools || []).map((t) => (t.function && t.function.name) || '');
+    stats.lastToolTurn = {
+      rounds: toolRounds,
+      hasTools: Array.isArray(body.tools) && body.tools.length > 0,
+      toolChoice: body.tool_choice || null,
+    };
+    const name = names[toolRounds];
+    if (name) {
+      let argsText = '{}';
+      const argRaw = url.searchParams.get('toolargraw');
+      if (argRaw != null) argsText = argRaw;
+      else {
+        const argParam = url.searchParams.get('toolargs');
+        if (argParam) {
+          try {
+            const parsed = JSON.parse(argParam);
+            argsText = JSON.stringify(Array.isArray(parsed) ? (parsed[toolRounds] || {}) : parsed);
+          } catch { argsText = '{}'; }
+        }
+      }
+      stats.lastToolCall = { name, args: argsText };
+      sendJson(200, {
+        id: 'chatcmpl-mock',
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: body.model || 'mock-glossary-1',
+        choices: [{
+          index: 0,
+          finish_reason: 'tool_calls',
+          message: {
+            role: 'assistant',
+            content: null,
+            tool_calls: [{ id: `call_mock_${toolRounds + 1}`, type: 'function', function: { name, arguments: argsText } }],
+          },
+        }],
+      });
+      return;
+    }
+    sendJson(200, okBody(`完成（mock）：经过 ${toolRounds} 次工具调用。`));
     return;
   }
 

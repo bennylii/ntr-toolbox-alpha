@@ -8,6 +8,7 @@
 //   rules list|add|rm|enable|disable   文本处理链规则（pre/post 替换、保留段）
 //   prompt show|set|clear   提示词模板（prefix/base/thinking/suffix；base 必须含 {format_rules}）
 //   glossary-io import|export   LG 术语表互通（JSON；写站点=快照+全量替换+回读校验）
+//   agent [--book key] [--message "..."] [--session id] [--auto]   本地助手（工具调用；缺 --message 进交互模式）
 //   translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 //   watch [--interval 分钟]  常驻：定期按 expire 档补翻未译/过期章节
 //   serve [--port 7331]     本机控制面（/status /progress /auth /run）
@@ -28,6 +29,9 @@ const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
 const { CheckPipeline, samplesToTsv } = await imp('check-pipeline.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
 const { parseBookUrl } = await imp('book-url.mjs');
+const { createAgentLlm } = await imp('agent-llm.mjs');
+const { createAgentLoop } = await imp('agent-loop.mjs');
+const { doingTool, askUserTool } = await imp('agent-tools.mjs');
 const { templateFromStore, DEFAULT_TEMPLATE, PROMPT_SLOTS } = await imp('prompt.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
@@ -112,6 +116,20 @@ const glossaryPipeline = new GlossaryPipeline({
 });
 
 const checkPipeline = new CheckPipeline({ store, engine, makeClient, log });
+
+// Agent（工具调用模型；翻译/术语管线各自的调度器不受影响）
+const agentLlm = createAgentLlm({ scheduler, log });
+const agentLoop = createAgentLoop({
+  store,
+  chat: agentLlm.chat,
+  takeUsage: agentLlm.takeUsage,
+  tools: [doingTool, askUserTool],
+  log,
+  options: {
+    approvalMode: flags.auto === true ? 'auto' : 'manual',
+    bookKey: typeof flags.book === 'string' ? flags.book : '',
+  },
+});
 
 // 自愈：未捕获异常干净退出（外部看门狗拉起；状态都在 SQLite）process.on('unhandledRejection', (e) => { log.error('unhandledRejection:', e); process.exit(0); });
 process.on('uncaughtException', (e) => { log.error('uncaughtException:', e); process.exit(0); });
@@ -300,6 +318,63 @@ switch (command) {
     }
     break;
   }
+  case 'agent': {
+    const agentBook = typeof flags.book === 'string' ? flags.book : '';
+    let sessionId = typeof flags.session === 'string' ? flags.session : '';
+    const firstMessage = typeof flags.message === 'string' ? flags.message : '';
+    if (sessionId) {
+      if (!store.getAgentSession(sessionId)) { log.error(`会话不存在：${sessionId}`); break; }
+    } else {
+      sessionId = store.createAgentSession({ bookKey: agentBook, title: (firstMessage || 'agent').slice(0, 40) });
+      log.log(`新会话：${sessionId}${agentBook ? `（${agentBook}）` : ''}${flags.auto === true ? '（auto 审批）' : ''}`);
+    }
+    const { createInterface } = await import('node:readline/promises');
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const onEvent = (ev) => {
+      if (ev.type === 'assistant_message') {
+        if (ev.text) log.log(`\n${ev.text}`);
+        (ev.toolCalls || []).forEach((tc) => log.log(`[工具] ${tc.name} ${JSON.stringify(tc.args)}`));
+      }
+      if (ev.type === 'tool_result') log.log(`[结果] ${ev.tool}${ev.ok ? '' : ` 失败：${ev.error}`}`);
+      if (ev.type === 'doing') log.log(`[进度] ${ev.text}`);
+      if (ev.type === 'question') {
+        const lines = [`[提问] ${ev.question}`];
+        (ev.options || []).forEach((o, i) => lines.push(`  ${i + 1}) ${o.label}（${o.id}）`));
+        log.log(lines.join('\n'));
+        rl.question('选择编号，或直接输入回答 > ').then((ans) => {
+          const idx = Number(ans.trim());
+          const picked = Number.isInteger(idx) && idx >= 1 && idx <= (ev.options || []).length ? ev.options[idx - 1] : null;
+          agentLoop.resolveDecision(ev.decisionId, 'allowed', picked ? { selected: picked.id } : { custom: ans.trim() });
+        }).catch(() => agentLoop.resolveDecision(ev.decisionId, 'cancelled'));
+      }
+      if (ev.type === 'decision') {
+        log.log(`[审批] ${ev.tool} ${JSON.stringify(ev.preview || ev.args || {}).slice(0, 300)}`);
+        rl.question('允许本次写入？(y/N) > ').then((ans) => {
+          const yes = /^(y|yes)$/i.test(ans.trim());
+          agentLoop.resolveDecision(ev.decisionId, yes ? 'allowed' : 'rejected', { via: 'cli' });
+        }).catch(() => agentLoop.resolveDecision(ev.decisionId, 'rejected'));
+      }
+    };
+    try {
+      if (firstMessage) {
+        const result = await agentLoop.runTurn(sessionId, firstMessage, { onEvent });
+        log.log(`\n[一轮结束] ${result.ok ? `ok（${result.steps} 步）` : `失败：${result.error}`}`);
+      } else {
+        log.log('交互模式：输入消息回车发送；/stop 中止当前轮；/exit 退出');
+        for (;;) {
+          const line = (await rl.question('› ')).trim();
+          if (line === '/exit' || line === '/quit') break;
+          if (line === '') continue;
+          if (line === '/stop') { agentLoop.stop(sessionId); continue; }
+          const result = await agentLoop.runTurn(sessionId, line, { onEvent });
+          if (!result.ok) log.log(`[一轮结束] 失败：${result.error}`);
+        }
+      }
+    } finally {
+      rl.close();
+    }
+    break;
+  }
   case 'translate': {
     await runBooks(flags.book);
     break;
@@ -351,6 +426,6 @@ switch (command) {
     break;
   }
   default:
-    log.error(`未知命令: ${command}（可用 auth/add/run/check/rules/prompt/glossary-io/translate/watch/serve/status/forget）`);
+    log.error(`未知命令: ${command}（可用 auth/add/run/check/rules/prompt/glossary-io/agent/translate/watch/serve/status/forget）`);
     process.exit(2);
 }

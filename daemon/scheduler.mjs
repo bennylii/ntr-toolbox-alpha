@@ -7,14 +7,19 @@ const abortError = () => Object.assign(new Error('aborted'), { code: 'aborted' }
 
 const RE_CJK = /[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
 
-// 启发式 token 估算（CJK ≈ 1 token/字，其余 ≈ 0.25）；不引 tokenizer
+// 启发式 token 估算（CJK ≈ 1 token/字，其余 ≈ 0.25）；不引 tokenizer。
+// 含 tool_calls（agent 历史）以便上下文预算更接近真实。
 export function estimateTokens(messages) {
   let chars = 0;
   let tokens = 0;
-  for (const m of messages || []) {
-    const s = String((m && m.content) || '');
+  const add = (value) => {
+    const s = String(value == null ? '' : value);
     chars += s.length;
     for (const ch of s) tokens += RE_CJK.test(ch) ? 1 : 0.25;
+  };
+  for (const m of messages || []) {
+    add(m && m.content);
+    if (m && Array.isArray(m.tool_calls)) add(JSON.stringify(m.tool_calls));
   }
   return { chars, tokens: Math.ceil(tokens) };
 }
@@ -209,15 +214,94 @@ export class LlmScheduler {
     return res;
   };
 
-  async _callOnce(worker, messages, signal) {
-    const requester = this._ensureRequester();
-    const promise = requester.call(messages, { worker });
+  async _callOnce(worker, messages, signal, { tools, toolChoice } = {}) {
+    const promise = (Array.isArray(tools) && tools.length > 0)
+      ? this._callToolChat(worker, messages, tools, toolChoice)
+      : this._ensureRequester().call(messages, { worker });
     if (!signal) return promise;
     if (signal.aborted) throw abortError();
     return Promise.race([
       promise,
       new Promise((_, reject) => signal.addEventListener('abort', () => reject(abortError()), { once: true })),
     ]);
+  }
+
+  // 工具调用路径：不走引擎 requester（它不支持 tools），由调度器直接发 OpenAI 兼容 Chat Completions。
+  // 并发门/冷却/限流/用量记账与普通请求完全一致（调用方即 agent loop）。
+  _chatUrl(endpoint) {
+    const url = new URL(String(endpoint || ''));
+    if (url.pathname.endsWith('/chat/completions')) return url.href;
+    if (url.pathname === '/' || url.pathname === '') url.pathname = '/v1/chat/completions';
+    else if (url.pathname.endsWith('/v1') || url.pathname.endsWith('/v1/')) url.pathname = url.pathname.replace(/\/$/, '') + '/chat/completions';
+    else url.pathname = url.pathname.replace(/\/$/, '') + '/chat/completions';
+    return url.href;
+  }
+
+  async _callToolChat(worker, messages, tools, toolChoice) {
+    const timeoutMs = this.options.timeoutMs || 300000;
+    const body = {
+      model: worker.model,
+      messages,
+      temperature: this.options.temperature === undefined ? 0.3 : this.options.temperature,
+      tools,
+    };
+    if (toolChoice) body.tool_choice = toolChoice;
+    const maxTokens = Number(this.options.maxTokens) || 0;
+    if (maxTokens > 0) {
+      if (String(worker.endpoint || '').startsWith('https://api.openai.com') || /o\d($|-)/i.test(worker.model || '')) body.max_completion_tokens = maxTokens;
+      else body.max_tokens = maxTokens;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(this._chatUrl(worker.endpoint), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + (worker.key || 'no_key_required'),
+          Accept: 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        let bodyText = '';
+        try { bodyText = String(await res.text()).slice(0, 2000); } catch { /* ignore */ }
+        let retryAfterMs = 0;
+        const header = res.headers.get('retry-after');
+        if (header && !Number.isNaN(Number(header))) retryAfterMs = Math.max(1, Math.min(300, Number(header))) * 1000;
+        if (retryAfterMs === 0) {
+          const m = /retry[-\s]?after[\s:=]*(\d+(?:\.\d+)?)/i.exec(bodyText);
+          if (m) retryAfterMs = Math.min(300, Number(m[1])) * 1000;
+        }
+        if (/busy|cooldown|rate.?limit/i.test(bodyText)) retryAfterMs = Math.max(retryAfterMs, 30000);
+        else if (retryAfterMs === 0 && (res.status === 429 || res.status === 503)) retryAfterMs = 30000;
+        const detail = bodyText.replace(/\s+/g, ' ').trim().slice(0, 180);
+        return { ok: false, status: res.status, error: `HTTP ${res.status}${detail ? '：' + detail : ''}`, retryAfterMs, workerId: worker.id };
+      }
+      const data = await res.json();
+      const choice = (data.choices && data.choices[0]) || {};
+      const message = choice.message || {};
+      this._pendingUsage = readUsage(data);
+      const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls.map((tc) => ({
+        id: String(tc.id || ''),
+        name: String((tc.function && tc.function.name) || ''),
+        arguments: String((tc.function && tc.function.arguments) || ''),
+      })) : [];
+      return {
+        ok: true,
+        content: message.content || '',
+        toolCalls,
+        finishReason: choice.finish_reason || '',
+        workerId: worker.id,
+      };
+    } catch (e) {
+      const aborted = e && (e.name === 'AbortError' || /abort/i.test(String(e.message || e)));
+      const retryAfterMs = aborted ? Math.min(300000, Math.max(15000, timeoutMs / 4)) : 10000;
+      return { ok: false, error: aborted ? '请求超时' : String((e && e.message) || e), retryAfterMs, workerId: worker.id };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   _account(messages, result, usage) {
@@ -230,11 +314,15 @@ export class LlmScheduler {
     this._usage.promptTokens += estimateTokens(messages).tokens;
     if (result && result.ok) {
       this._usage.completionTokens += estimateTokens([{ content: result.content || '' }]).tokens;
+      if (Array.isArray(result.toolCalls) && result.toolCalls.length > 0) {
+        this._usage.completionTokens += estimateTokens(result.toolCalls.map((tc) => ({ content: `${tc.name}${tc.arguments}` }))).tokens;
+      }
     }
   }
 
-  // call(messages, { signal }) → 与 engine.createRequester 的回调同形
-  async call(messages, { signal } = {}) {
+  // call(messages, { signal, tools, toolChoice }) → 与 engine.createRequester 的回调同形；
+  // 带 tools 时走调度器自带的 OpenAI 兼容工具调用路径（结果多一个 toolCalls 字段）
+  async call(messages, { signal, tools, toolChoice } = {}) {
     const size = estimateTokens(messages);
     if (size.chars > this.options.maxPromptChars) {
       this._stats.promptTooLong += 1;
@@ -257,7 +345,7 @@ export class LlmScheduler {
       let result;
       this._pendingUsage = null;
       try {
-        result = await this._callOnce(picked.worker, messages, signal);
+        result = await this._callOnce(picked.worker, messages, signal, { tools, toolChoice });
       } catch (e) {
         result = { ok: false, error: (e && e.message) || String(e), retryAfterMs: 0, workerId: picked.worker.id };
       } finally {

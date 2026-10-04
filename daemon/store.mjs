@@ -1,6 +1,7 @@
 // daemon/store.mjs —— SQLite 封装（node:sqlite，零依赖；接口做薄，必要时可换存储）
 // 原则：进程内不驻留章节正文（工作区内存问题的正面修复）；进度/段缓存/指标全部落库。
 import { DatabaseSync } from 'node:sqlite';
+import crypto from 'node:crypto';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS books (
@@ -37,6 +38,22 @@ CREATE TABLE IF NOT EXISTS prompts (
   bookKey TEXT DEFAULT '', slot TEXT, text TEXT DEFAULT '', updateAt INTEGER,
   PRIMARY KEY (bookKey, slot)
 );
+CREATE TABLE IF NOT EXISTS agent_sessions (
+  id TEXT PRIMARY KEY, bookKey TEXT DEFAULT '', title TEXT DEFAULT '', state TEXT DEFAULT 'idle',
+  personality TEXT DEFAULT '', summary TEXT DEFAULT '', summaryUpTo INTEGER DEFAULT 0,
+  createdAt INTEGER, updatedAt INTEGER
+);
+CREATE TABLE IF NOT EXISTS agent_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, sessionId TEXT, seq INTEGER, role TEXT,
+  content TEXT DEFAULT '', toolCallsJson TEXT DEFAULT '', toolCallId TEXT DEFAULT '',
+  name TEXT DEFAULT '', usageJson TEXT DEFAULT '', at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_session ON agent_messages(sessionId, seq);
+CREATE TABLE IF NOT EXISTS agent_decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, sessionId TEXT, kind TEXT, payloadJson TEXT DEFAULT '',
+  status TEXT DEFAULT 'pending', at INTEGER, resolvedAt INTEGER, resolutionJson TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_agent_decisions_session ON agent_decisions(sessionId, status);
 CREATE TABLE IF NOT EXISTS snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, bookKey TEXT, at INTEGER, glossaryJson TEXT, note TEXT);
 CREATE TABLE IF NOT EXISTS proposals (
   id INTEGER PRIMARY KEY AUTOINCREMENT, bookKey TEXT, at INTEGER, kind TEXT,
@@ -171,6 +188,94 @@ export class Store {
   }
   clearPrompt(bookKey, slot) {
     this.db.prepare('DELETE FROM prompts WHERE bookKey = ? AND slot = ?').run(bookKey || '', slot || '');
+  }
+
+  // ---- Agent：会话 / 消息 / 决定（审批与追问） ----
+  createAgentSession({ id, bookKey = '', title = '', personality = '' }) {
+    const sid = id || crypto.randomUUID();
+    const now = Date.now();
+    this.db.prepare('INSERT INTO agent_sessions(id, bookKey, title, state, personality, createdAt, updatedAt) VALUES(?, ?, ?, ?, ?, ?, ?)')
+      .run(sid, bookKey || '', title || '', 'idle', personality || '', now, now);
+    return sid;
+  }
+  getAgentSession(id) {
+    return this.db.prepare('SELECT * FROM agent_sessions WHERE id = ?').get(String(id || '')) || null;
+  }
+  listAgentSessions(limit = 20) {
+    return this.db.prepare('SELECT * FROM agent_sessions ORDER BY updatedAt DESC LIMIT ?').all(limit);
+  }
+  touchAgentSession(id, { state, title } = {}) {
+    const row = this.getAgentSession(id);
+    if (!row) return;
+    this.db.prepare('UPDATE agent_sessions SET updatedAt = ?, state = ?, title = ? WHERE id = ?')
+      .run(Date.now(), state === undefined ? row.state : state, title === undefined ? row.title : title, id);
+  }
+  setAgentSummary(id, { summary, summaryUpTo }) {
+    this.db.prepare('UPDATE agent_sessions SET summary = ?, summaryUpTo = ?, updatedAt = ? WHERE id = ?')
+      .run(String(summary || ''), Number(summaryUpTo) || 0, Date.now(), id);
+  }
+  appendAgentMessage({ sessionId, role, content = '', toolCalls = null, toolCallId = '', name = '', usage = null }) {
+    const last = this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS s FROM agent_messages WHERE sessionId = ?').get(sessionId);
+    const seq = (last ? last.s : 0) + 1;
+    const r = this.db.prepare(`
+      INSERT INTO agent_messages(sessionId, seq, role, content, toolCallsJson, toolCallId, name, usageJson, at)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(sessionId, seq, role || '', String(content == null ? '' : content),
+      toolCalls ? JSON.stringify(toolCalls) : '', toolCallId || '', name || '',
+      usage ? JSON.stringify(usage) : '', Date.now());
+    return { id: Number(r.lastInsertRowid), seq };
+  }
+  listAgentMessages(sessionId, { afterSeq = 0, limit = 0 } = {}) {
+    const rows = limit > 0
+      ? this.db.prepare('SELECT * FROM agent_messages WHERE sessionId = ? AND seq > ? ORDER BY seq LIMIT ?').all(sessionId, afterSeq, limit)
+      : this.db.prepare('SELECT * FROM agent_messages WHERE sessionId = ? AND seq > ? ORDER BY seq').all(sessionId, afterSeq);
+    return rows.map((r) => ({
+      ...r,
+      toolCalls: r.toolCallsJson ? JSON.parse(r.toolCallsJson) : null,
+      usage: r.usageJson ? JSON.parse(r.usageJson) : null,
+    }));
+  }
+  // 压缩后裁掉已被摘要覆盖的历史（保留 seq > upToSeq）
+  trimAgentMessages(sessionId, upToSeq) {
+    const r = this.db.prepare('DELETE FROM agent_messages WHERE sessionId = ? AND seq <= ?').run(sessionId, Number(upToSeq) || 0);
+    return Number(r.changes) || 0;
+  }
+  agentSessionUsage(sessionId) {
+    const rows = this.db.prepare("SELECT usageJson FROM agent_messages WHERE sessionId = ? AND usageJson != ''").all(sessionId);
+    const total = { promptTokens: 0, completionTokens: 0, requests: 0 };
+    for (const row of rows) {
+      try {
+        const u = JSON.parse(row.usageJson);
+        total.promptTokens += Number(u.promptTokens) || 0;
+        total.completionTokens += Number(u.completionTokens) || 0;
+        total.requests += Number(u.requests) || 0;
+      } catch { /* 忽略坏行 */ }
+    }
+    return total;
+  }
+  createAgentDecision({ sessionId, kind, payload = null }) {
+    const r = this.db.prepare('INSERT INTO agent_decisions(sessionId, kind, payloadJson, status, at) VALUES(?, ?, ?, ?, ?)')
+      .run(sessionId, kind || '', payload ? JSON.stringify(payload) : '', 'pending', Date.now());
+    return Number(r.lastInsertRowid);
+  }
+  getAgentDecision(id) {
+    const row = this.db.prepare('SELECT * FROM agent_decisions WHERE id = ?').get(Number(id) || 0);
+    if (!row) return null;
+    return { ...row, payload: row.payloadJson ? JSON.parse(row.payloadJson) : null, resolution: row.resolutionJson ? JSON.parse(row.resolutionJson) : null };
+  }
+  getPendingAgentDecision(sessionId) {
+    const row = this.db.prepare("SELECT * FROM agent_decisions WHERE sessionId = ? AND status = 'pending' ORDER BY id LIMIT 1").get(sessionId);
+    if (!row) return null;
+    return { ...row, payload: row.payloadJson ? JSON.parse(row.payloadJson) : null, resolution: null };
+  }
+  resolveAgentDecision(id, status, resolution = null) {
+    const r = this.db.prepare('UPDATE agent_decisions SET status = ?, resolvedAt = ?, resolutionJson = ? WHERE id = ? AND status = ?')
+      .run(status || 'rejected', Date.now(), resolution ? JSON.stringify(resolution) : '', Number(id) || 0, 'pending');
+    return (Number(r.changes) || 0) > 0;
+  }
+  listAgentDecisions(sessionId, limit = 20) {
+    return this.db.prepare('SELECT * FROM agent_decisions WHERE sessionId = ? ORDER BY id DESC LIMIT ?').all(sessionId, limit)
+      .map((r) => ({ ...r, payload: r.payloadJson ? JSON.parse(r.payloadJson) : null, resolution: r.resolutionJson ? JSON.parse(r.resolutionJson) : null }));
   }
 
   // ---- 章节级元数据（质检 RETRY_THRESHOLD 用；只有 daemon 自己翻的章才有记录） ----

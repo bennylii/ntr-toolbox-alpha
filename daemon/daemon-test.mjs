@@ -17,6 +17,9 @@ const { SiteClient } = await imp('site-client.mjs');
 const { TranslationPipeline } = await imp('translate-pipeline.mjs');
 const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
 const { CheckPipeline } = await imp('check-pipeline.mjs');
+const { createAgentLlm } = await imp('agent-llm.mjs');
+const { createAgentLoop } = await imp('agent-loop.mjs');
+const { doingTool, askUserTool } = await imp('agent-tools.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
@@ -439,6 +442,77 @@ await t('CORS 白名单：站点/本机放行，其它 Origin 的写请求 403',
     const okRead = await fetch(base + '/ui');
     assert.equal(okRead.status, 200, '同源/无 Origin 直连不受影响');
   } finally { server.close(); }
+});
+
+console.log('== Agent（A1：循环 / 工具派发 / 审批 / 中止，真实 HTTP） ==');
+await t('agent：模型返回 tool_calls → 执行工具 → 最终答复（用量落库、mock 记录 tools 请求体）', async () => {
+  const scheduler = new LlmScheduler({
+    engine, store, log: quiet,
+    options: { workers: [mkW('ag1', 'agkey1', `?toolcall=doing&toolargs=${encodeURIComponent('{"text":"mock 进度"}')}`)], maxInFlight: 1 },
+  });
+  const llm = createAgentLlm({ scheduler, log: quiet });
+  const loop = createAgentLoop({ store, chat: llm.chat, takeUsage: llm.takeUsage, tools: [doingTool], log: quiet });
+  const sessionId = store.createAgentSession({ bookKey: '', title: 'e2e' });
+  const events = [];
+  const r = await loop.runTurn(sessionId, '打个招呼', { onEvent: (e) => events.push(e) });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(String(r.content).includes('完成（mock）'), r.content);
+  const stats = await mockStats();
+  assert.equal(stats.lastToolTurn.hasTools, true, JSON.stringify(stats.lastToolTurn));
+  assert.ok(stats.lastTools.includes('doing'), JSON.stringify(stats.lastTools));
+  assert.equal(stats.lastToolCall.name, 'doing');
+  const doingEvent = events.find((e) => e.type === 'doing');
+  assert.ok(doingEvent && doingEvent.text === 'mock 进度', JSON.stringify(events.map((e) => e.type)));
+  const roles = store.listAgentMessages(sessionId).map((x) => x.role);
+  assert.deepEqual(roles, ['user', 'assistant', 'tool', 'assistant'], JSON.stringify(roles));
+  assert.ok(store.agentSessionUsage(sessionId).requests >= 1, JSON.stringify(store.agentSessionUsage(sessionId)));
+});
+await t('agent：审批 allow → 执行；reject → approval_denied 且不执行', async () => {
+  let executed = 0;
+  const writeTool = {
+    name: 'write_probe', description: '写探针', parameters: { type: 'object', properties: {} },
+    requiresApproval: true, preview: () => ({ diff: 'probe' }),
+    async execute() { executed += 1; return { ok: true, wrote: 1 }; },
+  };
+  const scheduler = new LlmScheduler({
+    engine, store, log: quiet,
+    options: { workers: [mkW('ag2', 'agkey2', '?toolcall=write_probe')], maxInFlight: 1 },
+  });
+  const llm = createAgentLlm({ scheduler, log: quiet });
+  const loop = createAgentLoop({ store, chat: llm.chat, takeUsage: llm.takeUsage, tools: [writeTool], log: quiet });
+  const allowSession = store.createAgentSession({ bookKey: '', title: 'allow' });
+  const allowEvents = [];
+  await loop.runTurn(allowSession, '写一下', {
+    onEvent: (e) => { allowEvents.push(e.type); if (e.type === 'decision') setTimeout(() => loop.resolveDecision(e.decisionId, 'allowed'), 0); },
+  });
+  assert.equal(executed, 1, JSON.stringify(allowEvents));
+  const rejectSession = store.createAgentSession({ bookKey: '', title: 'reject' });
+  await loop.runTurn(rejectSession, '再写', {
+    onEvent: (e) => { if (e.type === 'decision') setTimeout(() => loop.resolveDecision(e.decisionId, 'rejected'), 0); },
+  });
+  assert.equal(executed, 1, '拒绝后不应执行');
+  const toolRow = store.listAgentMessages(rejectSession).find((x) => x.role === 'tool');
+  assert.ok(toolRow.content.includes('approval_denied'), toolRow.content);
+  assert.ok(!allowEvents.includes('question'));
+});
+await t('agent：stop() 中止挂起中的追问（decision 取消 + 轮次 aborted）', async () => {
+  const scheduler = new LlmScheduler({
+    engine, store, log: quiet,
+    options: { workers: [mkW('ag3', 'agkey3', '?toolcall=ask_user&toolargs=' + encodeURIComponent('{"question":"选哪个？","options":[{"id":"a","label":"A"}]}'))], maxInFlight: 1 },
+  });
+  const llm = createAgentLlm({ scheduler, log: quiet });
+  const loop = createAgentLoop({ store, chat: llm.chat, takeUsage: llm.takeUsage, tools: [askUserTool], log: quiet });
+  const sessionId = store.createAgentSession({ bookKey: '', title: 'abort' });
+  let questionId = null;
+  const pending = loop.runTurn(sessionId, '问一下', { onEvent: (e) => { if (e.type === 'question') questionId = e.decisionId; } });
+  for (let i = 0; i < 50 && questionId === null; i += 1) await new Promise((res) => setTimeout(res, 50));
+  assert.ok(questionId, '应产生提问');
+  assert.equal(loop.stop(sessionId), true);
+  const r = await pending;
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.ok(/abort/i.test(r.error), JSON.stringify(r));
+  assert.equal(store.getPendingAgentDecision(sessionId), null, '决定应被取消');
+  assert.equal(store.getAgentSession(sessionId).state, 'idle');
 });
 
 console.log('== 控制面 ==');
