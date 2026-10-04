@@ -28,6 +28,11 @@ CREATE TABLE IF NOT EXISTS chaptermeta (
   bookKey TEXT, chapterKey TEXT, retries INTEGER, updateAt INTEGER,
   PRIMARY KEY (bookKey, chapterKey)
 );
+CREATE TABLE IF NOT EXISTS rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, bookKey TEXT DEFAULT '', kind TEXT, pattern TEXT,
+  replacement TEXT DEFAULT '', regex INTEGER DEFAULT 0, case_sensitive INTEGER DEFAULT 0,
+  enabled INTEGER DEFAULT 1, priority INTEGER DEFAULT 100, note TEXT DEFAULT '', updateAt INTEGER
+);
 CREATE TABLE IF NOT EXISTS snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, bookKey TEXT, at INTEGER, glossaryJson TEXT, note TEXT);
 CREATE TABLE IF NOT EXISTS proposals (
   id INTEGER PRIMARY KEY AUTOINCREMENT, bookKey TEXT, at INTEGER, kind TEXT,
@@ -130,6 +135,24 @@ export class Store {
   setLedger(bookKey, ledger) {
     this.db.prepare('INSERT INTO ledger(bookKey, json, updateAt) VALUES(?, ?, ?) ON CONFLICT(bookKey) DO UPDATE SET json = excluded.json, updateAt = excluded.updateAt')
       .run(bookKey, JSON.stringify(ledger), Date.now());
+  }
+
+  // ---- 文本处理规则（预处理/后处理链；bookKey='' 为全局规则） ----
+  addRule({ bookKey = '', kind, pattern, replacement = '', regex = 0, case_sensitive = 0, enabled = 1, priority = 100, note = '' }) {
+    const r = this.db.prepare(`
+      INSERT INTO rules(bookKey, kind, pattern, replacement, regex, case_sensitive, enabled, priority, note, updateAt)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(bookKey || '', kind || '', pattern || '', replacement || '', regex ? 1 : 0, case_sensitive ? 1 : 0, enabled ? 1 : 0, priority || 100, note || '', Date.now());
+    return Number(r.lastInsertRowid);
+  }
+  listRules(bookKey = '') {
+    return this.db.prepare("SELECT * FROM rules WHERE bookKey = '' OR bookKey = ? ORDER BY priority, id").all(bookKey || '');
+  }
+  setRuleEnabled(id, enabled) {
+    this.db.prepare('UPDATE rules SET enabled = ? WHERE id = ?').run(enabled ? 1 : 0, id);
+  }
+  deleteRule(id) {
+    this.db.prepare('DELETE FROM rules WHERE id = ?').run(id);
   }
 
   // ---- 章节级元数据（质检 RETRY_THRESHOLD 用；只有 daemon 自己翻的章才有记录） ----
