@@ -387,9 +387,16 @@ const server = http.createServer(async (req, res) => {
     if (rich && /\/chapter-task\//.test(url.pathname)) {
       const ch = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
       const n = ch === 'ch2' ? 12 : 25;
+      const paragraphJp = Array.from({ length: n }, (_, i) => `第${i + 1}行：アリスが魔導書を読む。ローズも来た。`);
       res.end(JSON.stringify({
         chapterId: ch,
-        paragraphJp: Array.from({ length: n }, (_, i) => `第${i + 1}行：アリスが魔導書を読む。ローズも来た。`),
+        paragraphJp,
+        // 对齐旧译（read_translations / ACCEPT 用例）：段数一致
+        oldParagraphZh: paragraphJp.map((_, i) => `第${i + 1}行：爱丽丝在阅读魔导书。罗丝也来了。`),
+        glossaryId: 'mock-gloss',
+        glossary: {},
+        oldGlossaryId: 'mock-gloss',
+        oldGlossary: {},
       }));
       return;
     }

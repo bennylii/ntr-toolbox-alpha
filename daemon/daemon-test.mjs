@@ -12,7 +12,7 @@ for (const suffix of ['', '-wal', '-shm']) { try { fs.unlinkSync(TEST_DB + suffi
 
 const imp = (name) => import(pathToFileURL(path.join(here, name)).href);
 const { Store } = await imp('store.mjs');
-const { loadEngine } = await imp('engine.mjs');
+const { loadEngine, repoRoot } = await imp('engine.mjs');
 const { SiteClient } = await imp('site-client.mjs');
 const { TranslationPipeline } = await imp('translate-pipeline.mjs');
 const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
@@ -20,6 +20,8 @@ const { CheckPipeline } = await imp('check-pipeline.mjs');
 const { createAgentLlm } = await imp('agent-llm.mjs');
 const { createAgentLoop } = await imp('agent-loop.mjs');
 const { doingTool, askUserTool } = await imp('agent-tools.mjs');
+const { createReadTools } = await imp('agent-tools-read.mjs');
+const { createSkillCatalog } = await imp('agent-skills.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
@@ -513,6 +515,65 @@ await t('agent：stop() 中止挂起中的追问（decision 取消 + 轮次 abor
   assert.ok(/abort/i.test(r.error), JSON.stringify(r));
   assert.equal(store.getPendingAgentDecision(sessionId), null, '决定应被取消');
   assert.equal(store.getAgentSession(sessionId).state, 'idle');
+});
+
+console.log('== Agent 只读工具（A2：技能目录 + 书/正文/译文/质检，真实 HTTP） ==');
+const readToolSet = [...createReadTools({ store, engine, makeClient, log: quiet }), doingTool, askUserTool];
+const skillCatalog = createSkillCatalog({ roots: [path.join(repoRoot, 'skills')], log: quiet });
+const runToolOnce = async (toolName, args, { books = null } = {}) => {
+  const q = `?toolcall=${toolName}&toolargs=${encodeURIComponent(JSON.stringify(args || {}))}`;
+  const scheduler = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW(`rt-${toolName}`, 'rtkey', q)], maxInFlight: 1 } });
+  const llm = createAgentLlm({ scheduler, log: quiet });
+  const loop = createAgentLoop({
+    store, chat: llm.chat, takeUsage: llm.takeUsage, tools: readToolSet, log: quiet,
+    options: { deps: { engine, makeClient, skills: skillCatalog } },
+  });
+  const sessionId = store.createAgentSession({ bookKey: '', title: `tool:${toolName}` });
+  const r = await loop.runTurn(sessionId, `执行 ${toolName}`, {});
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const toolRow = store.listAgentMessages(sessionId).find((x) => x.role === 'tool');
+  const parsed = JSON.parse(toolRow.content);
+  if (books) assert.ok(parsed.ok === true, JSON.stringify(parsed));
+  return parsed;
+};
+await t('list_books：返回已登记书目（含 key/进度）', async () => {
+  const parsed = await runToolOnce('list_books', {}, { books: true });
+  assert.ok(parsed.result.count >= 1, JSON.stringify(parsed));
+  assert.ok(parsed.result.books.some((b) => b.key === `web:mock/${TRANS_BOOK}`), JSON.stringify(parsed.result.books.map((b) => b.key)));
+});
+await t('read_book：文库逐章取文并按行窗口返回（带总行数/截断标记）', async () => {
+  store.upsertBook({ key: 'wenku:mock-src', kind: 'wenku', providerId: '', novelId: 'mock-src', origin: MOCK, title: '' });
+  const parsed = await runToolOnce('read_book', { book: 'wenku:mock-src', offset: 0, limit: 5, maxChars: 4000 }, { books: true });
+  assert.ok(parsed.result.totalLines >= 30, JSON.stringify(parsed.result));
+  assert.equal(parsed.result.lines[0].n, 1);
+  assert.ok(parsed.result.lines[0].text.includes('アリス'), JSON.stringify(parsed.result.lines[0]));
+  assert.ok(parsed.result.count >= 1 && parsed.result.count <= 5);
+});
+await t('read_translations：返回对齐对窗口（原文+译文）', async () => {
+  const parsed = await runToolOnce('read_translations', { book: 'wenku:mock-src', offset: 0, limit: 3 }, { books: true });
+  assert.ok(parsed.result.total >= 20, JSON.stringify(parsed.result));
+  assert.equal(parsed.result.pairs.length, 3);
+  assert.ok(parsed.result.pairs[0].jp && parsed.result.pairs[0].zh, JSON.stringify(parsed.result.pairs[0]));
+});
+await t('quality_report：对 mock-check 出七码报告（只读）', async () => {
+  const parsed = await runToolOnce('quality_report', { book: CHECK_KEY, limit: 5 }, { books: true });
+  assert.ok(parsed.result.codes.GLOSSARY >= 1, JSON.stringify(parsed.result.codes));
+  assert.ok(parsed.result.samples.length >= 1);
+});
+await t('read_skill / list_skills：技能目录注入与读取（含 references 防护）', async () => {
+  const list = await runToolOnce('list_skills', {}, { books: true });
+  assert.ok(list.result.skills.some((s) => s.name === 'glossary-workflow'), JSON.stringify(list.result.skills.map((s) => s.name)));
+  const read = await runToolOnce('read_skill', { name: 'glossary-workflow' }, { books: true });
+  assert.ok(read.result.content.includes('写入门槛'), read.result.content.slice(0, 200));
+  const escape = await runToolOnce('read_skill', { name: 'glossary-workflow', path: '../x' });
+  assert.equal(escape.ok, false, JSON.stringify(escape));
+  assert.equal(escape.error, 'bad_path');
+});
+await t('list_snapshots：返回某书快照列表', async () => {
+  store.upsertBook({ key: 'wenku:mock-boost', kind: 'wenku', providerId: '', novelId: 'mock-boost', origin: MOCK, title: '' });
+  store.addSnapshot('wenku:mock-boost', { 'テスト': '测试' }, 'a2-e2e');
+  const parsed = await runToolOnce('list_snapshots', { book: 'wenku:mock-boost' }, { books: true });
+  assert.ok(parsed.result.count >= 1, JSON.stringify(parsed.result));
 });
 
 console.log('== 控制面 ==');
