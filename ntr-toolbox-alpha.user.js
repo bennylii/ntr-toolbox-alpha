@@ -1897,7 +1897,10 @@
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 NotificationUtils.showSuccess(`已同步到 Daemon：凭据 + ${workers.length} 个翻译器`);
             } catch (e) {
-                NotificationUtils.showError(`同步失败：${(e && e.message) || e}（daemon 是否在跑？node daemon/index.mjs serve）`);
+                const lnaHint = (e instanceof TypeError && window.location.protocol === 'https:')
+                    ? '；HTTPS 页面若被浏览器拦（Failed to fetch），在地址栏允许本站的本地网络访问权限'
+                    : '';
+                NotificationUtils.showError(`同步失败：${(e && e.message) || e}（daemon 是否在跑？node daemon/index.mjs serve${lnaHint}）`);
             }
         },
     };

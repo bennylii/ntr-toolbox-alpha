@@ -16,6 +16,7 @@ expire/normal/all 档位、`oldGlossaryId === glossaryId` 跳过），并修复�
 
 ```
 node daemon/index.mjs add       <novel-url>        # 登记（/novel/{provider}/{id} 或 /wenku/{id}）
+node daemon/index.mjs run       [--book key]       # 术语管线：提取→核实→回扫→直写/提案（含快照）
 node daemon/index.mjs translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 node daemon/index.mjs watch     [--interval 30]    # 常驻：定期按 expire 档补翻
 node daemon/index.mjs serve     [--port 7331]      # 控制面 /status /progress /auth /run
@@ -24,6 +25,14 @@ node daemon/index.mjs forget    <bookKey>
 ```
 
 典型流程：`serve`（或 `watch`）常驻 → 浏览器点「同步 Daemon」推凭据与翻译器 → `add` 登记书 → `translate`。
+
+## 真机契约备忘（mock 已同步改严）
+
+- `GET /api/novel/{p}/{id}/file` 必须带 `filename` 参数，缺了 404（`createFileUrl` 的 `filename` 无默认值）；
+- web 版 `POST .../translate-v2/{t}/chapter-task/{ch}` 的 `sync` 查询参数必填（缺了 404；
+  `sync=true` 仅站点「同步原文」档使用，翻译链路固定 `false`）；
+- HTTPS 站点页面 fetch 本机 daemon 走 Chrome 本地网络访问（LNA/PNA）：daemon 已在 CORS 预检里回
+  `Access-Control-Allow-Private-Network: true`；浏览器侧首次可能仍需在地址栏允许本站的本地网络权限。
 
 ## 与浏览器工作区的关系
 
