@@ -261,6 +261,8 @@ const server = http.createServer(async (req, res) => {
     for await (const c of req) chunks.push(c);
     let body = {};
     try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { /* ignore */ }
+    // 与真实站点一致：web 版 chapter-task 路由的 sync 参数必填（缺了 404）
+    if (/\/chapter-task\//.test(url.pathname) && !url.searchParams.has('sync')) { res.writeHead(404, cors); res.end(''); return; }
     res.writeHead(200, { ...cors, 'content-type': 'application/json', 'cache-control': 'no-store' });
     const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || (url.pathname.split('/').filter(Boolean)[3] || 'mock-novel');
     const state = transBook(novelId);

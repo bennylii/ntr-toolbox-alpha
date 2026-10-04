@@ -173,10 +173,11 @@ export class SiteClient {
     return { text: lines.join('\n'), translated };
   }
 
-  // 章节任务（web 为 POST、文库为 GET，与站点前端一致）
+  // 章节任务（web 为 POST、文库为 GET，与站点前端一致）；web 路由的 sync 参数必填（缺了 404），
+  // sync=true 仅站点「同步原文」档用，翻译链路一律 false
   async getChapterTask(book, chapterId, translatorId, volumeId = '') {
     return book.kind === 'web'
-      ? this.#json(`/api/novel/${book.providerId}/${book.novelId}/translate-v2/${translatorId}/chapter-task/${chapterId}`, { method: 'POST', body: {} })
+      ? this.#json(`/api/novel/${book.providerId}/${book.novelId}/translate-v2/${translatorId}/chapter-task/${chapterId}?sync=false`, { method: 'POST', body: {} })
       : this.#json(`/api/wenku/${book.novelId}/translate-v2/${translatorId}/${encodeURIComponent(volumeId)}/chapter-task/${chapterId}`);
   }
 

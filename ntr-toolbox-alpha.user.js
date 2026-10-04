@@ -1292,8 +1292,9 @@
                 if (!group.chapterId) throw new Error('缺少章节定位（章节标题在 TOC 里找不到）');
                 let dto;
                 if (target.kind === 'web') {
+                    // web 路由的 sync 参数必填（缺了 404）；写回场景原文/译文都已在站点，固定 false
                     const taskRes = await script.fetch(
-                        `${window.location.origin}/api/novel/${target.providerId}/${target.novelId}/translate-v2/${translator}/chapter-task/${group.chapterId}`,
+                        `${window.location.origin}/api/novel/${target.providerId}/${target.novelId}/translate-v2/${translator}/chapter-task/${group.chapterId}?sync=false`,
                         true,
                         { method: 'POST' },
                     );
