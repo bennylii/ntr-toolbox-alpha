@@ -17,6 +17,7 @@ expire/normal/all 档位、`oldGlossaryId === glossaryId` 跳过），并修复�
 ```
 node daemon/index.mjs add       <novel-url>        # 登记（/novel/{provider}/{id} 或 /wenku/{id}）
 node daemon/index.mjs run       [--book key]       # 术语管线：提取→核实→回扫→直写/提案（含快照）
+node daemon/index.mjs check     [--book key] [--codes A,B] [--limit N] [--propose] [--tsv]   # 质检：七码报告
 node daemon/index.mjs translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 node daemon/index.mjs watch     [--interval 30]    # 常驻：定期按 expire 档补翻
 node daemon/index.mjs serve     [--port 7331]      # 控制面 /status /runs /progress /proposals /auth /run（/run 单队列串行）
@@ -66,5 +67,6 @@ node daemon/index.mjs forget    <bookKey>
 ```
 PORT=8790 node mock-llm/server.mjs     # mock（翻译用例：POST translate-v2 + 翻译提示词分支）
 node daemon/translate-test.mjs          # 纯函数单测（分段/提示词/解析/重试/二分）
-MOCK_ORIGIN=http://127.0.0.1:8790 node daemon/daemon-test.mjs   # 冒烟：全管线/跳过/续跑/控制面
+node daemon/quality-test.mjs            # 质检纯函数单测（七码 + 批量报告；无需 mock）
+MOCK_ORIGIN=http://127.0.0.1:8790 node daemon/daemon-test.mjs   # 冒烟：全管线/跳过/续跑/控制面/调度器/质检
 ```

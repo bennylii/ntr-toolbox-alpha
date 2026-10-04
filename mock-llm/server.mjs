@@ -326,10 +326,35 @@ const server = http.createServer(async (req, res) => {
     const trans = /mock-trans/.test(url.pathname);
     const boost = /mock-boost/.test(url.pathname);
     const noted = /mock-noted/.test(url.pathname);
+    const check = /mock-check/.test(url.pathname);
     if (/\/file$/.test(url.pathname)) {
       // 与真实站点一致：/file 必须带 filename，缺了 404（真机测试发现的契约）
       if (!url.searchParams.get('filename')) { res.writeHead(404, cors); res.end(''); return; }
       res.writeHead(200, { ...cors, 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+      if (check) {
+        // 质检用例：jp-zh 平行文本（含 5 类缺陷：术语未落地/假名残留+直抄/标点缺失/缺译）
+        res.end([
+          '# 第一章',
+          'アリスは魔導書を読んだ。',
+          '爱丽丝读了魔导书。',
+          'ローズは微笑んだ。',
+          '罗丝微微一笑。',
+          'アルテは剣を抜いた。',
+          '阿尔蒂拔出了剑。',
+          'オルトは大声で叫んだ。',
+          'オルトは大声で叫んだ。',
+          '彼女は静かに言った。',
+          '她静静地低语',
+          '# 第二章',
+          '魔王が現れた。',
+          '魔王出现了。',
+          '# 第三章',
+          '勇者が立ち上がった。',
+          '（翻译缺失）',
+          '',
+        ].join('\n'));
+        return;
+      }
       res.end('アルテは笑った\nオルトが来た\nアリスが魔導書を読む。\nローズも来た。\n');
       return;
     }
@@ -368,8 +393,10 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({
       providerId: segs[2] || 'mock', novelId: segs[segs.length - 1] || 'mock-novel',
       titleZh: 'mock 测试书', titleJp: 'モックテスト',
-      // mock-noted：带站点约定 "译名 #备注" 的术语表（指南合规用例）
-      glossary: noted ? { 'アルテ': '阿尔蒂 #女性', 'オルト': '欧尔特 #男性' } : {},
+      // mock-noted：带站点约定 "译名 #备注" 的术语表（指南合规用例）；mock-check：质检用例术语表
+      glossary: check
+        ? { 'アルテ': '阿尔蒂 #女性', 'ローズ': '罗丝琳 #女性' }
+        : (noted ? { 'アルテ': '阿尔蒂 #女性', 'オルト': '欧尔特 #男性' } : {}),
       volumeJp: (rich || boost) ? [{ volumeId: rich ? 'v1' : 'vb1', total: 2 }] : [], toc: [],
     }));
     return;

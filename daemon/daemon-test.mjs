@@ -16,6 +16,7 @@ const { loadEngine } = await imp('engine.mjs');
 const { SiteClient } = await imp('site-client.mjs');
 const { TranslationPipeline } = await imp('translate-pipeline.mjs');
 const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
+const { CheckPipeline } = await imp('check-pipeline.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
 
@@ -45,7 +46,7 @@ const TRANS_R_BOOK = `mock-trans-r-${RUN}`;
 const workers = [{ id: 'mock', model: 'mock-glossary-1', endpoint: `${MOCK}/v1`, key: 'x' }];
 store.setConfig('token', 'test-token');
 store.setConfig('workers', workers);
-const makeClient = (book) => new SiteClient({ origin: book.origin || MOCK, token: store.getConfig('token') });
+const makeClient = (book) => new SiteClient({ origin: book.origin || MOCK, token: store.getConfig('token'), engine });
 const mkPipeline = (options) => new TranslationPipeline({
   store, engine, workers, makeClient,
   log: { log: () => { }, error: () => { } },
@@ -210,6 +211,50 @@ await t('控制面：/auth 热更新 workers、/run 单队列串行', async () =
     await new Promise((r) => setTimeout(r, 100));
   }
   assert.equal(states.length, 2, '两个 run 都应到达终态（队列串行执行）');
+  server.close();
+});
+
+console.log('== 质检（check job） ==');
+const CHECK_KEY = `web:mock/mock-check-${RUN}`;
+await t('check：mock-check 出报告（七码计数与样例）', async () => {
+  store.upsertBook({ key: CHECK_KEY, kind: 'web', providerId: 'mock', novelId: `mock-check-${RUN}`, origin: MOCK, title: '' });
+  const cp = new CheckPipeline({ store, engine, makeClient, log: quiet });
+  const r = await cp.runBook(CHECK_KEY);
+  assert.equal(r.stats.pairs, 6, JSON.stringify(r.stats));
+  assert.deepEqual(r.stats.codes, {
+    GLOSSARY: 1,
+    FOREIGN_CHAR_RESIDUE: 1,
+    SIMILARITY: 1,
+    PUNCTUATION_MISMATCH: 1,
+    LINE_COUNT_MISMATCH: 1,
+  }, JSON.stringify(r.stats.codes));
+  assert.ok(r.stats.samples.length >= 5, JSON.stringify(r.stats.samples.length));
+  const runs = store.listRuns(10).filter((x) => x.job === 'check');
+  assert.ok(runs.length >= 1 && runs[0].stats.codes, JSON.stringify(runs.map((x) => x.job)));
+});
+await t('check：--propose 出 quality 提案、--codes 过滤', async () => {
+  const cp = new CheckPipeline({ store, engine, makeClient, log: quiet });
+  const r = await cp.runBook(CHECK_KEY, { options: { propose: true, codes: ['GLOSSARY'], limit: 10 } });
+  assert.deepEqual(r.stats.codes, { GLOSSARY: 1 }, JSON.stringify(r.stats.codes));
+  assert.ok(r.proposalId > 0, JSON.stringify(r));
+  assert.ok(store.listProposals(CHECK_KEY).some((x) => x.kind === 'quality'));
+});
+await t('控制面：/run 支持 job=check', async () => {
+  const cp = new CheckPipeline({ store, engine, makeClient, log: quiet });
+  const server = await startServer({ store, pipeline: null, glossaryPipeline: null, checkPipeline: cp, scheduler: null, port: 7347, log: quiet });
+  const r = await fetch('http://127.0.0.1:7347/run', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bookKey: CHECK_KEY, job: 'check' }),
+  }).then((x) => x.json());
+  assert.equal(r.job, 'check', JSON.stringify(r));
+  let state = '';
+  for (let i = 0; i < 60; i += 1) {
+    const list = await fetch('http://127.0.0.1:7347/runs').then((x) => x.json());
+    const item = list.runs.find((x) => x.id === r.id);
+    if (item && (item.state === 'done' || item.state === 'failed')) { state = item.state; break; }
+    await new Promise((res) => setTimeout(res, 100));
+  }
+  assert.equal(state, 'done');
   server.close();
 });
 
