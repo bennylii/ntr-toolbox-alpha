@@ -101,3 +101,41 @@ export async function applyImport({ store, client, book, plan, currentGlossary, 
     updated: plan.updates.length,
   };
 }
+
+// 回滚到快照：先存一份"回滚前"快照 → 全量替换 → 回读校验
+export async function restoreSnapshot({ store, client, book, snapshotId, note = '' }) {
+  const snap = store.getSnapshot(Number(snapshotId));
+  if (!snap) throw new Error(`快照不存在：${snapshotId}`);
+  const current = await client.getGlossary(book);
+  const autoSnapshotId = store.addSnapshot(book.key, current, note || `回滚前自动快照（目标 #${snap.id}）`);
+  const target = snap.glossary || {};
+  await client.putGlossaryRaw(book, target);
+  const after = await client.getGlossary(book);
+  const keys = Object.keys(target);
+  const verified = keys.length === Object.keys(after || {}).length && keys.every((k) => after[k] === target[k]);
+  return { snapshotId: snap.id, autoSnapshotId, verified, count: keys.length };
+}
+
+// 应用提案（人工批准后）：verifyDrop 条目跳过，其余按值格式写入（快照 → 全量替换 → 回读校验）
+export async function applyProposal({ store, client, book, proposal, engine, note = '' }) {
+  const current = await client.getGlossary(book);
+  const next = { ...current };
+  let applied = 0;
+  const skipped = [];
+  for (const entry of (proposal && proposal.entries) || []) {
+    if (entry && entry.verifyDrop === true) { skipped.push(String((entry && entry.src) || '')); continue; }
+    const src = String((entry && entry.src) || '').trim();
+    const dst = String((entry && entry.dst) || '').trim();
+    const value = src !== '' && dst !== '' ? engine.formatGlossaryValue(dst, (entry && (entry.type || entry.info)) || '') : '';
+    if (!value) { skipped.push(src || '(空)'); continue; }
+    next[src] = value;
+    applied += 1;
+  }
+  if (applied === 0) return { applied: 0, skipped, verified: true, snapshotId: 0, count: Object.keys(current).length };
+  const snapshotId = store.addSnapshot(book.key, current, note || `应用提案 #${proposal.id}`);
+  await client.putGlossaryRaw(book, next);
+  const after = await client.getGlossary(book);
+  const keys = Object.keys(next);
+  const verified = keys.length === Object.keys(after || {}).length && keys.every((k) => after[k] === next[k]);
+  return { applied, skipped, snapshotId, verified, count: keys.length };
+}

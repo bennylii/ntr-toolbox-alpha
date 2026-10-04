@@ -66,8 +66,15 @@ node daemon/index.mjs forget    <bookKey>
 - **循环**：系统提示 + 历史 → 模型 → 顺序派发工具 → 回填 `role:'tool'` 结果 → 直到无工具调用；单轮步数上限 24（可配）、支持中止与失败续聊。
 - **会话**：`agent_sessions/agent_messages/agent_decisions` 落 SQLite；时间线全量保留，超阈值时把旧段摘要化（`summaryUpTo` 之后才进模型）。`--session <id>` 续用上次会话。
 - **审批**：默认 manual —— 标记 `requiresApproval` 的工具（写术语表/回滚/改规则与提示词等）会挂起为 decision，CLI 里 y/N 确认；`--auto` 跳过审批（等价 auto 模式）。追问（`ask_user`）同样是 decision。
-- **工具（A1/A2）**：只读 —— `list_books`、`book_status`、`read_book`（按行窗口）、`read_translations`（对齐对窗口）、`list_proposals`、`list_snapshots`、`quality_report`（七码只读报告）、`list_skills`、`read_skill`；交互 —— `doing`（进度）、`ask_user`（追问）。执行与写入类（`run_translate`/`run_glossary`/`run_check`、术语 apply/rollback、规则与提示词写入）在 A3 加入，默认需审批。
+- **工具（A1–A3）**：
+  - 只读（自动）：`list_books`、`book_status`、`read_book`（按行窗口）、`read_translations`（对齐对窗口）、`list_proposals`、`list_snapshots`、`quality_report`、`list_skills`、`read_skill`、`export_glossary`；
+  - 执行（需审批）：`run_translate`（补翻并上传译文）、`run_glossary`（术语管线，可能直写）、`run_check`（只读质检，自动）；
+  - 写入（需审批）：`glossary_apply`（快照+全量替换+回读校验）、`glossary_rollback`（回滚前自动再存快照）、`import_glossary`（LG JSON；regex 条目入本地规则且默认禁用）、`set_rule`/`delete_rule`、`set_prompt`；`close_proposal` 为本地状态、自动执行；
+  - 交互：`doing`（进度）、`ask_user`（追问）。
+- **单队列**：执行类工具与 `/run` 共用进程内 FIFO（同一时刻只跑一个 runBook），不会和浏览器/其它会话抢同一本书。
+- **控制面新增**：`GET /snapshots`、`POST /snapshots/restore`、`POST /proposals/close`、`POST /proposals/apply`（人工/A4 GUI 用）。
 - **技能**：`skills/` 下的 SKILL.md 包会作为目录注入系统提示，模型用 `read_skill` 读取正文与 `references/**`；现有 glossary-extract / acceptance-scan / text-preserve，另加 glossary-workflow / translation-workflow / quality-workflow 三份工作流技能。
+- **多实例/测试**：`--db <path>` 可指定另一个 SQLite（并行车道互不干扰）。
 
 ## 文本处理链（预处理 / 后处理）
 

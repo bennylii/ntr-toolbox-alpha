@@ -6,6 +6,8 @@ import http from 'node:http';
 import { parseBookUrl } from './book-url.mjs';
 import { PROMPT_SLOTS, DEFAULT_TEMPLATE, FORMAT_RULES } from './prompt.mjs';
 import { UI_HTML } from './ui.mjs';
+import { createJobQueue } from './job-queue.mjs';
+import { restoreSnapshot, applyProposal } from './glossary-io.mjs';
 
 const CORS_BASE = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -31,42 +33,12 @@ const maskKey = (key) => {
   return s.length <= 8 ? s.slice(0, 2) + '…' : s.slice(0, 4) + '…' + s.slice(-2);
 };
 
-export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, port = 7331, log = console }) {
-  const queue = [];
-  let queueSeq = 0;
-  let pumping = false;
-  const publicItem = (it) => ({
-    id: it.id, bookKey: it.bookKey, job: it.job, state: it.state,
-    enqueuedAt: it.enqueuedAt, startedAt: it.startedAt || 0, finishedAt: it.finishedAt || 0,
-    error: it.error || '', stats: it.stats || null,
+export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, queue, makeClient, engine, port = 7331, log = console }) {
+  // 单队列（控制面 /run 与 Agent 工具共用；未传入时按本进程管线自建）
+  const jobQueue = queue || createJobQueue({
+    resolveRunner: (job) => ({ glossary: glossaryPipeline, check: checkPipeline, translate: pipeline }[job]),
+    log,
   });
-  async function pump() {
-    if (pumping) return;
-    pumping = true;
-    try {
-      for (;;) {
-        const item = queue.find((q) => q.state === 'queued');
-        if (!item) break;
-        item.state = 'running';
-        item.startedAt = Date.now();
-        try {
-          const runner = { glossary: glossaryPipeline, check: checkPipeline, translate: pipeline }[item.job];
-          if (!runner) throw new Error(`${item.job} 管线未装配`);
-          const result = await runner.runBook(item.bookKey, { options: item.options });
-          item.state = 'done';
-          item.stats = (result && result.stats) || null;
-        } catch (e) {
-          item.state = 'failed';
-          item.error = (e && e.message) || String(e);
-          log.log(`[run] ${item.bookKey} 失败: ${item.error}`);
-        }
-        item.finishedAt = Date.now();
-        if (queue.length > 50) queue.splice(0, queue.length - 50);
-      }
-    } finally {
-      pumping = false;
-    }
-  }
 
   const llmConfig = () => store.getConfig('llm') || {};
   const schedulerOptionsFrom = (llm) => ({
@@ -111,7 +83,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           books,
           runs: store.listRuns(10),
           metrics: store.metricsSummary().slice(-6),
-          queue: queue.slice(-20).map(publicItem),
+          queue: jobQueue.list().slice(-20),
           llm: scheduler ? scheduler.stats() : null,
           usage: store.usageTotals(),
         });
@@ -216,11 +188,11 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
       if (req.method === 'GET' && url.pathname === '/runs') {
         const id = Number(url.searchParams.get('id') || 0);
         if (id > 0) {
-          const item = queue.find((q) => q.id === id);
-          send(item ? 200 : 404, item ? { ok: true, run: publicItem(item) } : { ok: false, error: 'run 不存在' });
+          const item = jobQueue.get(id);
+          send(item ? 200 : 404, item ? { ok: true, run: item } : { ok: false, error: 'run 不存在' });
           return;
         }
-        send(200, { ok: true, runs: queue.slice(-20).reverse().map(publicItem) });
+        send(200, { ok: true, runs: jobQueue.list().slice(-20).reverse() });
         return;
       }
       if (req.method === 'GET' && url.pathname === '/progress') {
@@ -229,6 +201,39 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
       }
       if (req.method === 'GET' && url.pathname === '/proposals') {
         send(200, { ok: true, proposals: store.listProposals(url.searchParams.get('book')) });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/snapshots') {
+        send(200, { ok: true, snapshots: store.listSnapshots(url.searchParams.get('book') || '') });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/snapshots/restore') {
+        const body = await readBody();
+        const book = store.getBook(String(body.book || ''));
+        if (!book) { send(400, { ok: false, error: 'book 不存在' }); return; }
+        if (!makeClient) { send(500, { ok: false, error: 'makeClient 未装配' }); return; }
+        const result = await restoreSnapshot({ store, client: makeClient(book), book, snapshotId: body.snapshotId });
+        send(200, { ok: true, ...result });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/proposals/close') {
+        const body = await readBody();
+        const proposal = store.getProposal(body.id);
+        if (!proposal) { send(404, { ok: false, error: '提案不存在' }); return; }
+        store.setProposalStatus(proposal.id, String(body.status || 'closed'));
+        send(200, { ok: true, id: proposal.id, status: String(body.status || 'closed') });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/proposals/apply') {
+        const body = await readBody();
+        const proposal = store.getProposal(body.id);
+        if (!proposal) { send(404, { ok: false, error: '提案不存在' }); return; }
+        const book = store.getBook(String(body.book || proposal.bookKey || ''));
+        if (!book) { send(400, { ok: false, error: 'book 不存在（提案缺 bookKey 时需传 book）' }); return; }
+        if (!makeClient || !engine) { send(500, { ok: false, error: 'makeClient/engine 未装配' }); return; }
+        const result = await applyProposal({ store, client: makeClient(book), book, proposal, engine });
+        if (result.applied > 0) store.setProposalStatus(proposal.id, 'applied');
+        send(200, { ok: true, ...result });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/auth') {
@@ -249,10 +254,8 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         if (!runner) { send(400, { ok: false, error: `${job} 管线未装配` }); return; }
         const options = { ...(body.options || {}) };
         if (job === 'translate' && body.level) options.level = body.level;
-        const item = { id: (queueSeq += 1), bookKey: body.bookKey, job, options, state: 'queued', enqueuedAt: Date.now() };
-        queue.push(item);
-        pump();
-        send(202, { ok: true, accepted: true, queued: true, id: item.id, bookKey: item.bookKey, job });
+        const { id } = jobQueue.enqueue({ bookKey: body.bookKey, job, options });
+        send(202, { ok: true, accepted: true, queued: true, id, bookKey: body.bookKey, job });
         return;
       }
       send(404, { ok: false, error: `not found: ${url.pathname}` });
@@ -262,7 +265,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
   });
   return new Promise((resolve) => {
     server.listen(port, '127.0.0.1', () => {
-      log.log(`[serve] http://127.0.0.1:${port}（控制台 /ui；API /status /runs /progress /proposals /settings /rules /prompts /books /auth /run）`);
+      log.log(`[serve] http://127.0.0.1:${port}（控制台 /ui；API /status /runs /progress /proposals /snapshots /settings /rules /prompts /books /auth /run）`);
       resolve(server);
     });
   });
