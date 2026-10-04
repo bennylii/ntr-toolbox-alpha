@@ -21,6 +21,7 @@ const { loadEngine } = await imp('engine.mjs');
 const { SiteClient } = await imp('site-client.mjs');
 const { TranslationPipeline } = await imp('translate-pipeline.mjs');
 const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
+const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
 
 const DB_PATH = path.join(here, 'daemon.db');
@@ -53,9 +54,30 @@ function makeClient(book) {
   return new SiteClient({ origin, token: store.getConfig('token') || '', engine });
 }
 
+// 调度器（全局并发门默认 1 = 单线程 Gemini 场景）；配置优先级：CLI 旗标 > config.llm > 默认
+const pickNum = (flagVal, cfgVal, dflt) => {
+  const f = Number(flagVal);
+  if (flagVal !== undefined && flagVal !== true && Number.isFinite(f) && f >= 0) return f;
+  const c = Number(cfgVal);
+  if (Number.isFinite(c) && c >= 0) return c;
+  return dflt;
+};
+const llmConfig = store.getConfig('llm') || {};
+const scheduler = new LlmScheduler({
+  engine, store, log,
+  options: {
+    maxInFlight: Math.max(1, pickNum(flags['max-in-flight'], llmConfig.maxInFlight, 1)),
+    rpm: pickNum(flags.rpm, llmConfig.rpm, 0),
+    transportRetries: pickNum(flags['transport-retries'], llmConfig.transportRetries, 3),
+    maxPromptChars: Math.max(1000, pickNum(flags['max-prompt-chars'], llmConfig.maxPromptChars, 12000)),
+    strictPrompt: flags['strict-prompt'] === true || llmConfig.strictPrompt === true,
+    workers: getWorkers(),
+  },
+});
+
 const pipeline = new TranslationPipeline({
   store, engine,
-  workers: getWorkers(),
+  scheduler,
   makeClient,
   log,
   options: {
@@ -69,7 +91,7 @@ const pipeline = new TranslationPipeline({
 
 const glossaryPipeline = new GlossaryPipeline({
   store, engine,
-  workers: getWorkers(),
+  scheduler,
   makeClient,
   log,
   options: {
@@ -165,7 +187,7 @@ switch (command) {
   }
   case 'serve': {
     const port = Math.max(1, Number(flags.port) || 7331);
-    await startServer({ store, pipeline, glossaryPipeline, port, log });
+    await startServer({ store, pipeline, glossaryPipeline, scheduler, port, log });
     log.log('serve 模式：Ctrl-C 退出');
     await new Promise(() => { });
   }
@@ -178,6 +200,10 @@ switch (command) {
     });
     log.log(`open proposals: ${store.listProposals().filter((x) => x.status === 'open').length}`);
     log.log(`workers: ${getWorkers().length} 个（auth / 油猴同步写入）`);
+    const llm = scheduler.stats();
+    log.log(`llm: maxInFlight=${llm.maxInFlight} workers=${llm.workers} 请求=${llm.requests} 传输重试=${llm.transportRetries} 在途峰值=${llm.maxObservedInFlight}`);
+    const u = store.usageTotals();
+    log.log(`usage: 轮次=${u.rows} 请求=${u.requests} prompt=${u.promptTokens} completion=${u.completionTokens}`);
     break;
   }
   case 'forget': {
