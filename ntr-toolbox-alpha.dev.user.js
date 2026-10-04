@@ -1503,7 +1503,7 @@
                     }
                 } catch (e) { NotificationUtils.showWarning('读取剪贴板失败，改用设置里的术语表'); }
             }
-            const entries = parseGlossaryEntries(text);
+            let entries = parseGlossaryEntries(text);
             const count = entries.length;
             const target = await resolveGlossaryTarget();
             if (!target) return;

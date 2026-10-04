@@ -107,6 +107,7 @@ try {
 
   const created = await Q.addJobs([{ kind: 'wenku', novelId: 'mock-src', title: '补跑用例' }], {
     ...Q.extractSettings(), sourceLanguage: 'JA', maxLines: 0, workerId: '', timeoutMs: 60000,
+    verify: false, seedPolish: false,   // 固定关闭核实/种子：本套件的请求数断言只对「纯提取」成立（不依赖环境残留设置）
     testEndpoint: endpoint, testModel: 'mock-glossary-1', testKey: 'x',
   });
   const job = created[0];

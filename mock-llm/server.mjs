@@ -259,7 +259,8 @@ const server = http.createServer(async (req, res) => {
     let body = {};
     try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { /* ignore */ }
     stats.lastGlossaryPut = { path: url.pathname, body };
-    glossaryStore.set(url.pathname.replace(/\/glossary$/, ''), body);
+    // 只对 glossary-io 用例家族持久（回读校验）；其它书保持静态夹具（套件顺序无关）
+    if (/mock-import/.test(url.pathname)) glossaryStore.set(url.pathname.replace(/\/glossary$/, ''), body);
     res.writeHead(200, { ...cors, 'content-type': 'application/json', 'cache-control': 'no-store' });
     res.end('{}');
     return;
