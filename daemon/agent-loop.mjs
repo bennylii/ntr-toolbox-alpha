@@ -45,7 +45,7 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
 
   async function runTool(tool, call, ctx) {
     if (call.args === null) return { ok: false, error: 'bad_arguments', details: '工具参数不是合法 JSON' };
-    if (tool.requiresApproval && opt.approvalMode === 'manual') {
+    if (tool.requiresApproval && ctx.approvalMode === 'manual') {
       let preview = null;
       if (typeof tool.preview === 'function') {
         try { preview = await tool.preview(call.args, ctx); } catch (e) { preview = { error: String((e && e.message) || e) }; }
@@ -71,19 +71,21 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
   }
 
   // 一轮对话。返回 { ok, content?, steps?, error? }；异常不抛出（除 aborted 以外都转成结果）
-  async function runTurn(sessionId, userText, { signal, onEvent } = {}) {
+  async function runTurn(sessionId, userText, { signal, onEvent, approvalMode } = {}) {
     const session = store.getAgentSession(sessionId);
     if (!session) throw new Error(`会话不存在：${sessionId}`);
     const controller = new AbortController();
     controllers.set(sessionId, controller);
     const composite = signal ? anySignal([signal, controller.signal]) : controller.signal;
     const emit = (event) => { try { onEvent && onEvent(event); } catch { /* 事件回调异常不影响主流程 */ } };
+    const effectiveApproval = (approvalMode === 'auto' || approvalMode === 'manual') ? approvalMode : opt.approvalMode;
     const ctx = {
       store,
       sessionId,
       bookKey: session.bookKey || opt.bookKey,
       log,
       options: opt,
+      approvalMode: effectiveApproval,
       deps: opt.deps,
       sessionApi,
       onEvent: emit,

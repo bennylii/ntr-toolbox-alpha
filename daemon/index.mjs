@@ -35,6 +35,7 @@ const { doingTool, askUserTool } = await imp('agent-tools.mjs');
 const { createReadTools } = await imp('agent-tools-read.mjs');
 const { createWriteTools } = await imp('agent-tools-write.mjs');
 const { createSkillCatalog } = await imp('agent-skills.mjs');
+const { createAgentEvents } = await imp('agent-events.mjs');
 const { createJobQueue } = await imp('job-queue.mjs');
 const { templateFromStore, DEFAULT_TEMPLATE, PROMPT_SLOTS } = await imp('prompt.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
@@ -129,6 +130,10 @@ const jobQueue = createJobQueue({
 const skillCatalog = createSkillCatalog({ roots: [path.join(repoRoot, 'skills')], log });
 const readTools = createReadTools({ store, engine, makeClient, log });
 const agentLlm = createAgentLlm({ scheduler, log });
+const agentEvents = createAgentEvents();
+const agentApprovalDefault = flags.auto === true
+  ? 'auto'
+  : ((store.getConfig('agent') || {}).approvalMode === 'auto' ? 'auto' : 'manual');
 const agentLoop = createAgentLoop({
   store,
   chat: agentLlm.chat,
@@ -136,7 +141,7 @@ const agentLoop = createAgentLoop({
   tools: [...readTools, ...createWriteTools(), doingTool, askUserTool],
   log,
   options: {
-    approvalMode: flags.auto === true ? 'auto' : 'manual',
+    approvalMode: agentApprovalDefault,
     bookKey: typeof flags.book === 'string' ? flags.book : '',
     extraSystem: skillCatalog.promptText(),
     deps: {
@@ -415,7 +420,7 @@ switch (command) {
   }
   case 'serve': {
     const port = Math.max(1, Number(flags.port) || 7331);
-    await startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, queue: jobQueue, makeClient, engine, port, log });
+    await startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, queue: jobQueue, makeClient, engine, agentLoop, agentEvents, port, log });
     log.log('serve 模式：Ctrl-C 退出');
     await new Promise(() => { });
   }

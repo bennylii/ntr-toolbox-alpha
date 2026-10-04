@@ -76,6 +76,14 @@ node daemon/index.mjs forget    <bookKey>
 - **技能**：`skills/` 下的 SKILL.md 包会作为目录注入系统提示，模型用 `read_skill` 读取正文与 `references/**`；现有 glossary-extract / acceptance-scan / text-preserve，另加 glossary-workflow / translation-workflow / quality-workflow 三份工作流技能。
 - **多实例/测试**：`--db <path>` 可指定另一个 SQLite（并行车道互不干扰）。
 
+### 控制台「助手」页（A4）
+
+`serve` 后打开 <http://127.0.0.1:7331/ui> → 「助手」标签：会话选择/新建、对话流（工具调用以卡片展示）、审批与追问面板（允许本次 / 拒绝 / 选项回答）、停止当前轮、审批模式开关、会话用量与连接状态。
+
+- 事件流：`GET /agent/events?session=&since=`（SSE，带 revision 与 15s 心跳；前端断线自动降级为 1.5s 轮询）；
+- 接口：`POST /agent/message|decision|stop|session`、`GET /agent/snapshot|sessions|config`（`POST /agent/config` 存默认审批模式）；
+- 用同样的接口也可以接自己的前端（返回字段见实现或 `daemon-test.mjs` 的 A4 段）。
+
 ## 文本处理链（预处理 / 后处理）
 
 - 规则存 SQLite `rules`（`kind ∈ text_preserve | pre_replacement | post_replacement`；`bookKey=''` 为全局，其余按书；`priority` 升序执行，支持 literal/regex 与大小写敏感）；
@@ -138,4 +146,5 @@ node daemon/glossary-io-test.mjs        # LG 互通单测（解析/分流/往返
 node daemon/agent-test.mjs              # Agent 单测（参数解析/裁剪/会话/压缩/决策/循环；无需 mock）
 node daemon/agent-skills-test.mjs       # 技能目录单测（frontmatter/发现/读取/逃逸；无需 mock）
 MOCK_ORIGIN=http://127.0.0.1:8790 node daemon/daemon-test.mjs   # 冒烟：全管线/跳过/续跑/控制面/调度器/质检/处理链/模板/互通/助手
+# 助手页 e2e（浏览器车道）：mock 在 8790，daemon 在 7355（--db daemon/.tmp-agent-ui.db），见 tools/.e2e-agent-ui.js 头部跑法
 ```

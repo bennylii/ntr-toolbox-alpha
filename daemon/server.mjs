@@ -33,7 +33,7 @@ const maskKey = (key) => {
   return s.length <= 8 ? s.slice(0, 2) + '…' : s.slice(0, 4) + '…' + s.slice(-2);
 };
 
-export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, queue, makeClient, engine, port = 7331, log = console }) {
+export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, queue, makeClient, engine, agentLoop, agentEvents, port = 7331, log = console }) {
   // 单队列（控制面 /run 与 Agent 工具共用；未传入时按本进程管线自建）
   const jobQueue = queue || createJobQueue({
     resolveRunner: (job) => ({ glossary: glossaryPipeline, check: checkPipeline, translate: pipeline }[job]),
@@ -258,6 +258,96 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         send(202, { ok: true, accepted: true, queued: true, id, bookKey: body.bookKey, job });
         return;
       }
+      // ---- Agent（本地助手） ----
+      if (req.method === 'GET' && url.pathname === '/agent/config') {
+        const cfg = store.getConfig('agent') || {};
+        send(200, {
+          ok: true,
+          approvalMode: cfg.approvalMode === 'auto' ? 'auto' : 'manual',
+          tools: agentLoop ? [...agentLoop.registry.keys()] : [],
+          sessions: store.listAgentSessions(20).map((x) => ({ id: x.id, bookKey: x.bookKey, title: x.title, state: x.state, updatedAt: x.updatedAt, running: agentLoop ? agentLoop.running(x.id) : false })),
+        });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/agent/config') {
+        const body = await readBody();
+        const cfg = store.getConfig('agent') || {};
+        const next = { ...cfg };
+        if (body.approvalMode === 'auto' || body.approvalMode === 'manual') next.approvalMode = body.approvalMode;
+        store.setConfig('agent', next);
+        send(200, { ok: true, approvalMode: next.approvalMode || 'manual' });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/agent/sessions') {
+        send(200, { ok: true, sessions: store.listAgentSessions(20).map((x) => ({ id: x.id, bookKey: x.bookKey, title: x.title, state: x.state, updatedAt: x.updatedAt, running: agentLoop ? agentLoop.running(x.id) : false })) });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/agent/session') {
+        const body = await readBody();
+        const id = store.createAgentSession({ bookKey: String(body.bookKey || ''), title: String(body.title || 'agent') });
+        send(200, { ok: true, sessionId: id });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/agent/snapshot') {
+        const sessionId = url.searchParams.get('session') || '';
+        const session = store.getAgentSession(sessionId);
+        if (!session) { send(404, { ok: false, error: '会话不存在' }); return; }
+        send(200, {
+          ok: true,
+          session: { id: session.id, bookKey: session.bookKey, title: session.title, state: session.state, summaryUpTo: session.summaryUpTo, updatedAt: session.updatedAt },
+          running: agentLoop ? agentLoop.running(sessionId) : false,
+          messages: store.listAgentMessages(sessionId).map((m) => ({ seq: m.seq, role: m.role, content: m.content, toolCalls: m.toolCalls, toolCallId: m.toolCallId, name: m.name, at: m.at, usage: m.usage })),
+          pendingDecision: store.getPendingAgentDecision(sessionId),
+          usage: store.agentSessionUsage(sessionId),
+          revision: agentEvents ? agentEvents.revision(sessionId) : 0,
+        });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/agent/message') {
+        if (!agentLoop) { send(400, { ok: false, error: 'agent 未装配' }); return; }
+        const body = await readBody();
+        const text = String(body.message || '').trim();
+        if (text === '') { send(400, { ok: false, error: '缺少 message' }); return; }
+        let sessionId = String(body.session || '');
+        if (!sessionId) sessionId = store.createAgentSession({ bookKey: String(body.bookKey || ''), title: text.slice(0, 40) });
+        if (!store.getAgentSession(sessionId)) { send(404, { ok: false, error: '会话不存在' }); return; }
+        if (agentLoop.running(sessionId)) { send(409, { ok: false, error: '该会话上一轮还在进行（可先停止）' }); return; }
+        const onEvent = (ev) => { if (agentEvents) agentEvents.publish(sessionId, ev); };
+        agentLoop.runTurn(sessionId, text, {
+          onEvent,
+          approvalMode: body.approvalMode === 'auto' || body.approvalMode === 'manual' ? body.approvalMode : undefined,
+        }).then((result) => onEvent({ type: 'turn_end', ok: result.ok, error: result.error || '', steps: result.steps || 0 }))
+          .catch((e) => onEvent({ type: 'turn_end', ok: false, error: String((e && e.message) || e) }));
+        send(202, { ok: true, accepted: true, sessionId });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/agent/decision') {
+        if (!agentLoop) { send(400, { ok: false, error: 'agent 未装配' }); return; }
+        const body = await readBody();
+        const okDecision = agentLoop.resolveDecision(body.id, String(body.status || 'rejected'), body.resolution || null);
+        send(okDecision ? 200 : 404, okDecision ? { ok: true } : { ok: false, error: '决定不存在或已处理' });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/agent/stop') {
+        if (!agentLoop) { send(400, { ok: false, error: 'agent 未装配' }); return; }
+        const body = await readBody();
+        send(200, { ok: true, stopped: agentLoop.stop(String(body.session || '')) });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/agent/events') {
+        if (!agentEvents) { send(400, { ok: false, error: 'agent 事件总线未装配' }); return; }
+        const sessionId = url.searchParams.get('session') || '';
+        const since = Number(url.searchParams.get('since') || 0);
+        res.writeHead(200, { ...cors, 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive' });
+        const write = (event) => { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* 连接已断 */ } };
+        for (const ev of agentEvents.since(sessionId, since)) write(ev);
+        const unsubscribe = agentEvents.subscribe(sessionId, write);
+        const keepalive = setInterval(() => { try { res.write(': keepalive\n\n'); } catch { /* ignore */ } }, 15000);
+        const cleanup = () => { clearInterval(keepalive); unsubscribe(); try { res.end(); } catch { /* ignore */ } };
+        req.on('close', cleanup);
+        req.on('error', cleanup);
+        return;
+      }
       send(404, { ok: false, error: `not found: ${url.pathname}` });
     } catch (e) {
       send(500, { ok: false, error: String((e && e.message) || e) });
@@ -265,7 +355,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
   });
   return new Promise((resolve) => {
     server.listen(port, '127.0.0.1', () => {
-      log.log(`[serve] http://127.0.0.1:${port}（控制台 /ui；API /status /runs /progress /proposals /snapshots /settings /rules /prompts /books /auth /run）`);
+      log.log(`[serve] http://127.0.0.1:${port}（控制台 /ui；API /status /runs /progress /proposals /snapshots /settings /rules /prompts /books /auth /run /agent/*）`);
       resolve(server);
     });
   });
