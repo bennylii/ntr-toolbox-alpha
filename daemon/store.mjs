@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS chunks (
   bookKey TEXT, id TEXT, json TEXT, PRIMARY KEY (bookKey, id)
 );
 CREATE TABLE IF NOT EXISTS ledger (bookKey TEXT PRIMARY KEY, json TEXT, updateAt INTEGER);
+CREATE TABLE IF NOT EXISTS chaptermeta (
+  bookKey TEXT, chapterKey TEXT, retries INTEGER, updateAt INTEGER,
+  PRIMARY KEY (bookKey, chapterKey)
+);
 CREATE TABLE IF NOT EXISTS snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, bookKey TEXT, at INTEGER, glossaryJson TEXT, note TEXT);
 CREATE TABLE IF NOT EXISTS proposals (
   id INTEGER PRIMARY KEY AUTOINCREMENT, bookKey TEXT, at INTEGER, kind TEXT,
@@ -77,6 +81,7 @@ export class Store {
       'DELETE FROM segcache WHERE bookKey = ?',
       'DELETE FROM chunks WHERE bookKey = ?',
       'DELETE FROM ledger WHERE bookKey = ?',
+      'DELETE FROM chaptermeta WHERE bookKey = ?',
       'DELETE FROM locks WHERE bookKey = ?',
     ]) this.db.prepare(sql).run(key);
   }
@@ -125,6 +130,20 @@ export class Store {
   setLedger(bookKey, ledger) {
     this.db.prepare('INSERT INTO ledger(bookKey, json, updateAt) VALUES(?, ?, ?) ON CONFLICT(bookKey) DO UPDATE SET json = excluded.json, updateAt = excluded.updateAt')
       .run(bookKey, JSON.stringify(ledger), Date.now());
+  }
+
+  // ---- 章节级元数据（质检 RETRY_THRESHOLD 用；只有 daemon 自己翻的章才有记录） ----
+  setChapterMeta(bookKey, chapterKey, { retries = 0 } = {}) {
+    this.db.prepare(`
+      INSERT INTO chaptermeta(bookKey, chapterKey, retries, updateAt) VALUES(?, ?, ?, ?)
+      ON CONFLICT(bookKey, chapterKey) DO UPDATE SET retries = excluded.retries, updateAt = excluded.updateAt
+    `).run(bookKey, chapterKey, retries || 0, Date.now());
+  }
+  getChapterMeta(bookKey, chapterKey) {
+    return this.db.prepare('SELECT * FROM chaptermeta WHERE bookKey = ? AND chapterKey = ?').get(bookKey, chapterKey) || null;
+  }
+  listChapterMeta(bookKey) {
+    return this.db.prepare('SELECT * FROM chaptermeta WHERE bookKey = ?').all(bookKey);
   }
 
   // ---- 快照（写回前自动留存，回滚用） ----

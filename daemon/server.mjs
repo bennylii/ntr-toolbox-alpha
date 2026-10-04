@@ -14,7 +14,7 @@ const CORS = {
   'Access-Control-Allow-Private-Network': 'true',
 };
 
-export function startServer({ store, pipeline, glossaryPipeline, scheduler, port = 7331, log = console }) {
+export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, port = 7331, log = console }) {
   const queue = [];
   let queueSeq = 0;
   let pumping = false;
@@ -33,7 +33,8 @@ export function startServer({ store, pipeline, glossaryPipeline, scheduler, port
         item.state = 'running';
         item.startedAt = Date.now();
         try {
-          const runner = item.job === 'glossary' ? glossaryPipeline : pipeline;
+          const runner = { glossary: glossaryPipeline, check: checkPipeline, translate: pipeline }[item.job];
+          if (!runner) throw new Error(`${item.job} 管线未装配`);
           const result = await runner.runBook(item.bookKey, { options: item.options });
           item.state = 'done';
           item.stats = (result && result.stats) || null;
@@ -107,9 +108,9 @@ export function startServer({ store, pipeline, glossaryPipeline, scheduler, port
         for await (const c of req) chunks.push(c);
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
         if (!body.bookKey) { send(400, { ok: false, error: '缺少 bookKey' }); return; }
-        const job = body.job === 'glossary' ? 'glossary' : 'translate';
-        if (job === 'glossary' && !glossaryPipeline) { send(400, { ok: false, error: '术语管线未装配' }); return; }
-        if (job === 'translate' && !pipeline) { send(400, { ok: false, error: '翻译管线未装配' }); return; }
+        const job = ['glossary', 'check', 'translate'].includes(body.job) ? body.job : 'translate';
+        const runner = { glossary: glossaryPipeline, check: checkPipeline, translate: pipeline }[job];
+        if (!runner) { send(400, { ok: false, error: `${job} 管线未装配` }); return; }
         const options = { ...(body.options || {}) };
         if (job === 'translate' && body.level) options.level = body.level;
         const item = { id: (queueSeq += 1), bookKey: body.bookKey, job, options, state: 'queued', enqueuedAt: Date.now() };

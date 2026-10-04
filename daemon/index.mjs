@@ -4,6 +4,7 @@
 //   auth <token>            保存站点凭据（也可由油猴「同步 Daemon」推送）
 //   add <novel-url>         登记一本书（/novel/{provider}/{id} 或 /wenku/{id}）
 //   run [--book key] [--concurrency 2]  跑一遍增强术语管线（提取→核实→回扫→直写/提案）
+//   check [--book key] [--codes A,B] [--limit N] [--propose] [--tsv]   质检（七码报告；propose 出提案）
 //   translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 //   watch [--interval 分钟]  常驻：定期按 expire 档补翻未译/过期章节
 //   serve [--port 7331]     本机控制面（/status /progress /auth /run）
@@ -21,6 +22,7 @@ const { loadEngine } = await imp('engine.mjs');
 const { SiteClient } = await imp('site-client.mjs');
 const { TranslationPipeline } = await imp('translate-pipeline.mjs');
 const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
+const { CheckPipeline, samplesToTsv } = await imp('check-pipeline.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
 
@@ -103,8 +105,9 @@ const glossaryPipeline = new GlossaryPipeline({
   },
 });
 
-// 自愈：未捕获异常干净退出（外部看门狗拉起；状态都在 SQLite）
-process.on('unhandledRejection', (e) => { log.error('unhandledRejection:', e); process.exit(0); });
+const checkPipeline = new CheckPipeline({ store, engine, makeClient, log });
+
+// 自愈：未捕获异常干净退出（外部看门狗拉起；状态都在 SQLite）process.on('unhandledRejection', (e) => { log.error('unhandledRejection:', e); process.exit(0); });
 process.on('uncaughtException', (e) => { log.error('uncaughtException:', e); process.exit(0); });
 setInterval(() => {
   const m = process.memoryUsage();
@@ -164,6 +167,28 @@ switch (command) {
     }
     break;
   }
+  case 'check': {
+    const books = flags.book ? [store.getBook(flags.book)].filter(Boolean) : store.listBooks();
+    if (books.length === 0) { log.error('没有登记的书：先 add <novel-url>'); break; }
+    for (const book of books) {
+      log.log(`==== check ${book.key} ====`);
+      try {
+        const r = await checkPipeline.runBook(book.key, {
+          options: {
+            propose: flags.propose === true,
+            limit: Math.max(1, Number(flags.limit) || 50),
+            codes: typeof flags.codes === 'string' ? flags.codes.split(',').map((s) => s.trim()).filter(Boolean) : null,
+          },
+        });
+        log.log(`==== ${book.key} 质检完成：配对 ${r.stats.pairs}，命中 ${r.stats.hits}`, JSON.stringify(r.stats.codes));
+        if (flags.tsv === true && r.stats.samples.length > 0) log.log(samplesToTsv(r.stats.samples));
+      } catch (e) {
+        log.error(`==== ${book.key} 失败: ${(e && e.message) || e}`);
+        if (e && e.code === 'unauthorized') log.error('凭据失效：在站点页面点「同步 Daemon」，或 daemon auth <token> 重新写入');
+      }
+    }
+    break;
+  }
   case 'translate': {
     await runBooks(flags.book);
     break;
@@ -187,7 +212,7 @@ switch (command) {
   }
   case 'serve': {
     const port = Math.max(1, Number(flags.port) || 7331);
-    await startServer({ store, pipeline, glossaryPipeline, scheduler, port, log });
+    await startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, port, log });
     log.log('serve 模式：Ctrl-C 退出');
     await new Promise(() => { });
   }
@@ -214,6 +239,6 @@ switch (command) {
     break;
   }
   default:
-    log.error(`未知命令: ${command}（可用 auth/add/translate/watch/serve/status/forget）`);
+    log.error(`未知命令: ${command}（可用 auth/add/run/check/translate/watch/serve/status/forget）`);
     process.exit(2);
 }

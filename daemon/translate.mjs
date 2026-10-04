@@ -141,6 +141,7 @@ export async function translateSegment(lines, context) {
   const log = context.log || (() => { });
   let retry = 0;
   let failBecauseLineNumberNotMatch = 0;
+  const bump = () => { retry += 1; if (context.onRetry) context.onRetry(retry); };
   while (retry < 3) {
     let result;
     try {
@@ -153,18 +154,18 @@ export async function translateSegment(lines, context) {
       if (context.wait && err && err.retryAfterMs) {
         try { await context.wait(err.retryAfterMs); } catch (e) { throw err; }
       }
-      retry += 1;
+      bump();
       continue;
     }
     if (lines.length !== result.length) {
       failBecauseLineNumberNotMatch += 1;
       log('输出错误：输出行数不匹配');
-      retry += 1;
+      bump();
       continue;
     }
     if (!detectChinese(result.join(' '))) {
       log('输出错误：输出语言不是中文');
-      retry += 1;
+      bump();
       continue;
     }
     return result;

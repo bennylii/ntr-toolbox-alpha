@@ -108,6 +108,7 @@ export class TranslationPipeline {
           const segments = segmentLines(paragraphs);
           const zhParts = new Array(segments.length).fill(null);
           let cursor = 0;
+          let chapterRetries = 0;   // 本章各段重试次数取最大（质检 RETRY_THRESHOLD 用）
           const lane = async () => {
             for (;;) {
               const index = cursor;
@@ -119,13 +120,16 @@ export class TranslationPipeline {
               const cached = this.store.getSeg(bookKey, segKey);
               if (Array.isArray(cached) && cached.length === seg.length) { zhParts[index] = cached; continue; }
               const glossary = (dto.glossary && Object.keys(dto.glossary).length > 0) ? dto.glossary : {};
+              let segRetries = 0;
               const zh = await translateSegment(seg, {
                 call,
                 glossary,
                 signal,
                 wait: (ms) => sleep(ms),   // 传输层重试耗尽后的等待（调度器也会在派发前按冷却等待）
+                onRetry: (n) => { segRetries = n; },
                 log: (msg) => this.log.log(`[translate] ${chapterKey} ${msg}`),
               });
+              chapterRetries = Math.max(chapterRetries, segRetries);
               this.store.putSeg(bookKey, segKey, zh);
               zhParts[index] = zh;
             }
@@ -139,6 +143,7 @@ export class TranslationPipeline {
           }
           await client.uploadChapter(book, target.chapterId, { glossaryId: dto.glossaryId, paragraphsZh }, translatorId, target.volumeId);
           this.store.setProgress(bookKey, chapterKey, { glossaryUuid: target.glossaryUuid, state: 'done' });
+          this.store.setChapterMeta(bookKey, chapterKey, { retries: chapterRetries });
           doneChapters += 1;
           uploads += 1;
           this.log.log(`[translate] ${chapterKey} 已上传（${paragraphsZh.length} 段）`);
