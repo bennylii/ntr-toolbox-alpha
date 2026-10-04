@@ -17,6 +17,7 @@ const { SiteClient } = await imp('site-client.mjs');
 const { TranslationPipeline } = await imp('translate-pipeline.mjs');
 const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
 const { CheckPipeline } = await imp('check-pipeline.mjs');
+const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
 
@@ -306,6 +307,66 @@ await t('thinking 槽注入用户消息（mock 侧可见）', async () => {
   } finally {
     store.clearPrompt('', 'thinking');
   }
+});
+
+console.log('== LG 术语表互通（P5） ==');
+const IMPORT_KEY = `web:mock/mock-import-${RUN}`;
+await t('import：分辨率/门槛/regex 分流；dry-run 不写站点', async () => {
+  const book = { key: IMPORT_KEY, kind: 'web', providerId: 'mock', novelId: `mock-import-${RUN}`, origin: MOCK, title: '' };
+  store.upsertBook(book);
+  const client = makeClient(book);
+  const file = path.join(here, '.tmp-lg-import.json');
+  fs.writeFileSync(file, JSON.stringify([
+    { src: 'アルテ', dst: '阿尔蒂', info: '女性' },
+    { src: 'ローズ', dst: '罗丝琳', info: '女性', case_sensitive: true },
+    { src: 'rem0', dst: 'XX', info: '' },
+    { src: 'レ.*ス', dst: '替换', regex: true },
+  ]), 'utf8');
+  try {
+    const parsed = parseLgGlossary(fs.readFileSync(file, 'utf8'));
+    const current = await client.getGlossary(book);
+    const plan = planImport({ entries: parsed.entries, currentGlossary: current, engine });
+    assert.equal(plan.additions.length, 2, JSON.stringify(plan));
+    assert.equal(plan.skipped.length, 1, JSON.stringify(plan.skipped));
+    assert.equal(plan.regexRules.length, 1, JSON.stringify(plan.regexRules));
+    const stats = await mockStats();
+    assert.notEqual(stats.lastGlossaryPut && stats.lastGlossaryPut.path, `/api/novel/mock/mock-import-${RUN}/glossary`, 'dry-run 不应写站点');
+  } finally {
+    fs.unlinkSync(file);
+  }
+});
+await t('import：apply 快照 + PUT + 回读校验（值带 #备注）', async () => {
+  const book = store.getBook(IMPORT_KEY);
+  const client = makeClient(book);
+  const file = path.join(here, '.tmp-lg-import2.json');
+  fs.writeFileSync(file, JSON.stringify([
+    { src: 'アルテ', dst: '阿尔蒂', info: '女性' },
+    { src: 'ローズ', dst: '罗丝琳', info: '女性', case_sensitive: true },
+  ]), 'utf8');
+  try {
+    const parsed = parseLgGlossary(fs.readFileSync(file, 'utf8'));
+    const current = await client.getGlossary(book);
+    const plan = planImport({ entries: parsed.entries, currentGlossary: current, engine });
+    const result = await applyImport({ store, client, book, plan, currentGlossary: current, note: 'e2e' });
+    assert.equal(result.applied, 2, JSON.stringify(result));
+    assert.equal(result.verified, true, JSON.stringify(result));
+    assert.ok(store.listSnapshots(IMPORT_KEY).length >= 1);
+    const stats = await mockStats();
+    assert.equal(stats.lastGlossaryPut.body['アルテ'], '阿尔蒂 #女性', JSON.stringify(stats.lastGlossaryPut.body));
+  } finally {
+    fs.unlinkSync(file);
+  }
+});
+await t('export：现术语表 → LG JSON，往返导入 diff 为空', async () => {
+  const book = store.getBook(IMPORT_KEY);
+  const client = makeClient(book);
+  const current = await client.getGlossary(book);
+  const list = toLgGlossary(current, engine);
+  const alice = list.find((x) => x.src === 'アルテ');
+  assert.ok(alice && alice.dst === '阿尔蒂' && alice.info === '女性', JSON.stringify(list));
+  const { entries } = parseLgGlossary(JSON.stringify(list));
+  const plan = planImport({ entries, currentGlossary: current, engine });
+  assert.equal(plan.additions.length + plan.updates.length, 0, JSON.stringify(plan));
 });
 
 console.log('== 控制面 ==');
