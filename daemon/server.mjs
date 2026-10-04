@@ -1,17 +1,34 @@
-// daemon/server.mjs —— 本机控制面（默认 127.0.0.1:7331）
-// 给油猴「同步 Daemon」推凭据、给人工看状态/触发任务；带 CORS（Chrome 视 localhost 为安全上下文）。
-// /run 为单队列（FIFO 串行）——同一时刻最多一个 runBook，避免并发改写共享配置/抢上游；
-// 每次 run 的选项以参数传给管线（不再改写共享 pipeline.options）。
+// daemon/server.mjs —— 本机控制面（默认 127.0.0.1:7331）+ 设置控制台页面（/ui）
+// 给油猴「同步 Daemon」推凭据；给浏览器看状态/改设置/派任务。
+// 安全：跨域仅放行 站点域名 与 本机；非白名单 Origin 的写请求/预检一律 403（页面自身同源访问不受影响）。
+// /run 为单队列（FIFO 串行）——同一时刻最多一个 runBook；每次 run 的选项按次传入，不改共享配置。
 import http from 'node:http';
+import { parseBookUrl } from './book-url.mjs';
+import { PROMPT_SLOTS, DEFAULT_TEMPLATE, FORMAT_RULES } from './prompt.mjs';
+import { UI_HTML } from './ui.mjs';
 
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
+const CORS_BASE = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'authorization, content-type',
   'Access-Control-Max-Age': '600',
-  // HTTPS 站点页面访问本机 daemon 走 Chrome 本地网络访问（LNA/PNA）预检：应答同意头，
-  // 否则真实站点（https）里 fetch http://127.0.0.1 直接失败（http 页面的 mock 车道不受影响）。
+  // HTTPS 站点页面访问本机 daemon 走 Chrome 本地网络访问（LNA/PNA）预检：应答同意头
   'Access-Control-Allow-Private-Network': 'true',
+};
+
+const originAllowed = (origin) => {
+  if (!origin) return true;   // curl/Node 直连（无 Origin）
+  try {
+    const u = new URL(origin);
+    if (u.hostname === 'n.novelia.cc') return true;
+    if ((u.hostname === '127.0.0.1' || u.hostname === 'localhost') && (u.protocol === 'http:' || u.protocol === 'https:')) return true;
+    return false;
+  } catch { return false; }
+};
+
+const maskKey = (key) => {
+  const s = String(key || '');
+  if (s === '') return '';
+  return s.length <= 8 ? s.slice(0, 2) + '…' : s.slice(0, 4) + '…' + s.slice(-2);
 };
 
 export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, port = 7331, log = console }) {
@@ -51,12 +68,39 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
     }
   }
 
+  const llmConfig = () => store.getConfig('llm') || {};
+  const schedulerOptionsFrom = (llm) => ({
+    ...(llm.maxInFlight !== undefined ? { maxInFlight: Math.max(1, Number(llm.maxInFlight) || 1) } : {}),
+    ...(llm.rpm !== undefined ? { rpm: Math.max(0, Number(llm.rpm) || 0) } : {}),
+    ...(llm.transportRetries !== undefined ? { transportRetries: Math.max(0, Number(llm.transportRetries) || 0) } : {}),
+    ...(llm.maxPromptChars !== undefined ? { maxPromptChars: Math.max(1000, Number(llm.maxPromptChars) || 12000) } : {}),
+    ...(llm.strictPrompt !== undefined ? { strictPrompt: llm.strictPrompt === true } : {}),
+  });
+
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
-    const send = (code, obj) => { res.writeHead(code, { ...CORS, 'content-type': 'application/json' }); res.end(JSON.stringify(obj, null, 2)); };
-    if (req.method === 'OPTIONS') { res.writeHead(204, CORS); res.end(); return; }
+    const origin = req.headers.origin;
+    const allowed = originAllowed(origin);
+    const cors = { ...CORS_BASE, ...(allowed && origin ? { 'Access-Control-Allow-Origin': origin } : (allowed ? { 'Access-Control-Allow-Origin': '*' } : {})) };
+    const send = (code, obj) => { res.writeHead(code, { ...cors, 'content-type': 'application/json' }); res.end(JSON.stringify(obj, null, 2)); };
+    const html = (code, text) => { res.writeHead(code, { ...cors, 'content-type': 'text/html; charset=utf-8' }); res.end(text); };
+
+    if (!allowed) {
+      if (req.method === 'OPTIONS' || req.method === 'POST') { send(403, { ok: false, error: `Origin 不在白名单：${origin}` }); return; }
+    }
+    if (req.method === 'OPTIONS') { res.writeHead(204, cors); res.end(); return; }
+
+    const readBody = async () => {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { throw new Error('请求体不是合法 JSON'); }
+    };
 
     try {
+      if (req.method === 'GET' && (url.pathname === '/ui' || url.pathname === '/')) {
+        html(200, UI_HTML);
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/status') {
         const books = store.listBooks().map((b) => ({
           ...b,
@@ -71,6 +115,102 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           llm: scheduler ? scheduler.stats() : null,
           usage: store.usageTotals(),
         });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/settings') {
+        const workers = store.getConfig('workers') || [];
+        send(200, {
+          ok: true,
+          settings: {
+            llm: llmConfig(),
+            origin: store.getConfig('origin') || 'https://n.novelia.cc',
+            tokenSet: Boolean(store.getConfig('token')),
+            workers: workers.map((w, i) => ({ id: w.id || `w${i}`, model: w.model || '', endpoint: w.endpoint || '', key: maskKey(w.key) })),
+          },
+        });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/settings') {
+        const body = await readBody();
+        if (body.llm && typeof body.llm === 'object') {
+          const merged = { ...llmConfig(), ...body.llm };
+          store.setConfig('llm', merged);
+          if (scheduler) scheduler.setOptions(schedulerOptionsFrom(merged));
+        }
+        if (typeof body.origin === 'string' && body.origin.trim() !== '') store.setConfig('origin', body.origin.trim());
+        log.log('[settings] 设置已更新');
+        send(200, { ok: true });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/rules') {
+        send(200, { ok: true, rules: store.listRules(url.searchParams.get('book') || '') });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/rules') {
+        const body = await readBody();
+        if (body.action === 'add') {
+          if (!body.kind || !body.pattern) { send(400, { ok: false, error: '缺少 kind/pattern' }); return; }
+          if (!['text_preserve', 'pre_replacement', 'post_replacement'].includes(body.kind)) { send(400, { ok: false, error: 'kind 不合法' }); return; }
+          const id = store.addRule({
+            bookKey: String(body.bookKey || ''),
+            kind: body.kind,
+            pattern: String(body.pattern),
+            replacement: body.replacement === undefined ? '' : String(body.replacement),
+            regex: body.regex ? 1 : 0,
+            case_sensitive: body.case_sensitive ? 1 : 0,
+            enabled: body.enabled === false ? 0 : 1,
+            priority: Number(body.priority) || 100,
+          });
+          send(200, { ok: true, id });
+          return;
+        }
+        if (body.action === 'toggle') { store.setRuleEnabled(Number(body.id), body.enabled !== false); send(200, { ok: true }); return; }
+        if (body.action === 'delete') { store.deleteRule(Number(body.id)); send(200, { ok: true }); return; }
+        send(400, { ok: false, error: '未知 action' });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/prompts') {
+        const book = url.searchParams.get('book') || '';
+        send(200, { ok: true, rows: store.listPrompts(book), defaults: DEFAULT_TEMPLATE, formatRules: FORMAT_RULES, slots: PROMPT_SLOTS });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/prompts') {
+        const body = await readBody();
+        const book = String(body.bookKey || '');
+        if (body.action === 'clear') {
+          if (!PROMPT_SLOTS.includes(body.slot)) { send(400, { ok: false, error: 'slot 不合法' }); return; }
+          store.clearPrompt(book, body.slot);
+          send(200, { ok: true });
+          return;
+        }
+        if (body.action === 'clear-all') {
+          for (const slot of PROMPT_SLOTS) store.clearPrompt(book, slot);
+          send(200, { ok: true });
+          return;
+        }
+        if (!PROMPT_SLOTS.includes(body.slot)) { send(400, { ok: false, error: 'slot 不合法' }); return; }
+        store.setPrompt(book, body.slot, String(body.text == null ? '' : body.text));
+        send(200, { ok: true });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/books') {
+        const body = await readBody();
+        if (body.action === 'add') {
+          const raw = String(body.url || '').trim();
+          const info = parseBookUrl(raw);
+          const origin = (() => { try { return new URL(raw).origin; } catch { return undefined; } })();
+          store.upsertBook({ ...info, origin, title: '' });
+          log.log(`[books] 已登记 ${info.key}`);
+          send(200, { ok: true, key: info.key });
+          return;
+        }
+        if (body.action === 'forget') {
+          store.forgetBook(String(body.key || ''));
+          log.log(`[books] 已忘记 ${body.key}`);
+          send(200, { ok: true });
+          return;
+        }
+        send(400, { ok: false, error: '未知 action' });
         return;
       }
       if (req.method === 'GET' && url.pathname === '/runs') {
@@ -92,9 +232,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         return;
       }
       if (req.method === 'POST' && url.pathname === '/auth') {
-        const chunks = [];
-        for await (const c of req) chunks.push(c);
-        const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        const body = await readBody();
         if (body.token) store.setConfig('token', body.token);
         if (Array.isArray(body.workers)) store.setConfig('workers', body.workers);
         if (body.origin) store.setConfig('origin', body.origin);
@@ -104,9 +242,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         return;
       }
       if (req.method === 'POST' && url.pathname === '/run') {
-        const chunks = [];
-        for await (const c of req) chunks.push(c);
-        const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        const body = await readBody();
         if (!body.bookKey) { send(400, { ok: false, error: '缺少 bookKey' }); return; }
         const job = ['glossary', 'check', 'translate'].includes(body.job) ? body.job : 'translate';
         const runner = { glossary: glossaryPipeline, check: checkPipeline, translate: pipeline }[job];
@@ -126,7 +262,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
   });
   return new Promise((resolve) => {
     server.listen(port, '127.0.0.1', () => {
-      log.log(`[serve] http://127.0.0.1:${port}（/status /runs /progress /proposals /auth /run）`);
+      log.log(`[serve] http://127.0.0.1:${port}（控制台 /ui；API /status /runs /progress /proposals /settings /rules /prompts /books /auth /run）`);
       resolve(server);
     });
   });

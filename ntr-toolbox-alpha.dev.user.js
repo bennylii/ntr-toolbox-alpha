@@ -936,6 +936,13 @@
     // AI 术语表 modules
     // -----------------------------------
 
+    // 术语模块的「译文来源」只保留 LLM 槽（gpt/sakura）；历史配置里的 baidu/youdao 回落到 gpt
+    const LLM_TRANSLATORS = ['gpt', 'sakura'];
+    const normalizeGlossaryTranslator = (value) => {
+        const v = String(value || '').trim();
+        return LLM_TRANSLATORS.includes(v) ? v : 'gpt';
+    };
+
     // 公共：解析 LLM workers（勾选「使用临时端点」时用临时端点，否则取工作区 GPT 翻译器）
     const resolveGlossaryWorkers = async (cfg) => {
         const useTest = getModuleSetting(cfg, '使用临时端点') === true;
@@ -1150,7 +1157,7 @@
     // 译文获取与站点前端一致：/file 的 translations 列表参数（priority = 取第一个有译文的翻译器）
     // 返回 { jpText, zhText, translator }；web 为整本下载，wenku 逐章取 paragraphJp/oldParagraphZh（天然对齐）
     const loadGlossaryParallelText = async (target, translator, onProgress) => {
-        const zhTranslator = String(translator || 'gpt').trim() || 'gpt';
+        const zhTranslator = normalizeGlossaryTranslator(translator);
         if (target.kind === 'web') {
             const { text: jpText } = await loadGlossarySourceText(target, onProgress);
             const filename = `zh.${String(target.title || target.novelId).replace(/[\/|\\:*?"<>]/g, '')}.txt`;
@@ -1201,7 +1208,7 @@
     // web 走 /file?mode=jp-zh（priority 单译文块，jp/zh 行交替）；wenku 走 chapter-task 的段落数组
     // 每对尽量带 chapterId（修句写回定位章节用；web 用标题映射 TOC，文库循环里直接有）
     const loadGlossaryAlignedPairs = async (target, translator, onProgress) => {
-        const zhTranslator = String(translator || 'gpt').trim() || 'gpt';
+        const zhTranslator = normalizeGlossaryTranslator(translator);
         if (target.kind === 'web') {
             const novelRes = await script.fetch(`${window.location.origin}/api/novel/${target.providerId}/${target.novelId}`);
             const novel = novelRes.ok ? await novelRes.json() : {};
@@ -1551,7 +1558,7 @@
         needsTarget: true,
         settings: [
             // /file 的 translations 参数；文库路径固定 gpt，不受这里影响
-            newSelectSetting('译文来源', ['gpt', 'sakura', 'baidu', 'youdao'], 'gpt'),
+            newSelectSetting('译文来源', [...LLM_TRANSLATORS], 'gpt'),
             newNumberSetting('最短译文长度', 2),
             newBooleanSetting('只看未落地', false),
             newStringSetting('bind', 'none'),
@@ -1559,7 +1566,7 @@
         run: async function (cfg) {
             const target = await resolveGlossaryTarget();
             if (!target) return;
-            const translator = getModuleSetting(cfg, '译文来源') || 'gpt';
+            const translator = normalizeGlossaryTranslator(getModuleSetting(cfg, '译文来源'));
             const minDstLength = Math.max(1, Number(getModuleSetting(cfg, '最短译文长度')) || 2);
             const onlyMissed = getModuleSetting(cfg, '只看未落地') === true;
             const progress = GlossaryUI.status(`验收回扫 - ${GlossaryTargets.describe(target)}`);
@@ -1678,7 +1685,7 @@
         whitelist: ['/novel', '/wenku', '/favorite', '/workspace'],
         needsTarget: true,
         settings: [
-            newSelectSetting('译文来源', ['gpt', 'sakura', 'baidu', 'youdao'], 'gpt'),
+            newSelectSetting('译文来源', [...LLM_TRANSLATORS], 'gpt'),
             newNumberSetting('最少共现次数', 3),
             newNumberSetting('建议上限', 30),
             newStringSetting('bind', 'none'),
@@ -1686,7 +1693,7 @@
         run: async function (cfg) {
             const target = await resolveGlossaryTarget();
             if (!target) return;
-            const translator = getModuleSetting(cfg, '译文来源') || 'gpt';
+            const translator = normalizeGlossaryTranslator(getModuleSetting(cfg, '译文来源'));
             const minPairs = Math.max(2, Number(getModuleSetting(cfg, '最少共现次数')) || 3);
             const maxSuggestions = Math.max(1, Number(getModuleSetting(cfg, '建议上限')) || 30);
             const progress = GlossaryUI.status(`译文反推 - ${GlossaryTargets.describe(target)}`);
@@ -1741,7 +1748,7 @@
         whitelist: ['/novel', '/wenku', '/favorite', '/workspace'],
         needsTarget: true,
         settings: [
-            newSelectSetting('译文来源', ['gpt', 'sakura', 'baidu', 'youdao'], 'gpt'),
+            newSelectSetting('译文来源', [...LLM_TRANSLATORS], 'gpt'),
             newSelectSetting('翻译器', workspaceTranslatorOptions, ''),
             newBooleanSetting('使用临时端点', false),
             newStringSetting('临时端点', ''),
@@ -1761,7 +1768,7 @@
         run: async function (cfg) {
             const target = await resolveGlossaryTarget();
             if (!target) return;
-            const translator = getModuleSetting(cfg, '译文来源') || 'gpt';
+            const translator = normalizeGlossaryTranslator(getModuleSetting(cfg, '译文来源'));
             const batchSize = Math.max(1, Number(getModuleSetting(cfg, '每批段落数')) || 8);
             const maxParagraphs = Math.max(1, Number(getModuleSetting(cfg, '段落上限')) || 60);
             const concurrency = Math.max(1, Number(getModuleSetting(cfg, '并发')) || 2);

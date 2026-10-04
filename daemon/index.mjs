@@ -27,6 +27,7 @@ const { TranslationPipeline } = await imp('translate-pipeline.mjs');
 const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
 const { CheckPipeline, samplesToTsv } = await imp('check-pipeline.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
+const { parseBookUrl } = await imp('book-url.mjs');
 const { templateFromStore, DEFAULT_TEMPLATE, PROMPT_SLOTS } = await imp('prompt.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
@@ -118,13 +119,6 @@ setInterval(() => {
   const m = process.memoryUsage();
   store.addMetrics({ rss: m.rss / 1e6, heap: m.heapUsed / 1e6 });
 }, 60000).unref();
-
-function parseBookUrl(url) {
-  const m = /\/(novel|wenku)\/([^/?#]+)(?:\/([^/?#]+))?/.exec(url);
-  if (!m) throw new Error('无法从 URL 解析书籍（需要 /novel/{provider}/{id} 或 /wenku/{id}）');
-  if (m[1] === 'novel') return { kind: 'web', providerId: m[2], novelId: m[3], key: `web:${m[2]}/${m[3]}` };
-  return { kind: 'wenku', providerId: '', novelId: m[2], key: `wenku:${m[2]}` };
-}
 
 async function runBooks(filterKey) {
   const books = filterKey ? [store.getBook(filterKey)].filter(Boolean) : store.listBooks();
@@ -346,6 +340,7 @@ switch (command) {
     log.log(`llm: maxInFlight=${llm.maxInFlight} workers=${llm.workers} 请求=${llm.requests} 传输重试=${llm.transportRetries} 在途峰值=${llm.maxObservedInFlight}`);
     const u = store.usageTotals();
     log.log(`usage: 轮次=${u.rows} 请求=${u.requests} prompt=${u.promptTokens} completion=${u.completionTokens}`);
+    log.log('控制台: node daemon/index.mjs serve 后打开 http://127.0.0.1:7331/ui（设置/规则/提示词/任务都在页面里）');
     break;
   }
   case 'forget': {
