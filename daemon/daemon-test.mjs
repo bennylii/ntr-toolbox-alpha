@@ -274,6 +274,40 @@ await t('后替换规则在翻译落库前生效（【模拟译】→【译】�
     store.deleteRule(ruleId);
   }
 });
+console.log('== 提示词模板（P4） ==');
+await t('全局 base 覆盖生效（协议段仍由代码注入），clear 后回默认', async () => {
+  const key = `web:mock/mock-trans-prompt-${RUN}`;
+  store.upsertBook({ key, kind: 'web', providerId: 'mock', novelId: `mock-trans-prompt-${RUN}`, origin: MOCK, title: '' });
+  store.setPrompt('', 'base', '【自定义风格】{format_rules}');
+  try {
+    await mkPipeline({}).runBook(key);
+    const stats = await mockStats();
+    assert.ok(stats.lastTranslate.system.includes('【自定义风格】'), stats.lastTranslate.system);
+    assert.ok(stats.lastTranslate.system.includes('行数必须要和原文相等'), stats.lastTranslate.system);
+  } finally {
+    store.clearPrompt('', 'base');
+  }
+  const key2 = `web:mock/mock-trans-prompt2-${RUN}`;
+  store.upsertBook({ key: key2, kind: 'web', providerId: 'mock', novelId: `mock-trans-prompt2-${RUN}`, origin: MOCK, title: '' });
+  await mkPipeline({}).runBook(key2);
+  const stats2 = await mockStats();
+  assert.ok(!stats2.lastTranslate.system.includes('【自定义风格】'), stats2.lastTranslate.system);
+  assert.ok(stats2.lastTranslate.system.includes('轻小说翻译者'), stats2.lastTranslate.system);
+});
+await t('thinking 槽注入用户消息（mock 侧可见）', async () => {
+  const key = `web:mock/mock-trans-prompt3-${RUN}`;
+  store.upsertBook({ key, kind: 'web', providerId: 'mock', novelId: `mock-trans-prompt3-${RUN}`, origin: MOCK, title: '' });
+  store.setPrompt('', 'thinking', '先在心里分析，不要输出分析过程。');
+  try {
+    await mkPipeline({}).runBook(key);
+    const stats = await mockStats();
+    assert.ok(stats.lastTranslate.userHead.includes('思考指引'), stats.lastTranslate.userHead);
+    assert.ok(stats.lastTranslate.userHead.includes('#1:'), stats.lastTranslate.userHead);
+  } finally {
+    store.clearPrompt('', 'thinking');
+  }
+});
+
 console.log('== 控制面 ==');
 await t('server：/status 有书与进度、/auth 更新凭据', async () => {
   const server = await startServer({ store, pipeline: mkPipeline({}), port: 7342, log: { log: () => { }, error: () => { } } });

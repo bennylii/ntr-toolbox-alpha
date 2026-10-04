@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 import { segmentLines, translateSegment } from './translate.mjs';
 import { LlmScheduler } from './scheduler.mjs';
 import { processorFromStore } from './processors.mjs';
+import { templateFromStore, renderSystemPrompt } from './prompt.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -85,6 +86,14 @@ export class TranslationPipeline {
       const processor = processorFromStore(this.store, bookKey, opt.processors || {});
       if (processor.skipped.length > 0) this.log.log(`[proc] 跳过无效规则 ${processor.skipped.length} 条`);
 
+      // 提示词模板（协议段由代码注入；缺 {format_rules} 自动回退默认）
+      const template = templateFromStore(this.store, bookKey);
+      const rendered = renderSystemPrompt(template, {
+        sourceLanguage: book.sourceLanguage === 'JA' || !book.sourceLanguage ? '日文' : book.sourceLanguage,
+        targetLanguage: '简体中文',
+      });
+      if (rendered.warnings.length > 0) this.log.log(`[prompt] ${rendered.warnings.join('；')}`);
+
       const call = (messages) => { requests += 1; return this.scheduler.call(messages, { signal }); };
 
       let doneChapters = 0;
@@ -134,6 +143,8 @@ export class TranslationPipeline {
                 call,
                 glossary,
                 signal,
+                systemPrompt: rendered.text,
+                thinking: template.thinking,
                 wait: (ms) => sleep(ms),   // 传输层重试耗尽后的等待（调度器也会在派发前按冷却等待）
                 onRetry: (n) => { segRetries = n; },
                 log: (msg) => this.log.log(`[translate] ${chapterKey} ${msg}`),

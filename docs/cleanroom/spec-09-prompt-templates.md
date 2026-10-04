@@ -17,13 +17,14 @@
 - `{source_language}`、`{target_language}`（默认「日文」→「简体中文」）；
 - `{format_rules}`：**代码注入的固定协议文本**，内容不可被模板覆盖，包含：
   1. 译文行数必须与原文相等；
-  2. 正文必须以 `#编号:` 输出（保留每段开头编号）；
-  3. 不得输出任何解释/说明/额外内容；
-  4. 单行段追加「原文到此为止」的规则说明（由代码在用户消息末尾执行，不靠模板）。
+  2. 不得输出任何解释/说明/额外内容；
+  3. 编号（`#编号:`）由用户消息（「注意要保留每一段开头的编号」）与解析器共同保证；
+  4. 单行段「原文到此为止」由代码在用户消息末尾追加，不靠模板。
+- 默认模板渲染结果与站点镜像系统提示 `TRANSLATE_SYSTEM_PROMPT` **逐字相同**（全槽位默认时直接返回该常量，零行为变化）。
 
 ## 2. 渲染规则
 
-1. `renderSystemPrompt(template)`：`prefix + '\n' + base + (suffix ? '\n' + suffix : '')`；`{format_rules}` 被协议文本替换。
+1. `renderSystemPrompt(template)`：全槽位默认 → 直接返回 `TRANSLATE_SYSTEM_PROMPT`（逐字一致）；否则 `prefix + '\n' + base + (suffix ? '\n' + suffix : '')`，`{format_rules}` 被协议文本替换。
 2. 模板无效判定：缺少 `{format_rules}`、渲染后不含协议关键词（行数/编号）或长度 <10 字符 → **整体回退默认模板**并记警告。
 3. 用户消息由 `daemon/translate.mjs` 现有逻辑生成（术语表注入 + `#i:line` + 单行「原文到此为止」），模板系统不改动这部分结构；`thinking` 段追加在用户消息最前。
 4. 模板来源优先级：该书 `prompts(bookKey)` → 全局 `prompts('')` → 代码默认。空文本 = 未设置。
