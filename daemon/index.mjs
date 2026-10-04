@@ -6,6 +6,7 @@
 //   run [--book key] [--concurrency 2]  跑一遍增强术语管线（提取→核实→回扫→直写/提案）
 //   check [--book key] [--codes A,B] [--limit N] [--propose] [--tsv]   质检（七码报告；propose 出提案）
 //   rules list|add|rm|enable|disable   文本处理链规则（pre/post 替换、保留段）
+//   prompt show|set|clear   提示词模板（prefix/base/thinking/suffix；base 必须含 {format_rules}）
 //   translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 //   watch [--interval 分钟]  常驻：定期按 expire 档补翻未译/过期章节
 //   serve [--port 7331]     本机控制面（/status /progress /auth /run）
@@ -24,6 +25,7 @@ const { SiteClient } = await imp('site-client.mjs');
 const { TranslationPipeline } = await imp('translate-pipeline.mjs');
 const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
 const { CheckPipeline, samplesToTsv } = await imp('check-pipeline.mjs');
+const { templateFromStore, DEFAULT_TEMPLATE, PROMPT_SLOTS } = await imp('prompt.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
 
@@ -221,6 +223,33 @@ switch (command) {
     }
     break;
   }
+  case 'prompt': {
+    const sub = args[1] || 'show';
+    const promptBook = typeof flags.book === 'string' ? flags.book : '';
+    if (sub === 'show') {
+      const template = templateFromStore(store, promptBook);
+      for (const slot of PROMPT_SLOTS) {
+        const isDefault = template[slot] === DEFAULT_TEMPLATE[slot];
+        log.log(`[${slot}]${isDefault ? '（默认）' : ''}`);
+        log.log(template[slot] || '(空)');
+      }
+    } else if (sub === 'set') {
+      const slot = typeof flags.slot === 'string' ? flags.slot : '';
+      if (!PROMPT_SLOTS.includes(slot)) { log.error('用法: prompt set --slot prefix|base|thinking|suffix --text <文本> | --file <path> [--book key]'); break; }
+      let text = typeof flags.text === 'string' ? flags.text : null;
+      if (text === null && typeof flags.file === 'string' && flags.file !== 'true') text = fs.readFileSync(flags.file, 'utf8');
+      if (text === null) { log.error('缺少 --text 或 --file'); break; }
+      store.setPrompt(promptBook, slot, text);
+      log.log(`已设置 ${promptBook || '(全局)'} 的 ${slot}（${text.length} 字符）`);
+      if (slot === 'base' && !text.includes('{format_rules}')) log.error('警告：base 未包含 {format_rules}，运行时会回退默认模板');
+    } else if (sub === 'clear') {
+      if (typeof flags.slot === 'string') { store.clearPrompt(promptBook, flags.slot); log.log(`已清除 ${promptBook || '(全局)'} 的 ${flags.slot}`); }
+      else { for (const slot of PROMPT_SLOTS) store.clearPrompt(promptBook, slot); log.log(`已清除 ${promptBook || '(全局)'} 的全部槽`); }
+    } else {
+      log.error('用法: prompt show|set|clear');
+    }
+    break;
+  }
   case 'translate': {
     await runBooks(flags.book);
     break;
@@ -271,6 +300,6 @@ switch (command) {
     break;
   }
   default:
-    log.error(`未知命令: ${command}（可用 auth/add/run/check/translate/watch/serve/status/forget）`);
+    log.error(`未知命令: ${command}（可用 auth/add/run/check/rules/prompt/translate/watch/serve/status/forget）`);
     process.exit(2);
 }

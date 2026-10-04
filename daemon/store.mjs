@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS rules (
   replacement TEXT DEFAULT '', regex INTEGER DEFAULT 0, case_sensitive INTEGER DEFAULT 0,
   enabled INTEGER DEFAULT 1, priority INTEGER DEFAULT 100, note TEXT DEFAULT '', updateAt INTEGER
 );
+CREATE TABLE IF NOT EXISTS prompts (
+  bookKey TEXT DEFAULT '', slot TEXT, text TEXT DEFAULT '', updateAt INTEGER,
+  PRIMARY KEY (bookKey, slot)
+);
 CREATE TABLE IF NOT EXISTS snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, bookKey TEXT, at INTEGER, glossaryJson TEXT, note TEXT);
 CREATE TABLE IF NOT EXISTS proposals (
   id INTEGER PRIMARY KEY AUTOINCREMENT, bookKey TEXT, at INTEGER, kind TEXT,
@@ -153,6 +157,20 @@ export class Store {
   }
   deleteRule(id) {
     this.db.prepare('DELETE FROM rules WHERE id = ?').run(id);
+  }
+
+  // ---- 提示词模板（prefix/base/thinking/suffix；bookKey='' 为全局） ----
+  setPrompt(bookKey, slot, text) {
+    this.db.prepare(`
+      INSERT INTO prompts(bookKey, slot, text, updateAt) VALUES(?, ?, ?, ?)
+      ON CONFLICT(bookKey, slot) DO UPDATE SET text = excluded.text, updateAt = excluded.updateAt
+    `).run(bookKey || '', slot || '', String(text == null ? '' : text), Date.now());
+  }
+  listPrompts(bookKey = '') {
+    return this.db.prepare("SELECT * FROM prompts WHERE bookKey = '' OR bookKey = ?").all(bookKey || '');
+  }
+  clearPrompt(bookKey, slot) {
+    this.db.prepare('DELETE FROM prompts WHERE bookKey = ? AND slot = ?').run(bookKey || '', slot || '');
   }
 
   // ---- 章节级元数据（质检 RETRY_THRESHOLD 用；只有 daemon 自己翻的章才有记录） ----

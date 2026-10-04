@@ -506,7 +506,12 @@ const server = http.createServer(async (req, res) => {
   if (userContent.includes('你是一个轻小说翻译者') || userContent.includes('注意要保留每一段开头的编号')) {
     const numbered = [...userContent.matchAll(/^#(\d+)[:：](.*)$/gm)].map((m) => ({ id: Number(m[1]), text: m[2] }));
     const glossaryLines = [...userContent.matchAll(/^.+ => .+$/gm)].length;
-    stats.lastTranslate = { lines: numbered.length, glossaryLines };
+    stats.lastTranslate = {
+      lines: numbered.length,
+      glossaryLines,
+      system: String(((body.messages || []).find((m) => m.role === 'system') || {}).content || '').slice(0, 300),
+      userHead: String(userContent || '').slice(0, 160),
+    };
     const out = numbered.length > 0
       ? numbered.map((line) => `#${line.id}:【模拟译】第${line.id}段：这是由本地模拟端点生成的译文。`)
       : ['#1:【模拟译】这是由本地模拟端点生成的译文。'];

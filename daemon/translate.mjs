@@ -37,10 +37,16 @@ export function segmentLines(lines, options = {}) {
   return ranges.map((r) => lines.slice(r.start, r.end));
 }
 
-// ---- 提示词（镜像 openai-prompt.ts）----
-export function buildTranslateMessages(lines, glossary) {
-  const messages = [{ role: 'system', content: TRANSLATE_SYSTEM_PROMPT }];
+// ---- 提示词（镜像 openai-prompt.ts；systemPrompt/thinking 可由模板注入，协议段不可改）----
+export function buildTranslateMessages(lines, glossary, options = {}) {
+  const opts = options || {};
+  const systemPrompt = (typeof opts.systemPrompt === 'string' && opts.systemPrompt.trim() !== '')
+    ? opts.systemPrompt
+    : TRANSLATE_SYSTEM_PROMPT;
+  const messages = [{ role: 'system', content: systemPrompt }];
   const parts = [];
+  const thinking = String(opts.thinking || '').trim();
+  if (thinking !== '') parts.push(`【思考指引】\n${thinking}\n`);
   const pairs = Object.entries(glossary || {}).filter(([jp]) => lines.some((line) => line.includes(jp)));
   if (pairs.length > 0) {
     parts.push('翻译的时候参考下面的术语表：');
@@ -105,7 +111,7 @@ async function translateLines(lines, context) {
   if (lines.length === 0) return [];
   if (lines.every((l) => l.trim().length === 0)) return [...lines];
   if (context.signal && context.signal.aborted) throw new Error('aborted');
-  const messages = buildTranslateMessages(lines, context.glossary);
+  const messages = buildTranslateMessages(lines, context.glossary, { systemPrompt: context.systemPrompt, thinking: context.thinking });
   const result = await context.call(messages);
   if (!result || !result.ok) {
     const err = new Error((result && result.error) || '请求失败');

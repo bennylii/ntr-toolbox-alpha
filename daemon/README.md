@@ -19,6 +19,7 @@ node daemon/index.mjs add       <novel-url>        # 登记（/novel/{provider}/
 node daemon/index.mjs run       [--book key]       # 术语管线：提取→核实→回扫→直写/提案（含快照）
 node daemon/index.mjs check     [--book key] [--codes A,B] [--limit N] [--propose] [--tsv]   # 质检：七码报告
 node daemon/index.mjs rules     list|add|rm|enable|disable   # 文本处理链规则（pre/post 替换、保留段）
+node daemon/index.mjs prompt    show|set|clear               # 提示词模板（prefix/base/thinking/suffix）
 node daemon/index.mjs translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 node daemon/index.mjs watch     [--interval 30]    # 常驻：定期按 expire 档补翻
 node daemon/index.mjs serve     [--port 7331]      # 控制面 /status /runs /progress /proposals /auth /run（/run 单队列串行）
@@ -49,6 +50,14 @@ node daemon/index.mjs forget    <bookKey>
 - 硬不变量：行数不变、占位符不得残留、还原失败该行回退原文；
 - 处理链版本参与段缓存键：规则改动自动失效旧缓存；
 - 管理：`node daemon/index.mjs rules add --kind post_replacement --pattern '【模拟译】' --replace '【译】' [--book key] [--regex] [--cs] [--priority N]`、`rules list|rm <id>|enable <id>|disable <id>`。
+
+## 提示词模板
+
+- 四槽 `prefix / base / thinking / suffix`（`prompts` 表，`bookKey=''` 为全局；按书覆盖全局）；
+- `base` 必须包含 `{format_rules}`（协议段由代码注入，模板不可覆盖）；缺占位符或过短 → 自动回退默认并告警；
+- 全槽位默认时渲染结果与站点镜像系统提示**逐字一致**（零行为变化）；`{source_language}`/`{target_language}` 可替换；
+- `thinking` 非空时以「【思考指引】」追加到用户消息最前（协议行不受影响）；
+- 管理：`node daemon/index.mjs prompt show [--book key]`、`prompt set --slot base --text '…{format_rules}'`（或 `--file`）、`prompt clear --slot base`。
 
 ## 真机契约备忘（mock 已同步改严）
 
