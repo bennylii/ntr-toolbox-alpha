@@ -18,6 +18,7 @@ expire/normal/all 档位、`oldGlossaryId === glossaryId` 跳过），并修复�
 node daemon/index.mjs add       <novel-url>        # 登记（/novel/{provider}/{id} 或 /wenku/{id}）
 node daemon/index.mjs run       [--book key]       # 术语管线：提取→核实→回扫→直写/提案（含快照）
 node daemon/index.mjs check     [--book key] [--codes A,B] [--limit N] [--propose] [--tsv]   # 质检：七码报告
+node daemon/index.mjs rules     list|add|rm|enable|disable   # 文本处理链规则（pre/post 替换、保留段）
 node daemon/index.mjs translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 node daemon/index.mjs watch     [--interval 30]    # 常驻：定期按 expire 档补翻
 node daemon/index.mjs serve     [--port 7331]      # 控制面 /status /runs /progress /proposals /auth /run（/run 单队列串行）
@@ -40,6 +41,14 @@ node daemon/index.mjs forget    <bookKey>
 - **上下文守卫**：`--max-prompt-chars N`（默认 12000，≈16K token 内）超限只告警；`--strict-prompt` 时直接失败、不发请求；
 - **用量记账**：上游 `usage` 优先、缺失按字符估算；每轮 run 落 `usage` 表，`status` 汇总；
 - 持久配置：`config.llm = { maxInFlight, rpm, transportRetries, maxPromptChars, strictPrompt }`（CLI 旗标优先）。
+
+## 文本处理链（预处理 / 后处理）
+
+- 规则存 SQLite `rules`（`kind ∈ text_preserve | pre_replacement | post_replacement`；`bookKey=''` 为全局，其余按书；`priority` 升序执行，支持 literal/regex 与大小写敏感）；
+- 默认开关见 `daemon/presets/base.json`：资源占位符投影（URL/HTML 标签/`\N[..]` 等控制码）、标点稳定化（jp 句末 `！？` → 中文全角）、ruby 清洗默认关；
+- 硬不变量：行数不变、占位符不得残留、还原失败该行回退原文；
+- 处理链版本参与段缓存键：规则改动自动失效旧缓存；
+- 管理：`node daemon/index.mjs rules add --kind post_replacement --pattern '【模拟译】' --replace '【译】' [--book key] [--regex] [--cs] [--priority N]`、`rules list|rm <id>|enable <id>|disable <id>`。
 
 ## 真机契约备忘（mock 已同步改严）
 

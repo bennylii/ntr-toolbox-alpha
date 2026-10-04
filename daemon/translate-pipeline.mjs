@@ -7,6 +7,7 @@
 import crypto from 'node:crypto';
 import { segmentLines, translateSegment } from './translate.mjs';
 import { LlmScheduler } from './scheduler.mjs';
+import { processorFromStore } from './processors.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -80,6 +81,10 @@ export class TranslationPipeline {
       for (const task of tasks) targets.push(...this.planTargets(task.toc, { ...task, level }));
       this.log.log(`[translate] ${book.key}：level=${level} 目标 ${targets.length} 章（合计 ${tasks.reduce((n, t) => n + (t.toc || []).length, 0)} 章）`);
 
+      // 文本处理链（资源占位符/保留段/替换表/标点；版本参与段缓存键）
+      const processor = processorFromStore(this.store, bookKey, opt.processors || {});
+      if (processor.skipped.length > 0) this.log.log(`[proc] 跳过无效规则 ${processor.skipped.length} 条`);
+
       const call = (messages) => { requests += 1; return this.scheduler.call(messages, { signal }); };
 
       let doneChapters = 0;
@@ -116,18 +121,27 @@ export class TranslationPipeline {
               if (index >= segments.length) return;
               if (shouldStop()) return;
               const seg = segments[index];
-              const segKey = crypto.createHash('sha1').update(JSON.stringify(seg)).digest('hex');
+              const prepared = seg.map((line) => processor.pre(line));
+              const preLines = prepared.map((p) => p.text);
+              const segKey = crypto.createHash('sha1')
+                .update(JSON.stringify(preLines)).update('|').update(processor.version)
+                .digest('hex');
               const cached = this.store.getSeg(bookKey, segKey);
               if (Array.isArray(cached) && cached.length === seg.length) { zhParts[index] = cached; continue; }
               const glossary = (dto.glossary && Object.keys(dto.glossary).length > 0) ? dto.glossary : {};
               let segRetries = 0;
-              const zh = await translateSegment(seg, {
+              const rawZh = await translateSegment(preLines, {
                 call,
                 glossary,
                 signal,
                 wait: (ms) => sleep(ms),   // 传输层重试耗尽后的等待（调度器也会在派发前按冷却等待）
                 onRetry: (n) => { segRetries = n; },
                 log: (msg) => this.log.log(`[translate] ${chapterKey} ${msg}`),
+              });
+              const zh = rawZh.map((line, i) => {
+                const restored = processor.post(line, prepared[i].ctx);
+                if (restored.warnings.length > 0) this.log.log(`[translate] ${chapterKey} ${restored.warnings.join('；')}`);
+                return restored.fellBack ? seg[i] : restored.text;   // 还原失败 → 该行回退原文
               });
               chapterRetries = Math.max(chapterRetries, segRetries);
               this.store.putSeg(bookKey, segKey, zh);

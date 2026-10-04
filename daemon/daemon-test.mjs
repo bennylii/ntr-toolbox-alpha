@@ -258,6 +258,22 @@ await t('控制面：/run 支持 job=check', async () => {
   server.close();
 });
 
+console.log('== 文本处理链（P3：规则接线） ==');
+await t('后替换规则在翻译落库前生效（【模拟译】→【译】）', async () => {
+  const key = `web:mock/mock-trans-proc-${RUN}`;
+  store.upsertBook({ key, kind: 'web', providerId: 'mock', novelId: `mock-trans-proc-${RUN}`, origin: MOCK, title: '' });
+  const ruleId = store.addRule({ bookKey: '', kind: 'post_replacement', pattern: '【模拟译】', replacement: '【译】', regex: 0, enabled: 1, priority: 10 });
+  try {
+    const p = mkPipeline({});
+    const r = await p.runBook(key);
+    assert.ok(r.stats.uploaded >= 1, JSON.stringify(r.stats));
+    const stats = await mockStats();
+    const preview = (stats.lastChapterUpload && stats.lastChapterUpload.preview) || [];
+    assert.ok(preview.length > 0 && preview.every((line) => line.includes('【译】') && !line.includes('【模拟译】')), JSON.stringify(preview));
+  } finally {
+    store.deleteRule(ruleId);
+  }
+});
 console.log('== 控制面 ==');
 await t('server：/status 有书与进度、/auth 更新凭据', async () => {
   const server = await startServer({ store, pipeline: mkPipeline({}), port: 7342, log: { log: () => { }, error: () => { } } });

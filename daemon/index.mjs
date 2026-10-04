@@ -5,6 +5,7 @@
 //   add <novel-url>         登记一本书（/novel/{provider}/{id} 或 /wenku/{id}）
 //   run [--book key] [--concurrency 2]  跑一遍增强术语管线（提取→核实→回扫→直写/提案）
 //   check [--book key] [--codes A,B] [--limit N] [--propose] [--tsv]   质检（七码报告；propose 出提案）
+//   rules list|add|rm|enable|disable   文本处理链规则（pre/post 替换、保留段）
 //   translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 //   watch [--interval 分钟]  常驻：定期按 expire 档补翻未译/过期章节
 //   serve [--port 7331]     本机控制面（/status /progress /auth /run）
@@ -186,6 +187,37 @@ switch (command) {
         log.error(`==== ${book.key} 失败: ${(e && e.message) || e}`);
         if (e && e.code === 'unauthorized') log.error('凭据失效：在站点页面点「同步 Daemon」，或 daemon auth <token> 重新写入');
       }
+    }
+    break;
+  }
+  case 'rules': {
+    const sub = args[1] || 'list';
+    if (sub === 'list') {
+      const rows = store.listRules(typeof flags.book === 'string' ? flags.book : '');
+      rows.forEach((r) => log.log(`#${r.id} [${r.enabled ? 'on' : 'off'}] ${r.kind} prio=${r.priority} ${r.regex ? 're' : 'lit'}${r.case_sensitive ? ' cs' : ''} ${r.bookKey || '(全局)'} :: ${r.pattern} → ${r.replacement}`));
+      log.log(`共 ${rows.length} 条`);
+    } else if (sub === 'add') {
+      if (typeof flags.kind !== 'string' || flags.kind === 'true' || typeof flags.pattern !== 'string' || flags.pattern === 'true') { log.error('用法: rules add --kind text_preserve|pre_replacement|post_replacement --pattern <文本/正则> [--replace <替换>] [--book key] [--regex] [--cs] [--priority N]'); break; }
+      const id = store.addRule({
+        bookKey: typeof flags.book === 'string' ? flags.book : '',
+        kind: flags.kind,
+        pattern: flags.pattern,
+        replacement: typeof flags.replace === 'string' ? flags.replace : '',
+        regex: flags.regex === true ? 1 : 0,
+        case_sensitive: flags.cs === true ? 1 : 0,
+        priority: Number(flags.priority) || 100,
+      });
+      log.log(`已添加规则 #${id}`);
+    } else if (sub === 'rm') {
+      const id = Number(args[2]) || Number(flags.id) || 0;
+      store.deleteRule(id);
+      log.log(`已删除规则 #${id}`);
+    } else if (sub === 'enable' || sub === 'disable') {
+      const id = Number(args[2]) || Number(flags.id) || 0;
+      store.setRuleEnabled(id, sub === 'enable');
+      log.log(`规则 #${id} 已${sub === 'enable' ? '启用' : '禁用'}`);
+    } else {
+      log.error('用法: rules list|add|rm|enable|disable');
     }
     break;
   }

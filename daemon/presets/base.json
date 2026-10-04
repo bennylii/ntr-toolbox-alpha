@@ -1,0 +1,9 @@
+{
+  "note": "预处理/后处理链默认开关（spec-08）；真正生效的规则在 SQLite rules 表（P5 导入也会落那里）",
+  "options": {
+    "resourceProtect": true,
+    "rubyClean": false,
+    "punctuation": "jp-end"
+  },
+  "rules": []
+}
