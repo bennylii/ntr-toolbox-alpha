@@ -70,6 +70,18 @@ t('read：路径逃逸/绝对路径/不存在 → 拒绝', () => {
   assert.throws(() => catalog.read('missing', 'SKILL.md'), /技能不存在/);
 });
 
+console.log('== 技能：@点名解析 ==');
+t('mentions：命中已有技能、未知名不收录、多个去重', () => {
+  const m = catalog.mentions('看看 @alpha 和 @beta，再来一遍 @alpha；@nope 忽略');
+  assert.deepEqual(m.skills, ['alpha', 'beta'], JSON.stringify(m));
+  assert.deepEqual(m.unknown, ['nope']);
+});
+t('mentions：无 @ → 空结果', () => {
+  const m = catalog.mentions('普通文本 a@b.com');
+  assert.deepEqual(m.skills, []);
+  assert.deepEqual(m.unknown, []);
+});
+
 console.log('== 技能：仓库内置技能可用 ==');
 const repoCatalog = createSkillCatalog({ roots: [path.join(repoRoot, 'skills')], log: { log: () => { } } });
 t('内置技能 ≥ 6 个且描述非空（含 workflow 三件套与既有技能）', () => {

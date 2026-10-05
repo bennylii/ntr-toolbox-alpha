@@ -461,6 +461,7 @@ const server = http.createServer(async (req, res) => {
   stats.keys = stats.keys || {};
   stats.keys[authKey] = (stats.keys[authKey] || 0) + 1;
   // 供测试断言请求体形状（例如「输出上限」不发送时不带 max_tokens）
+  stats.lastSystem = String(((body.messages || []).find((m) => m.role === 'system') || {}).content || '').slice(0, 2000);
   stats.lastBody = {
     model: body.model,
     temperature: body.temperature,
