@@ -5,6 +5,9 @@ description: 质检报告的解读与处理流程（七码：假名残留/相似
 
 # 质检工作流（NTR Daemon）
 
+> 前置：先读 `writing-guide`（含 `writing-guide-` 前缀技能）再按本流程执行。
+
+
 ## 数据含义
 `quality_report` / `check` 输出的七个码，逐对（原文行 ↔ 译文行）判定：
 

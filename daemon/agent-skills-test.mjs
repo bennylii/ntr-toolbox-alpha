@@ -84,6 +84,37 @@ t('mentions：无 @ → 空结果', () => {
 
 console.log('== 技能：仓库内置技能可用 ==');
 const repoCatalog = createSkillCatalog({ roots: [path.join(repoRoot, 'skills')], log: { log: () => { } } });
+
+console.log('== 技能：隐藏前置（writing-guide / agent-charter） ==');
+t('writing-guide / agent-charter 存在且隐藏（不进可见目录）', () => {
+  const names = repoCatalog.list().map((x) => x.name);
+  for (const want of ['writing-guide', 'agent-charter']) assert.ok(names.includes(want), want + ' 缺失');
+  const wg = repoCatalog.get('writing-guide');
+  const ac = repoCatalog.get('agent-charter');
+  assert.equal(wg.disableModelInvocation, true, 'writing-guide 应隐藏');
+  assert.equal(ac.disableModelInvocation, true, 'agent-charter 应隐藏');
+  const prompt = repoCatalog.promptText();
+  assert.ok(!prompt.includes('agent-charter'), '隐藏技能不进可见目录');
+});
+t('read_skill：writing-guide 正文与两份 references 可读', () => {
+  const md = repoCatalog.read('writing-guide');
+  assert.ok(md.content.includes('references/translation-guide.md') && md.content.includes('references/creative-guide.md'));
+  const tg = repoCatalog.read('writing-guide', 'references/translation-guide.md');
+  assert.ok(tg.content.includes('忠实与表达'));
+  const cg = repoCatalog.read('writing-guide', 'references/creative-guide.md');
+  assert.ok(cg.content.includes('创造空间'));
+});
+t('mentions：隐藏技能可被 @ 点名', () => {
+  const m = repoCatalog.mentions('@writing-guide @agent-charter');
+  assert.deepEqual(m.skills.sort(), ['agent-charter', 'writing-guide'], JSON.stringify(m));
+});
+t('三个 workflow 技能声明 writing-guide 前置', () => {
+  for (const name of ['translation-workflow', 'glossary-workflow', 'quality-workflow']) {
+    const md = repoCatalog.read(name);
+    assert.ok(md.content.includes('writing-guide'), name + ' 缺前置声明');
+  }
+});
+
 t('内置技能 ≥ 6 个且描述非空（含 workflow 三件套与既有技能）', () => {
   const names = repoCatalog.list().map((s) => s.name);
   for (const want of ['glossary-extract', 'acceptance-scan', 'text-preserve', 'glossary-workflow', 'translation-workflow', 'quality-workflow']) {

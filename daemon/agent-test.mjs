@@ -170,6 +170,12 @@ await t('runTurn：pinnedSkills 注入系统提示（假 chat 捕获）', async 
   assert.ok(seenSystem.includes('请按流程执行'), seenSystem.slice(0, 200));
 });
 
+console.log('== Agent：任务宪章接线 ==');
+t('DEFAULT_AGENT_SYSTEM 要求先加载 agent-charter', () => {
+  assert.ok(DEFAULT_AGENT_SYSTEM.includes('agent-charter'), DEFAULT_AGENT_SYSTEM);
+  assert.ok(DEFAULT_AGENT_SYSTEM.includes('read_skill'), '应指明用 read_skill 加载');
+});
+
 console.log('== Agent：决策（审批/追问） ==');
 await t('ask → 挂起 → resolve allowed；超时按 kind 拒绝/取消', async () => {
   const api = createAgentSession({ store, chat: null, log: quiet, options: { decisionTimeoutMs: 60000 } });

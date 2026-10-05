@@ -73,7 +73,7 @@ node daemon/index.mjs forget    <bookKey>
   - 交互：`doing`（进度）、`ask_user`（追问）。
 - **单队列**：执行类工具与 `/run` 共用进程内 FIFO（同一时刻只跑一个 runBook），不会和浏览器/其它会话抢同一本书。
 - **控制面新增**：`GET /snapshots`、`POST /snapshots/restore`、`POST /proposals/close`、`POST /proposals/apply`（人工/A4 GUI 用）。
-- **技能**：`skills/` 下的 SKILL.md 包会作为目录注入系统提示，模型用 `read_skill` 读取正文与 `references/**`；现有 glossary-extract / acceptance-scan / text-preserve，另加 glossary-workflow / translation-workflow / quality-workflow 三份工作流技能。
+- **技能**：`skills/` 下的 SKILL.md 包会作为目录注入系统提示，模型用 `read_skill` 读取正文与 `references/**`；现有 glossary-extract / acceptance-scan / text-preserve，工作流三件套 glossary-workflow / translation-workflow / quality-workflow，以及两个隐藏前置技能：`writing-guide`（写作准则：translation-guide / creative-guide 两份细则，被三个工作流声明为必读前置）与 `agent-charter`（任务宪章：虚构边界、角色成年、忠实叙事、首行锚定、禁语与稀释——系统提示要求任务开始前先加载）。隐藏技能不进可见目录，但 `read_skill` 可读、`@点名` 可用。
 - **多实例/测试**：`--db <path>` 可指定另一个 SQLite（并行车道互不干扰）。
 
 ### 输入框指令（@技能 / 斜杠命令 / 会话系统指令）
