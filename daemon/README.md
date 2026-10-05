@@ -76,6 +76,13 @@ node daemon/index.mjs forget    <bookKey>
 - **技能**：`skills/` 下的 SKILL.md 包会作为目录注入系统提示，模型用 `read_skill` 读取正文与 `references/**`；现有 glossary-extract / acceptance-scan / text-preserve，另加 glossary-workflow / translation-workflow / quality-workflow 三份工作流技能。
 - **多实例/测试**：`--db <path>` 可指定另一个 SQLite（并行车道互不干扰）。
 
+### 输入框指令（@技能 / 斜杠命令 / 会话系统指令）
+
+- **`@技能名`**：消息任意位置可点名技能（可多个），该轮系统提示会注入技能正文（截 6000 字），无需再 read_skill；只认技能目录里存在的名字，未知名 → 400 并附清单（CLI 同样生效）；
+- **`/命令`**（仅行首，UI 本地执行）：`/new [标题]`、`/stop`、`/auto [on|off]`、`/help`、`/tools`、`/skills`、`/translate <book> [level] [max]`、`/glossary <book>`、`/check <book> [propose]`（后三个直接入队，等价「任务」页）；未知命令本地提示；
+- **会话系统指令**：助手页「系统指令」按钮 → 编辑并保存当前会话 → 每轮以「【用户系统指令】」注入系统提示（snapshot 带回）；
+- 输入 `@` / 行首 `/` 有候选弹层（↑↓ 选择、Enter/Tab 补全、Esc 关闭）。
+
 ### 控制台「助手」页（A4）
 
 `serve` 后打开 <http://127.0.0.1:7331/ui> → 「助手」标签：会话选择/新建、对话流（工具调用以卡片展示）、审批与追问面板（允许本次 / 拒绝 / 选项回答）、停止当前轮、审批模式开关、会话用量与连接状态。

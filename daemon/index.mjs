@@ -344,6 +344,12 @@ switch (command) {
     const agentBook = typeof flags.book === 'string' ? flags.book : '';
     let sessionId = typeof flags.session === 'string' ? flags.session : '';
     const firstMessage = typeof flags.message === 'string' ? flags.message : '';
+    let pinnedSkills = [];
+    if (firstMessage && skillCatalog.mentions) {
+      const m = skillCatalog.mentions(firstMessage);
+      pinnedSkills = m.skills;
+      if (m.unknown.length > 0) { log.error(`未知技能：${m.unknown.join('、')}（可用：${skillCatalog.list().map((x) => x.name).join('、')}）`); break; }
+    }
     if (sessionId) {
       if (!store.getAgentSession(sessionId)) { log.error(`会话不存在：${sessionId}`); break; }
     } else {
@@ -379,7 +385,7 @@ switch (command) {
     };
     try {
       if (firstMessage) {
-        const result = await agentLoop.runTurn(sessionId, firstMessage, { onEvent });
+        const result = await agentLoop.runTurn(sessionId, firstMessage, { onEvent, pinnedSkills });
         log.log(`\n[一轮结束] ${result.ok ? `ok（${result.steps} 步）` : `失败：${result.error}`}`);
       } else {
         log.log('交互模式：输入消息回车发送；/stop 中止当前轮；/exit 退出');
@@ -388,7 +394,9 @@ switch (command) {
           if (line === '/exit' || line === '/quit') break;
           if (line === '') continue;
           if (line === '/stop') { agentLoop.stop(sessionId); continue; }
-          const result = await agentLoop.runTurn(sessionId, line, { onEvent });
+          const m = skillCatalog.mentions ? skillCatalog.mentions(line) : { skills: [], unknown: [] };
+          if (m.unknown.length > 0) { log.error(`未知技能：${m.unknown.join('、')}`); continue; }
+          const result = await agentLoop.runTurn(sessionId, line, { onEvent, pinnedSkills: m.skills });
           if (!result.ok) log.log(`[一轮结束] 失败：${result.error}`);
         }
       }

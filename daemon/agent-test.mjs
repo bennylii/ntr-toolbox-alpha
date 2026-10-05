@@ -145,6 +145,31 @@ await t('maybeCompact：旧段并入摘要、retain 最近消息、摘要请求�
   assert.equal(store.getAgentSession(sid3).summaryUpTo, 0);
 });
 
+console.log('== Agent：系统指令与点名技能 ==');
+await t('buildMessages：会话 personality 注入【用户系统指令】', () => {
+  const sidP = store.createAgentSession({ bookKey: '', title: 'p' });
+  store.setAgentPersonality(sidP, '回答风格：短句、先结论。');
+  const api = createAgentSession({ store, chat: null, log: quiet });
+  const messages = api.buildMessages(sidP);
+  assert.ok(messages[0].content.includes('【用户系统指令】'), messages[0].content);
+  assert.ok(messages[0].content.includes('先结论'), messages[0].content);
+});
+await t('runTurn：pinnedSkills 注入系统提示（假 chat 捕获）', async () => {
+  const skillsFake = { read: (name) => ({ skill: name, path: 'SKILL.md', basePath: '/x', content: `【技能正文 ${name}】请按流程执行。` }) };
+  let seenSystem = '';
+  const ses2 = store.createAgentSession({ bookKey: '', title: 'pin' });
+  const loop = createAgentLoop({
+    store,
+    chat: async (params) => { seenSystem = String(params.messages[0].content || ''); return text('好的。'); },
+    tools: [doingTool], log: quiet,
+    options: { deps: { skills: skillsFake } },
+  });
+  const r = await loop.runTurn(ses2, '按 @glossary-workflow 来', { pinnedSkills: ['glossary-workflow'] });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(seenSystem.includes('【用户点名技能：glossary-workflow】'), seenSystem.slice(0, 200));
+  assert.ok(seenSystem.includes('请按流程执行'), seenSystem.slice(0, 200));
+});
+
 console.log('== Agent：决策（审批/追问） ==');
 await t('ask → 挂起 → resolve allowed；超时按 kind 拒绝/取消', async () => {
   const api = createAgentSession({ store, chat: null, log: quiet, options: { decisionTimeoutMs: 60000 } });

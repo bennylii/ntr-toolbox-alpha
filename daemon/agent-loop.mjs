@@ -71,7 +71,7 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
   }
 
   // 一轮对话。返回 { ok, content?, steps?, error? }；异常不抛出（除 aborted 以外都转成结果）
-  async function runTurn(sessionId, userText, { signal, onEvent, approvalMode } = {}) {
+  async function runTurn(sessionId, userText, { signal, onEvent, approvalMode, pinnedSkills } = {}) {
     const session = store.getAgentSession(sessionId);
     if (!session) throw new Error(`会话不存在：${sessionId}`);
     const controller = new AbortController();
@@ -106,9 +106,18 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
         steps += 1;
 
         // 压缩（失败不影响主流程）+ 硬预算裁剪
-        const probe = sessionApi.buildMessages(sessionId, { extraSystem: opt.extraSystem });
+        let extraSystem = opt.extraSystem;
+        for (const name of pinnedSkills || []) {
+          const loaded = opt.deps.skills.read(name);
+          extraSystem = `${extraSystem}
+
+【用户点名技能：${name}】
+${String(loaded.content || '').slice(0, 6000)}`;
+          emit({ type: 'skill_pinned', name });
+        }
+        const probe = sessionApi.buildMessages(sessionId, { extraSystem });
         await sessionApi.maybeCompact(sessionId, { tokens: estimateTokens(probe).tokens }).catch(() => { });
-        let messages = sessionApi.buildMessages(sessionId, { extraSystem: opt.extraSystem });
+        let messages = sessionApi.buildMessages(sessionId, { extraSystem });
         messages = trimToBudget(messages, { maxTokens: opt.maxContextTokens }).messages;
 
         emit({ type: 'step', step: steps, messages: messages.length });
@@ -189,6 +198,7 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
   return {
     options: opt,
     registry,
+    skills: opt.deps.skills || null,
     runTurn,
     stop,
     setOptions,

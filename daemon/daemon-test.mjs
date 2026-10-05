@@ -862,6 +862,54 @@ await t('停止：/agent/stop 取消挂起追问与当前轮', async () => {
   } finally { server.close(); }
 });
 
+console.log('== Agent 输入框指令（@技能 / 系统指令） ==');
+await t('/agent/skills 列出目录；未知 @ → 400 带清单', async () => {
+  const { server } = await mkAgentServer(7364, '', [...writeTools, doingTool]);
+  try {
+    const skills = await agentFetch(7364, '/agent/skills');
+    assert.equal(skills.ok, true);
+    assert.ok(skills.skills.some((x) => x.name === 'glossary-workflow'), JSON.stringify(skills.skills.map((x) => x.name)));
+    const { sessionId } = await agentFetch(7364, '/agent/session', { title: 'bad' });
+    const bad = await agentFetch(7364, '/agent/message', { session: sessionId, message: '@nope-skill 看看' });
+    assert.equal(bad.ok, false, JSON.stringify(bad));
+    assert.ok(bad.error.includes('nope-skill') && Array.isArray(bad.knownSkills), JSON.stringify(bad));
+    const snap = await agentFetch(7364, `/agent/snapshot?session=${encodeURIComponent(sessionId)}`);
+    assert.equal(snap.messages.length, 0, '400 时不落消息');
+  } finally { server.close(); }
+});
+await t('@技能名：该轮系统提示注入技能正文（mock lastSystem 断言）', async () => {
+  const { server } = await mkAgentServer(7365, '', [...writeTools, doingTool]);
+  try {
+    const { sessionId } = await agentFetch(7365, '/agent/session', { title: 'pin' });
+    await agentFetch(7365, '/agent/message', { session: sessionId, message: '@glossary-workflow 看一眼', approvalMode: 'auto' });
+    await pollUntil(async () => {
+      const s = await agentFetch(7365, `/agent/snapshot?session=${encodeURIComponent(sessionId)}`);
+      return !s.running && s.messages.length >= 2;
+    });
+    const stats = await mockStats();
+    assert.ok(stats.lastSystem.includes('【用户点名技能：glossary-workflow】'), stats.lastSystem);
+    assert.ok(stats.lastSystem.includes('写入门槛') || stats.lastSystem.includes('术语表工作流'), stats.lastSystem.slice(0, 200));
+  } finally { server.close(); }
+});
+await t('系统指令：保存 → 下一轮系统提示携带【用户系统指令】', async () => {
+  const { server } = await mkAgentServer(7366, '', [...writeTools, doingTool]);
+  try {
+    const { sessionId } = await agentFetch(7366, '/agent/session', { title: 'sys' });
+    const saved = await agentFetch(7366, '/agent/personality', { session: sessionId, text: '回答要短，先结论。' });
+    assert.equal(saved.ok, true, JSON.stringify(saved));
+    const snap0 = await agentFetch(7366, `/agent/snapshot?session=${encodeURIComponent(sessionId)}`);
+    assert.equal(snap0.session.personality, '回答要短，先结论。');
+    await agentFetch(7366, '/agent/message', { session: sessionId, message: '普通消息', approvalMode: 'auto' });
+    await pollUntil(async () => {
+      const s = await agentFetch(7366, `/agent/snapshot?session=${encodeURIComponent(sessionId)}`);
+      return !s.running && s.messages.length >= 2;
+    });
+    const stats = await mockStats();
+    assert.ok(stats.lastSystem.includes('【用户系统指令】'), stats.lastSystem);
+    assert.ok(stats.lastSystem.includes('先结论'), stats.lastSystem);
+  } finally { server.close(); }
+});
+
 console.log('== 控制面 ==');
 await t('server：/status 有书与进度、/auth 更新凭据', async () => {
   const server = await startServer({ store, pipeline: mkPipeline({}), port: 7342, log: { log: () => { }, error: () => { } } });

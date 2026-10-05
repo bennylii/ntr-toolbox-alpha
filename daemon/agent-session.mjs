@@ -54,6 +54,8 @@ export function createAgentSession({ store, chat, log = console, options = {} })
     const summary = (session && session.summary) || '';
     const upTo = (session && session.summaryUpTo) || 0;
     const system = [
+      session.personality ? `【用户系统指令】
+${session.personality}` : '',
       extraSystem ? `${DEFAULT_AGENT_SYSTEM}\n\n${extraSystem}` : DEFAULT_AGENT_SYSTEM,
       summary ? `【历史摘要（更早的对话已压缩）】\n${summary}` : '',
     ].filter(Boolean).join('\n\n');

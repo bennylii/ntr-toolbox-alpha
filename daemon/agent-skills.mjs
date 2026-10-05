@@ -93,6 +93,18 @@ export function createSkillCatalog({ roots = [], log = console } = {}) {
     return { skill: skill.name, path: rel, basePath: skill.dir, content: fs.readFileSync(full, 'utf8') };
   };
 
+  // 用户在输入框里用 @技能名 点名技能：只认目录里存在的名字，其余原样留在文本里
+  const mentions = (text) => {
+    const skills = [];
+    const unknown = [];
+    for (const m of String(text || '').matchAll(/(?:^|[^\w@])@([A-Za-z0-9_-]+)/g)) {
+      const name = m[1];
+      if (byName.has(name)) { if (!skills.includes(name)) skills.push(name); }
+      else if (!unknown.includes(name)) unknown.push(name);
+    }
+    return { skills, unknown };
+  };
+
   const promptText = () => {
     const visible = found.filter((s) => !s.disableModelInvocation);
     if (visible.length === 0) return '';
@@ -104,6 +116,7 @@ export function createSkillCatalog({ roots = [], log = console } = {}) {
     roots,
     list: () => found.map(({ name, description, files, disableModelInvocation }) => ({ name, description, files, disableModelInvocation })),
     get: (name) => byName.get(String(name || '')) || null,
+    mentions,
     read,
     promptText,
   };

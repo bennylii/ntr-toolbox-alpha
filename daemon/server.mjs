@@ -285,6 +285,19 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         send(200, { ok: true, approvalMode: next.approvalMode || 'manual' });
         return;
       }
+      if (req.method === 'GET' && url.pathname === '/agent/skills') {
+        if (!agentLoop || !agentLoop.skills) { send(400, { ok: false, error: '技能目录未装配' }); return; }
+        send(200, { ok: true, skills: agentLoop.skills.list().map((s) => ({ name: s.name, description: s.description, files: s.files.length })) });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/agent/personality') {
+        const body = await readBody();
+        const sessionId = String(body.session || '');
+        if (!store.getAgentSession(sessionId)) { send(404, { ok: false, error: '会话不存在' }); return; }
+        store.setAgentPersonality(sessionId, String(body.text == null ? '' : body.text));
+        send(200, { ok: true });
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/agent/sessions') {
         send(200, { ok: true, sessions: store.listAgentSessions(20).map((x) => ({ id: x.id, bookKey: x.bookKey, title: x.title, state: x.state, updatedAt: x.updatedAt, running: agentLoop ? agentLoop.running(x.id) : false })) });
         return;
@@ -301,7 +314,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         if (!session) { send(404, { ok: false, error: '会话不存在' }); return; }
         send(200, {
           ok: true,
-          session: { id: session.id, bookKey: session.bookKey, title: session.title, state: session.state, summaryUpTo: session.summaryUpTo, updatedAt: session.updatedAt },
+          session: { id: session.id, bookKey: session.bookKey, title: session.title, state: session.state, personality: session.personality || '', summaryUpTo: session.summaryUpTo, updatedAt: session.updatedAt },
           running: agentLoop ? agentLoop.running(sessionId) : false,
           messages: store.listAgentMessages(sessionId).map((m) => ({ seq: m.seq, role: m.role, content: m.content, toolCalls: m.toolCalls, toolCallId: m.toolCallId, name: m.name, at: m.at, usage: m.usage })),
           pendingDecision: store.getPendingAgentDecision(sessionId),
@@ -319,10 +332,20 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         if (!sessionId) sessionId = store.createAgentSession({ bookKey: String(body.bookKey || ''), title: text.slice(0, 40) });
         if (!store.getAgentSession(sessionId)) { send(404, { ok: false, error: '会话不存在' }); return; }
         if (agentLoop.running(sessionId)) { send(409, { ok: false, error: '该会话上一轮还在进行（可先停止）' }); return; }
+        let pinnedSkills = [];
+        if (text.includes('@') && agentLoop.skills) {
+          const m = agentLoop.skills.mentions(text);
+          pinnedSkills = m.skills;
+          if (m.unknown.length > 0) {
+            send(400, { ok: false, error: `未知技能：${m.unknown.join('、')}`, knownSkills: agentLoop.skills.list().map((x) => x.name) });
+            return;
+          }
+        }
         const onEvent = (ev) => { if (agentEvents) agentEvents.publish(sessionId, ev); };
         agentLoop.runTurn(sessionId, text, {
           onEvent,
           approvalMode: body.approvalMode === 'auto' || body.approvalMode === 'manual' ? body.approvalMode : undefined,
+          pinnedSkills,
         }).then((result) => onEvent({ type: 'turn_end', ok: result.ok, error: result.error || '', steps: result.steps || 0 }))
           .catch((e) => onEvent({ type: 'turn_end', ok: false, error: String((e && e.message) || e) }));
         send(202, { ok: true, accepted: true, sessionId });

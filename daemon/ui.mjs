@@ -91,6 +91,12 @@ export const UI_HTML = `<!doctype html>
   .composer textarea { flex: 1; resize: vertical; min-height: 56px; max-height: 200px; border-radius: 14px; padding: 10px 14px; }
   .composer .btn { height: 42px; padding: 0 18px; }
 
+  .mention { position: absolute; bottom: 100%; left: 0; right: 0; max-height: 240px; overflow: auto; background: var(--panel2); border: 1px solid var(--border2); border-radius: 10px; margin-bottom: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.4); z-index: 5; }
+  .mention .mi { padding: 7px 12px; font-size: 13px; cursor: pointer; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mention .mi.sel, .mention .mi:hover { background: var(--accent2); color: #fff; }
+  .composer-wrap { position: relative; border-top: 1px solid var(--border); padding: 12px 4px 6px; }
+  .syseditor { border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); padding: 10px 12px; margin-top: 8px; }
+  .syseditor textarea { min-height: 70px; }
   #toast { position: fixed; right: 16px; bottom: 16px; background: var(--accent2); color: #fff; padding: 8px 14px; border-radius: 10px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 60vw; z-index: 9; }
   #toast.show { opacity: 1; }
 </style>
@@ -126,14 +132,29 @@ export const UI_HTML = `<!doctype html>
       <label><input type="checkbox" id="agent-auto"> 自动批准写入</label>
       <span class="spacer"></span>
       <span class="muted" id="agent-status"></span>
+      <button class="btn ghost" id="agent-sys">系统指令</button>
       <button class="btn danger" id="agent-stop" disabled>停止</button>
     </div>
     <div id="agent-log" class="chat"></div>
     <div id="agent-decision" class="decision" style="display: none"></div>
     <div id="agent-doing" class="doing"></div>
-    <div class="composer">
-      <textarea id="agent-input" placeholder="给助手发消息（Enter 发送，Shift+Enter 换行）"></textarea>
-      <button class="btn primary" id="agent-send">发送</button>
+    <div class="composer-wrap">
+      <div id="agent-mention" class="mention" style="display: none"></div>
+      <div class="composer">
+        <textarea id="agent-input" placeholder="给助手发消息；@技能名 点名技能，/help 看命令（Enter 发送）"></textarea>
+        <button class="btn primary" id="agent-send">发送</button>
+      </div>
+    </div>
+    <div id="agent-syseditor" class="syseditor" style="display: none">
+      <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 6px">
+        <b>会话系统指令</b>
+        <span class="muted">每轮以「用户系统指令」注入（在技能目录之后）</span>
+      </div>
+      <textarea id="agent-sys-text" placeholder="例如：回答要短；这本书的人名统一用旧版译名；先给结论再给证据……"></textarea>
+      <div style="display: flex; gap: 8px; margin-top: 6px">
+        <button class="btn" id="agent-sys-save">保存</button>
+        <button class="btn ghost" id="agent-sys-close">取消</button>
+      </div>
     </div>
   </div>
 
@@ -434,7 +455,7 @@ function renderAgentMessages() {
         summary.textContent = '🛠 ' + tc.name + '  ' + (result ? (okFlag ? '✓ 完成' : '⚠ 有异常') : '… 执行中');
         card.appendChild(summary);
         const pre = document.createElement('pre'); pre.className = 'tool-body';
-        pre.textContent = '参数：' + JSON.stringify(tc.args || {}) + (result ? '\n结果：' + String(result.content || '').slice(0, 1200) : '');
+        pre.textContent = '参数：' + JSON.stringify(tc.args || {}) + (result ? '\\n结果：' + String(result.content || '').slice(0, 1200) : '');
         card.appendChild(pre); row.appendChild(card);
       });
       if (m.content || (m.toolCalls || []).length) box.appendChild(row);
@@ -528,7 +549,6 @@ function agentStartPolling() {
   AGENT.polling = setInterval(agentRefresh, 1500);
   agentRefresh();
 }
-let lastSessions = [];
 function renderAgentSessions(list) {
   lastSessions = list || [];
   const box = $('side-sessions');
@@ -569,6 +589,8 @@ async function agentSend() {
   const text = input.value.trim();
   if (text === '') return;
   input.value = '';
+  agentMentionClose();
+  if (text.startsWith('/')) { agentCommand(text); return; }
   try {
     if (!AGENT.session) { const r = await post('/agent/session', { title: text.slice(0, 30) }); agentSetSession(r.sessionId); }
     await post('/agent/message', { session: AGENT.session, message: text, approvalMode: $('agent-auto').checked ? 'auto' : 'manual' });
@@ -577,12 +599,164 @@ async function agentSend() {
   } catch (e) { toast(e.message, true); }
 }
 $('agent-send').addEventListener('click', agentSend);
-$('agent-input').addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); agentSend(); } });
+$('agent-input').addEventListener('keydown', function (e) {
+  if (AGENT_MENTION.active) {
+    if (e.key === 'ArrowDown') { e.preventDefault(); agentMentionMove(1); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); agentMentionMove(-1); return; }
+    if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); agentMentionPick(AGENT_MENTION.index); return; }
+    if (e.key === 'Escape') { e.preventDefault(); agentMentionClose(); return; }
+  }
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); agentSend(); }
+});
 setInterval(function () {
   const active = document.getElementById('tab-agent').classList.contains('active');
   if (active && AGENT.session && !AGENT.polling) agentRefresh();
 }, 4000);
 
+// ---------------- 输入框指令（@技能 / 斜杠命令 / 系统指令） ----------------
+const AGENT_COMMANDS = [
+  { cmd: '/help', desc: '命令表' },
+  { cmd: '/new [标题]', desc: '新会话' },
+  { cmd: '/stop', desc: '停止当前轮' },
+  { cmd: '/auto [on|off]', desc: '审批模式' },
+  { cmd: '/tools', desc: '列出工具' },
+  { cmd: '/skills', desc: '列出技能' },
+  { cmd: '/translate <book> [level] [max]', desc: '入队翻译' },
+  { cmd: '/glossary <book>', desc: '入队术语管线' },
+  { cmd: '/check <book> [propose]', desc: '入队质检' },
+];
+let AGENT_MENTION = { active: false, items: [], index: 0, kind: '', from: 0 };
+let AGENT_SKILLS = null;
+function agentLocalLine(text, cls) {
+  const box = $('agent-log');
+  box.appendChild(agentLine('msg system' + (cls ? ' ' + cls : ''), text));
+  box.scrollTop = box.scrollHeight;
+}
+function agentMentionClose() {
+  AGENT_MENTION.active = false;
+  const box = $('agent-mention');
+  if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+}
+function agentMentionRender() {
+  const box = $('agent-mention');
+  box.innerHTML = AGENT_MENTION.items.map(function (it, i) {
+    return '<div class="mi' + (i === AGENT_MENTION.index ? ' sel' : '') + '" data-i="' + i + '">' + esc(it.label) + '</div>';
+  }).join('');
+  box.style.display = 'block';
+  box.querySelectorAll('.mi').forEach(function (el) {
+    el.addEventListener('mousedown', function (e) { e.preventDefault(); agentMentionPick(Number(el.dataset.i)); });
+  });
+}
+function agentMentionMove(delta) {
+  const n = AGENT_MENTION.items.length;
+  AGENT_MENTION.index = (AGENT_MENTION.index + delta + n) % n;
+  const box = $('agent-mention');
+  box.querySelectorAll('.mi').forEach(function (el, i) { el.classList.toggle('sel', i === AGENT_MENTION.index); });
+}
+function agentMentionPick(i) {
+  const input = $('agent-input');
+  const it = AGENT_MENTION.items[i];
+  const caret = input.selectionStart;
+  const before = input.value.slice(0, AGENT_MENTION.from);
+  const after = input.value.slice(caret);
+  input.value = before + it.token + ' ' + after;
+  const pos = (before + it.token + ' ').length;
+  input.setSelectionRange(pos, pos);
+  agentMentionClose();
+  input.focus();
+}
+async function agentSkillsCache() {
+  if (!AGENT_SKILLS) {
+    try { AGENT_SKILLS = (await api('/agent/skills')).skills || []; } catch (e) { AGENT_SKILLS = []; }
+  }
+  return AGENT_SKILLS;
+}
+function agentMentionUpdate() {
+  const input = $('agent-input');
+  const caret = input.selectionStart;
+  const before = input.value.slice(0, caret);
+  const atMatch = /(?:^|[^A-Za-z0-9_@])@([A-Za-z0-9_-]*)$/.exec(before);
+  const slashMatch = /^[/]([A-Za-z]*)$/.exec(before);
+  let kind = null; let query = ''; let from = 0;
+  if (atMatch) { kind = 'skill'; query = atMatch[1]; from = caret - atMatch[1].length - 1; }
+  else if (slashMatch) { kind = 'cmd'; query = slashMatch[1]; from = 0; }
+  if (!kind) { agentMentionClose(); return; }
+  let items = [];
+  if (kind === 'skill') {
+    items = (AGENT_SKILLS || []).filter(function (s) { return s.name.startsWith(query); }).slice(0, 8)
+      .map(function (s) { return { token: '@' + s.name, label: '@' + s.name + '  ' + String(s.description || '').slice(0, 46) }; });
+  } else {
+    items = AGENT_COMMANDS.filter(function (c) { return c.cmd.slice(1).startsWith(query); }).slice(0, 8)
+      .map(function (c) { return { token: c.cmd, label: c.cmd + '  ' + c.desc }; });
+  }
+  if (items.length === 0) { agentMentionClose(); return; }
+  AGENT_MENTION = { active: true, items: items, index: 0, kind: kind, from: from };
+  agentMentionRender();
+}
+async function agentCommand(text) {
+  const parts = text.slice(1).split(' ').filter((x) => x !== '');
+  const cmd = parts[0];
+  const args = parts.slice(1);
+  const needBook = function () { if (!args[0]) { agentLocalLine('缺少 bookKey：' + cmd + ' <bookKey> …', 'bad'); return true; } return false; };
+  if (cmd === 'help') {
+    agentLocalLine('命令：' + AGENT_COMMANDS.map(function (c) { return c.cmd; }).join('  ') + '；消息里 @技能名 可点名技能');
+  } else if (cmd === 'new') {
+    try { const r = await post('/agent/session', { title: args.join(' ') || '新会话' }); agentSetSession(r.sessionId); agentInit(); agentLocalLine('已新建会话 ' + r.sessionId.slice(0, 8)); }
+    catch (e) { agentLocalLine('失败：' + e.message, 'bad'); }
+  } else if (cmd === 'stop') {
+    try { await post('/agent/stop', { session: AGENT.session }); agentLocalLine('已请求停止'); agentRefresh(); }
+    catch (e) { agentLocalLine('失败：' + e.message, 'bad'); }
+  } else if (cmd === 'auto') {
+    const on = args[0] ? args[0] === 'on' : !$('agent-auto').checked;
+    $('agent-auto').checked = on;
+    try { await post('/agent/config', { approvalMode: on ? 'auto' : 'manual' }); agentLocalLine('审批模式：' + (on ? 'auto' : 'manual')); }
+    catch (e) { agentLocalLine('失败：' + e.message, 'bad'); }
+  } else if (cmd === 'tools') {
+    try { const c = await api('/agent/config'); agentLocalLine('工具：' + (c.tools || []).join('、')); }
+    catch (e) { agentLocalLine('失败：' + e.message, 'bad'); }
+  } else if (cmd === 'skills') {
+    try { const c = await api('/agent/skills'); agentLocalLine('技能：' + (c.skills || []).map(function (x) { return x.name; }).join('、')); }
+    catch (e) { agentLocalLine('失败：' + e.message, 'bad'); }
+  } else if (cmd === 'translate') {
+    if (needBook()) return;
+    try {
+      const r = await post('/run', { bookKey: args[0], job: 'translate', options: { level: ['expire', 'normal', 'all'].indexOf(args[1]) >= 0 ? args[1] : 'expire', maxChapters: Number(args[2]) || 0 } });
+      agentLocalLine('已入队 #' + r.id + '（translate ' + args[0] + '）；「任务」页看进度');
+    } catch (e) { agentLocalLine('失败：' + e.message, 'bad'); }
+  } else if (cmd === 'glossary') {
+    if (needBook()) return;
+    try { const r = await post('/run', { bookKey: args[0], job: 'glossary' }); agentLocalLine('已入队 #' + r.id + '（glossary ' + args[0] + '）'); }
+    catch (e) { agentLocalLine('失败：' + e.message, 'bad'); }
+  } else if (cmd === 'check') {
+    if (needBook()) return;
+    try { const r = await post('/run', { bookKey: args[0], job: 'check', options: { propose: args[1] === 'propose' } }); agentLocalLine('已入队 #' + r.id + '（check ' + args[0] + '）'); }
+    catch (e) { agentLocalLine('失败：' + e.message, 'bad'); }
+  } else {
+    agentLocalLine('未知命令 /' + cmd + '；/help 查看命令表', 'bad');
+  }
+}
+$('agent-sys').addEventListener('click', async function () {
+  const panel = $('agent-syseditor');
+  if (panel.style.display === 'block') { panel.style.display = 'none'; return; }
+  if (!AGENT.session) { toast('先新建会话'); return; }
+  try {
+    const snap = await api('/agent/snapshot?session=' + encodeURIComponent(AGENT.session));
+    $('agent-sys-text').value = (snap.session && snap.session.personality) || '';
+    panel.style.display = 'block';
+    $('agent-sys-text').focus();
+  } catch (e) { toast(e.message, true); }
+});
+$('agent-sys-save').addEventListener('click', async function () {
+  try {
+    await post('/agent/personality', { session: AGENT.session, text: $('agent-sys-text').value });
+    toast('系统指令已保存（下一轮生效）');
+    $('agent-syseditor').style.display = 'none';
+  } catch (e) { toast(e.message, true); }
+});
+$('agent-sys-close').addEventListener('click', function () { $('agent-syseditor').style.display = 'none'; });
+$('agent-input').addEventListener('input', function () {
+  agentSkillsCache().then(function () { agentMentionUpdate(); });
+});
 refresh(); loadSettings(); loadRules(); loadPrompts(); agentInit();
 </script>
 </body>

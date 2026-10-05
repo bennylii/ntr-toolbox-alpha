@@ -210,6 +210,10 @@ export class Store {
     this.db.prepare('UPDATE agent_sessions SET updatedAt = ?, state = ?, title = ? WHERE id = ?')
       .run(Date.now(), state === undefined ? row.state : state, title === undefined ? row.title : title, id);
   }
+  setAgentPersonality(id, text) {
+    this.db.prepare('UPDATE agent_sessions SET personality = ?, updatedAt = ? WHERE id = ?')
+      .run(String(text == null ? '' : text), Date.now(), String(id || ''));
+  }
   setAgentSummary(id, { summary, summaryUpTo }) {
     this.db.prepare('UPDATE agent_sessions SET summary = ?, summaryUpTo = ?, updatedAt = ? WHERE id = ?')
       .run(String(summary || ''), Number(summaryUpTo) || 0, Date.now(), id);
