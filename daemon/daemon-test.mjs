@@ -1081,6 +1081,60 @@ await t('清理：exports 测试文件', () => {
   assert.ok(!fs.existsSync(LG_TXT));
 });
 
+console.log('== 设置页 v2：worker 管理 / 分角色模型池 / 助手参数 ==');
+const setSched = new LlmScheduler({ engine, store, log: quiet, options: { workers: [{ id: 'tl0', model: 'mock-glossary-1', endpoint: `${MOCK}/v1`, key: 'key-AAAA1111' }] } });
+const setAgSched = new LlmScheduler({ engine, store, log: quiet, options: { workers: [{ id: 'tl0', model: 'mock-glossary-1', endpoint: `${MOCK}/v1`, key: 'key-AAAA1111' }] } });
+const setServer = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline, scheduler: setSched, agentScheduler: setAgSched, makeClient, engine, port: 7367, log: quiet });
+const sGet = async (p) => fetch(`http://127.0.0.1:7367${p}`).then((r) => r.json());
+const sPost = async (p, body) => fetch(`http://127.0.0.1:7367${p}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
+const TLW = (id, key) => ({ id, model: 'mock-glossary-1', endpoint: `${MOCK}/v1`, key });
+await t('key 合并：/auth 推送 → GUI 编辑（同 id 留空保 key、新行写新 key）→ 掩码回显、明文不漏', async () => {
+  await sPost('/auth', { workers: [TLW('tl0', 'key-AAAA1111')] });
+  await sPost('/settings', { workers: [TLW('tl0', ''), TLW('tl1', 'key-CCCC3333')] });
+  const s = await sGet('/settings');
+  assert.equal(s.settings.workers.length, 2, JSON.stringify(s.settings.workers));
+  assert.equal(s.settings.workers[0].key, 'key-…11', 'tl0 留空 → 沿用原 key 的掩码');
+  assert.equal(s.settings.workers[1].key, 'key-…33', 'tl1 新 key 的掩码');
+  const raw = JSON.stringify(s);
+  assert.ok(!raw.includes('key-AAAA1111') && !raw.includes('key-CCCC3333'), '明文 key 不得出现在 GET /settings');
+});
+await t('显式助手池：/auth 再推送不覆盖；agent 调用路由到助手池（mock key 计数）', async () => {
+  const r1 = await sPost('/settings', { agent: { workers: [TLW('ag0', 'key-BBBB2222')] } });
+  assert.equal(r1.ok, true, JSON.stringify(r1));
+  await sPost('/auth', { workers: [TLW('tl0', 'key-AAAA1111')] });
+  const s = await sGet('/settings');
+  assert.equal(s.settings.agent.workers.length, 1, '显式助手池不被 /auth 覆盖');
+  assert.equal(s.settings.agent.workers[0].key, 'key-…22');
+  assert.equal(s.settings.workers[0].key, 'key-…11', '翻译池被 /auth 覆盖（油猴语义）');
+  const agLlm = createAgentLlm({ scheduler: setAgSched, log: quiet });
+  const chat = await agLlm.chat({ messages: [{ role: 'user', content: 'ping' }] });
+  assert.equal(chat.ok, true, JSON.stringify(chat));
+  const stats = await fetch(`${MOCK}/__stats`).then((r) => r.json());
+  assert.ok((stats.keys['key-BBBB2222'] || 0) >= 1, '助手池请求应带 ag0 的 key：' + JSON.stringify(stats.keys));
+});
+await t('跟随模式：助手池清空 → 回到镜像，/auth 推送同步 llmAgent', async () => {
+  await sPost('/settings', { agent: { workers: [] } });
+  const st0 = await sGet('/status');
+  assert.equal(st0.llmAgent.workers, 1, '清空后跟随翻译池（1 个）');
+  await sPost('/auth', { workers: [TLW('tl9', 'key-DDDD4444'), TLW('tl10', 'key-EEEE5555')] });
+  const st1 = await sGet('/status');
+  assert.equal(st1.llm.workers, 2);
+  assert.equal(st1.llmAgent.workers, 2, '跟随模式下 /auth 推送镜像到助手池');
+});
+await t('助手参数：agent.llm 热更新 + maxSteps/toolResultMaxChars/approvalMode 回读', async () => {
+  await sPost('/settings', { agent: { llm: { maxInFlight: 3 } } });
+  const st = await sGet('/status');
+  assert.equal(st.llmAgent.maxInFlight, 3, '助手池并发上限热更新');
+  await sPost('/settings', { agent: { maxSteps: 13, toolResultMaxChars: 999, approvalMode: 'auto' } });
+  const s2 = await sGet('/settings');
+  assert.equal(s2.settings.agent.maxSteps, 13);
+  assert.equal(s2.settings.agent.toolResultMaxChars, 999);
+  assert.equal(s2.settings.agent.approvalMode, 'auto');
+  const cfg = await sGet('/agent/config');
+  assert.equal(cfg.approvalMode, 'auto');
+});
+await t('清理：设置页 v2 服务器', () => { setServer.close(); });
+
 console.log(`\n通过 ${pass}，失败 ${fail}`);
 store.close();
 process.exit(fail === 0 ? 0 : 1);

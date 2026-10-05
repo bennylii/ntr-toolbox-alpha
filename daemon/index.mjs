@@ -96,6 +96,22 @@ const scheduler = new LlmScheduler({
   },
 });
 
+// 助手/术语池（工具调用模型）：config.agent.workers 非空时独立成池（独立并发/限流，不与翻译互抢并发门）；
+// 空/缺省 = 跟随翻译池（/auth 推送与设置页编辑都会镜像过去）
+const agentCfg0 = store.getConfig('agent') || {};
+const agentLlmCfg = agentCfg0.llm || {};
+const agentScheduler = new LlmScheduler({
+  engine, store, log,
+  options: {
+    maxInFlight: Math.max(1, pickNum(undefined, agentLlmCfg.maxInFlight, 1)),
+    rpm: pickNum(undefined, agentLlmCfg.rpm, 0),
+    transportRetries: pickNum(undefined, agentLlmCfg.transportRetries, 3),
+    maxPromptChars: Math.max(1000, pickNum(undefined, agentLlmCfg.maxPromptChars, 12000)),
+    strictPrompt: agentLlmCfg.strictPrompt === true,
+    workers: Array.isArray(agentCfg0.workers) && agentCfg0.workers.length > 0 ? agentCfg0.workers : getWorkers(),
+  },
+});
+
 const pipeline = new TranslationPipeline({
   store, engine,
   scheduler,
@@ -112,7 +128,7 @@ const pipeline = new TranslationPipeline({
 
 const glossaryPipeline = new GlossaryPipeline({
   store, engine,
-  scheduler,
+  scheduler: agentScheduler,
   makeClient,
   log,
   options: {
@@ -126,14 +142,14 @@ const glossaryPipeline = new GlossaryPipeline({
 
 const checkPipeline = new CheckPipeline({ store, engine, makeClient, log });
 
-// Agent（工具调用模型；翻译/术语管线各自的调度器不受影响）
+// Agent（助手池 = agentScheduler；与翻译池互不抢并发门）
 const jobQueue = createJobQueue({
   resolveRunner: (job) => ({ glossary: glossaryPipeline, check: checkPipeline, translate: pipeline }[job]),
   log,
 });
 const skillCatalog = createSkillCatalog({ roots: [path.join(repoRoot, 'skills')], log });
 const readTools = createReadTools({ store, engine, makeClient, log });
-const agentLlm = createAgentLlm({ scheduler, log });
+const agentLlm = createAgentLlm({ scheduler: agentScheduler, log });
 const agentEvents = createAgentEvents();
 const agentApprovalDefault = flags.auto === true
   ? 'auto'
@@ -495,7 +511,7 @@ switch (command) {
   }
   case 'serve': {
     const port = Math.max(1, Number(flags.port) || 7331);
-    await startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, queue: jobQueue, makeClient, engine, agentLoop, agentEvents, port, log });
+    await startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler, queue: jobQueue, makeClient, engine, agentLoop, agentEvents, port, log });
     log.log('serve 模式：Ctrl-C 退出');
     await new Promise(() => { });
   }
@@ -510,6 +526,9 @@ switch (command) {
     log.log(`workers: ${getWorkers().length} 个（auth / 油猴同步写入）`);
     const llm = scheduler.stats();
     log.log(`llm: maxInFlight=${llm.maxInFlight} workers=${llm.workers} 请求=${llm.requests} 传输重试=${llm.transportRetries} 在途峰值=${llm.maxObservedInFlight}`);
+    const ag = agentScheduler.stats();
+    const agExplicit = (store.getConfig('agent') || {}).workers || [];
+    log.log(`llm(助手/术语池): maxInFlight=${ag.maxInFlight} workers=${ag.workers}${agExplicit.length > 0 ? `（显式 ${agExplicit.length} 个）` : '（跟随翻译池）'} 请求=${ag.requests} 在途峰值=${ag.maxObservedInFlight}`);
     const u = store.usageTotals();
     log.log(`usage: 轮次=${u.rows} 请求=${u.requests} prompt=${u.promptTokens} completion=${u.completionTokens}`);
     log.log('控制台: node daemon/index.mjs serve 后打开 http://127.0.0.1:7331/ui（设置/规则/提示词/任务都在页面里）');

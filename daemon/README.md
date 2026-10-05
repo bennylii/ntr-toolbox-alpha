@@ -40,7 +40,7 @@ node daemon/index.mjs forget    <bookKey>
 `node daemon/index.mjs serve` 后打开 <http://127.0.0.1:7331/ui>：
 
 - **任务**：选书派发 `translate / glossary / check`（档位、限章数、提案开关），查看队列与最近 run；
-- **设置**：调度器参数（maxInFlight / rpm / 传输重试 / 提示词上限 / strict）保存后立即生效；站点 origin；凭据与翻译器状态（推送仍在站点页面点「同步 Daemon」）；
+- **设置**：六个区块——**翻译模型池**（端点增删改，key 只写不回显、留空 = 按 id 保持原值）／**助手/术语模型池**（独立端点与并发限流；清空 = 跟随翻译池）／**翻译池调度与限流**／**助手池调度与限流**／**助手参数**（审批模式、maxSteps、工具结果截断、上下文预算）／**站点与凭据**（origin + token 直填，不再必须回站点点「同步 Daemon」）。站点「同步 Daemon」推送仍会整表覆盖**翻译池**（最后写入者赢），但**不再覆盖**显式配置过的助手池；
 - **规则**：pre/post 替换、保留段的增删启停；
 - **提示词**：按书/全局编辑四槽（base 必须含 `{format_rules}`，空槽=默认）；
 - **书籍**：URL 登记 / 忘记；
@@ -60,7 +60,10 @@ node daemon/index.mjs forget    <bookKey>
 
 ## 调度与限流（默认单线程，适配 Gemini 逆向 / 单槽上游）
 
-所有 LLM 调用都经 `daemon/scheduler.mjs`（规格 `docs/cleanroom/spec-06-llm-scheduler.md`）：
+所有 LLM 调用都经 `daemon/scheduler.mjs`（规格 `docs/cleanroom/spec-06-llm-scheduler.md`），分**两个独立池**：
+
+- **翻译池**（`config.workers` + `config.llm`）：翻译管线专用；油猴「同步 Daemon」推送与设置页编辑都写这里；
+- **助手/术语池**（`config.agent.workers` + `config.agent.llm`）：助手 Agent 与术语管线用（工具调用模型），**独立的并发门/冷却/RPM，与翻译互不抢在途额度**；未显式配置时镜像翻译池，显式配置后油猴推送不再覆盖（设置页「清空」回到跟随模式）；
 
 - **全局并发门**：`--max-in-flight N`（默认 1）——同刻最多 N 个在途请求、FIFO 排队；劈半重试、提取、核实同样受管；
 - **接口池**：多 worker（同端点多 key）轮转；单 key 连续失败按 15s/30s/60s 阶梯冷却，成功清零；全部冷却时等待最早解冻者；
@@ -74,7 +77,7 @@ node daemon/index.mjs forget    <bookKey>
 
 `node daemon/index.mjs agent`（缺 `--message` 进交互模式；`/stop` 中止当前轮、`/exit` 退出）。
 
-- **模型要求**：OpenAI 兼容 Chat Completions 且支持 `tools/tool_calls`（建议与翻译池分开配置：助手/术语走工具模型，翻译仍走逆向 Gemini 单线程）；请求同样经调度器（并发门/冷却/限速/RPM 与用量记账）。
+- **模型要求**：OpenAI 兼容 Chat Completions 且支持 `tools/tool_calls`；走独立的**助手/术语池**（`config.agent.workers`，设置页直接配置），与翻译池（逆向 Gemini 单线程）互不抢并发；请求同样经调度器（并发门/冷却/限速/RPM 与用量记账）。
 - **循环**：系统提示 + 历史 → 模型 → 顺序派发工具 → 回填 `role:'tool'` 结果 → 直到无工具调用；单轮步数上限 24（可配）、支持中止与失败续聊。
 - **会话**：`agent_sessions/agent_messages/agent_decisions` 落 SQLite；时间线全量保留，超阈值时把旧段摘要化（`summaryUpTo` 之后才进模型）。`--session <id>` 续用上次会话。
 - **审批**：默认 manual —— 标记 `requiresApproval` 的工具（写术语表/回滚/改规则与提示词等）会挂起为 decision，CLI 里 y/N 确认；`--auto` 跳过审批（等价 auto 模式）。追问（`ask_user`）同样是 decision。
@@ -184,7 +187,7 @@ node daemon/glossary-io-test.mjs        # LG 互通单测（解析/分流/往返
 node daemon/lg-align-test.mjs           # LG 译文对齐单测（导出行映射/解析容忍/三层校验；无需 mock）
 node daemon/agent-test.mjs              # Agent 单测（参数解析/裁剪/会话/压缩/决策/循环；无需 mock）
 node daemon/agent-skills-test.mjs       # 技能目录单测（frontmatter/发现/读取/逃逸；无需 mock）
-MOCK_ORIGIN=http://127.0.0.1:8790 node daemon/daemon-test.mjs   # 冒烟：全管线/跳过/续跑/控制面/调度器/质检/处理链/模板/互通/助手
+MOCK_ORIGIN=http://127.0.0.1:8790 node daemon/daemon-test.mjs   # 冒烟：全管线/跳过/续跑/控制面/调度器/质检/处理链/模板/互通/助手/设置页双池/LG导入
 powershell -File daemon/tray.ps1 -TestSpawn -Port 7377          # 托盘冒烟：拉起(临时db)→等就绪→杀掉；-SmokeGui N 只验 GUI 初始化
 # 助手页 e2e（浏览器车道）：mock 在 8790，daemon 在 7355（--db daemon/.tmp-agent-ui.db），见 tools/.e2e-agent-ui.js 头部跑法
 ```

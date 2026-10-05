@@ -1,5 +1,7 @@
 // 助手页（/ui 的 Agent 标签）端到端：建会话 → 工具调用 → 审批面板放行 → 本地写入生效
-// 依赖：mock 在 8790（?toolcall=doing,set_prompt），daemon 在 7355（--db daemon/.tmp-agent-ui.db）
+// 依赖：mock 在 8790，daemon 在 7355（--db daemon/.tmp-agent-ui.db）
+// 前置种子（临时 db 无凭据，每次起 daemon 后推一次；endpoint 带工具脚本与按轮参数）：
+//   node -e "const ep='http://127.0.0.1:8790/v1?toolcall=doing,set_prompt&toolargs='+encodeURIComponent(JSON.stringify([{text:'干活中'},{slot:'thinking',text:'页面 e2e'}]));fetch('http://127.0.0.1:7355/auth',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workers:[{id:'mock',model:'mock-glossary-1',endpoint:ep,key:'x'}]})}).then(r=>r.json()).then(console.log)"
 // 跑法：CDP_PORT=9335 node tools/cdp.mjs open http://127.0.0.1:7355/ui && node tools/cdp.mjs evalf tools/.e2e-agent-ui.js
 // 说明：mock 的脚本按「同一轮内已出现的工具结果数」推进 → 一轮里先 doing 再 set_prompt（后者需审批），最后给终答。
 const out = { checks: [], errors: [] };
@@ -30,7 +32,7 @@ try {
   input.value = '开始';
   document.getElementById('agent-send').click();
 
-  const card = await waitFor(() => document.querySelector('#agent-log .agent-tool'), 20000);
+  const card = await waitFor(() => document.querySelector('#agent-log .tool'), 20000);
   check('工具卡片渲染进对话（doing）', !!card && card.textContent.includes('doing'), card && card.textContent.slice(0, 120));
 
   const pending = await waitFor(() => (AGENT.pending ? AGENT.pending : null), 25000);

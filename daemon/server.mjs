@@ -33,7 +33,7 @@ const maskKey = (key) => {
   return s.length <= 8 ? s.slice(0, 2) + '…' : s.slice(0, 4) + '…' + s.slice(-2);
 };
 
-export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, queue, makeClient, engine, agentLoop, agentEvents, port = 7331, log = console }) {
+export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler = null, queue, makeClient, engine, agentLoop, agentEvents, port = 7331, log = console }) {
   // 单队列（控制面 /run 与 Agent 工具共用；未传入时按本进程管线自建）
   const jobQueue = queue || createJobQueue({
     resolveRunner: (job) => ({ glossary: glossaryPipeline, check: checkPipeline, translate: pipeline }[job]),
@@ -48,6 +48,22 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
     ...(llm.maxPromptChars !== undefined ? { maxPromptChars: Math.max(1000, Number(llm.maxPromptChars) || 12000) } : {}),
     ...(llm.strictPrompt !== undefined ? { strictPrompt: llm.strictPrompt === true } : {}),
   });
+
+  // 助手池显式配置 = config.agent.workers 非空；空/缺省 = 跟随翻译池（/auth 推送镜像过去）
+  const agentPoolExplicit = (cfgAgent) => Array.isArray(cfgAgent && cfgAgent.workers) && cfgAgent.workers.length > 0;
+
+  // worker 列表合并：GET 永远只回掩码 key；客户端保存时 key 留空（或仍是掩码）= 沿用同 id 既有明文 key
+  const maskMergeWorkers = (incoming, existing) => {
+    const prevById = new Map((existing || []).map((w, i) => [String(w.id || `w${i}`), w]));
+    return (incoming || [])
+      .filter((w) => w && w.endpoint)
+      .map((w, i) => {
+        const id = String(w.id || `w${i}`);
+        const key = String(w.key || '');
+        const prev = prevById.get(id);
+        return { id, model: w.model || '', endpoint: w.endpoint, key: (key === '' || key.includes('…')) ? ((prev && prev.key) || '') : key };
+      });
+  };
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
@@ -85,20 +101,23 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           metrics: store.metricsSummary().slice(-6),
           queue: jobQueue.list().slice(-20),
           llm: scheduler ? scheduler.stats() : null,
+          llmAgent: agentScheduler ? agentScheduler.stats() : null,
           usage: store.usageTotals(),
         });
         return;
       }
       if (req.method === 'GET' && url.pathname === '/settings') {
         const workers = store.getConfig('workers') || [];
+        const cfgAgent = store.getConfig('agent') || {};
+        const maskList = (list) => (list || []).map((w, i) => ({ id: w.id || `w${i}`, model: w.model || '', endpoint: w.endpoint || '', key: maskKey(w.key) }));
         send(200, {
           ok: true,
           settings: {
             llm: llmConfig(),
-            agent: store.getConfig('agent') || {},
+            agent: { ...cfgAgent, ...(Array.isArray(cfgAgent.workers) ? { workers: maskList(cfgAgent.workers) } : {}) },
             origin: store.getConfig('origin') || 'https://n.novelia.cc',
             tokenSet: Boolean(store.getConfig('token')),
-            workers: workers.map((w, i) => ({ id: w.id || `w${i}`, model: w.model || '', endpoint: w.endpoint || '', key: maskKey(w.key) })),
+            workers: maskList(workers),
           },
         });
         return;
@@ -110,9 +129,25 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           store.setConfig('llm', merged);
           if (scheduler) scheduler.setOptions(schedulerOptionsFrom(merged));
         }
+        if (Array.isArray(body.workers)) {
+          const merged = maskMergeWorkers(body.workers, store.getConfig('workers'));
+          store.setConfig('workers', merged);
+          if (scheduler) scheduler.setWorkers(merged);
+          if (agentScheduler && !agentPoolExplicit(store.getConfig('agent'))) agentScheduler.setWorkers(merged);
+        }
         if (body.agent && typeof body.agent === 'object') {
           const cfgAgent = store.getConfig('agent') || {};
-          const merged = { ...cfgAgent, ...body.agent };
+          const incoming = { ...body.agent };
+          if (Array.isArray(incoming.workers)) {
+            incoming.workers = maskMergeWorkers(incoming.workers, cfgAgent.workers);
+            // 空数组 = 回到「跟随翻译池」；非空 = 显式助手池
+            if (agentScheduler) agentScheduler.setWorkers(incoming.workers.length > 0 ? incoming.workers : (store.getConfig('workers') || []));
+          }
+          if (incoming.llm && typeof incoming.llm === 'object') {
+            incoming.llm = { ...(cfgAgent.llm || {}), ...incoming.llm };
+            if (agentScheduler) agentScheduler.setOptions(schedulerOptionsFrom(incoming.llm));
+          }
+          const merged = { ...cfgAgent, ...incoming };
           store.setConfig('agent', merged);
           if (agentLoop && agentLoop.setOptions) agentLoop.setOptions(merged);
         }
@@ -249,6 +284,8 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         if (Array.isArray(body.workers)) store.setConfig('workers', body.workers);
         if (body.origin) store.setConfig('origin', body.origin);
         if (scheduler && Array.isArray(body.workers)) scheduler.setWorkers(body.workers);   // 热更新，无需重启
+        // 助手池「跟随翻译池」模式：同步镜像；显式配置过则不被推送覆盖
+        if (agentScheduler && Array.isArray(body.workers) && !agentPoolExplicit(store.getConfig('agent'))) agentScheduler.setWorkers(body.workers);
         log.log('[auth] 凭据/翻译器配置已更新');
         send(200, { ok: true, workers: Array.isArray(body.workers) ? body.workers.length : undefined });
         return;

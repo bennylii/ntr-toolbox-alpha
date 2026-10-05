@@ -173,26 +173,52 @@ export const UI_HTML = `<!doctype html>
   </div>
 
   <div class="page" id="tab-settings" data-title="设置">
-    <fieldset><legend>调度与限流（保存后立即生效）</legend>
+    <fieldset><legend>翻译模型池（translate · 站点上传用；保存后立即生效）</legend>
+      <div id="pool-tl"></div>
+      <div><button class="btn ghost" id="tl-add">＋ 添加端点</button> <button class="btn" id="tl-save">保存翻译池</button></div>
+      <div class="muted">key 留空 = 保持原值（只回显掩码，明文不出本机）；站点页面「同步 Daemon」的推送会整表覆盖此列表。</div>
+    </fieldset>
+    <fieldset><legend>助手 / 术语模型池（agent+glossary · 工具调用模型）</legend>
+      <div id="pool-ag"></div>
+      <div><button class="btn ghost" id="ag-add">＋ 添加端点</button> <button class="btn" id="ag-save">保存助手池</button> <button class="btn ghost" id="ag-clear">清空（跟随翻译池）</button></div>
+      <div class="muted">独立并发/限流，与翻译池互不抢并发门；建议助手/术语走支持 tools 的模型，翻译仍走逆向 Gemini 单线程。</div>
+    </fieldset>
+    <fieldset><legend>翻译池调度与限流</legend>
       <label>并发上限 maxInFlight <input type="number" id="llm-max" min="1"></label>
       <label>RPM <input type="number" id="llm-rpm" min="0"></label>
       <label>传输重试 <input type="number" id="llm-retries" min="0"></label>
       <label>提示词上限(字符) <input type="number" id="llm-prompt" min="1000"></label>
       <label><input type="checkbox" id="llm-strict"> 超限直接失败（strictPrompt）</label>
       <div><button class="btn" id="settings-save">保存</button></div>
-      <div class="muted">单线程 Gemini：maxInFlight=1；多 key 池在站点面板「同步 Daemon」时推送。</div>
+      <div class="muted">单线程 Gemini：maxInFlight=1。</div>
     </fieldset>
-    <fieldset><legend>助手上下文预算（逆向 Gemini 等 16K 模型：建议 12000 / 8000 / 8）</legend>
+    <fieldset><legend>助手池调度与限流</legend>
+      <label>并发上限 maxInFlight <input type="number" id="ag-max" min="1"></label>
+      <label>RPM <input type="number" id="ag-rpm" min="0"></label>
+      <label>传输重试 <input type="number" id="ag-retries" min="0"></label>
+      <label>提示词上限(字符) <input type="number" id="ag-prompt" min="1000"></label>
+      <label><input type="checkbox" id="ag-strict"> 超限直接失败（strictPrompt）</label>
+      <div><button class="btn" id="ag-llm-save">保存</button></div>
+      <div class="muted">默认与翻译池默认值相同；多 key 池在此直接配置即可，不必经油猴。</div>
+    </fieldset>
+    <fieldset><legend>助手参数（审批 / 步数 / 上下文预算）</legend>
+      <label><input type="checkbox" id="ag-auto-mode"> 自动批准写入（auto；默认 manual 逐次审批）</label>
+      <label>单轮步数上限 maxSteps <input type="number" id="ag-steps" min="1"></label>
+      <label>工具结果截断(字符) <input type="number" id="ag-toolmax" min="500"></label>
       <label>上下文上限 <input type="number" id="ag-ctx" min="1024"></label>
       <label>压缩阈值 <input type="number" id="ag-compact" min="1024"></label>
       <label>保留最近消息 <input type="number" id="ag-keep" min="2"></label>
-      <div><button class="btn" id="agent-budget-save">保存助手预算</button></div>
-      <div class="muted">超阈值时旧对话摘要压缩；助手默认走与管线相同的模型池。</div>
+      <div><button class="btn" id="agent-budget-save">保存助手参数</button></div>
+      <div class="muted">超压缩阈值时旧对话摘要化；审批模式也可在「助手」页顶部切换。</div>
     </fieldset>
-    <fieldset><legend>站点</legend>
+    <fieldset><legend>站点与凭据</legend>
       <label>origin <input type="text" id="set-origin" size="40"></label>
       <button class="btn ghost" id="origin-save">保存 origin</button>
-      <div class="muted" id="cred"></div>
+      <div style="margin-top:6px">
+        <label>token <input type="password" id="set-token" size="40" placeholder="粘贴站点 token（只写不回显）"></label>
+        <button class="btn ghost" id="token-save">保存 token</button>
+        <span class="muted" id="cred"></span>
+      </div>
     </fieldset>
   </div>
 
@@ -296,7 +322,8 @@ function renderJobs(status) {
 function renderStatus(status) {
   const m = (status.metrics || []).slice(-3).map((x) => 'rss ' + x.rss.toFixed(1) + 'MB').join(' / ');
   $('status-box').innerHTML =
-    '<div>llm：' + esc(JSON.stringify(status.llm || {})) + '</div>' +
+    '<div>llm（翻译池）：' + esc(JSON.stringify(status.llm || {})) + '</div>' +
+    '<div>llm（助手/术语池）：' + esc(JSON.stringify(status.llmAgent || null)) + '</div>' +
     '<div>usage：' + esc(JSON.stringify(status.usage || {})) + '</div>' +
     '<div>metrics：' + esc(m) + '</div>';
 }
@@ -307,6 +334,39 @@ function renderBooks() {
   document.querySelectorAll('[data-forget]').forEach((btn) => btn.addEventListener('click', async () => {
     if (!confirm('从本地 daemon 忘记 ' + btn.dataset.forget + '？（站点数据不动）')) return;
     try { await post('/books', { action: 'forget', key: btn.dataset.forget }); toast('已忘记'); refresh(); } catch (e) { toast(e.message, true); }
+  }));
+}
+
+// ---- 模型池行编辑（DOM API 构建；key 只回显掩码，留空 = 服务器按 id 沿用原 key） ----
+function workerRow(container, w) {
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:6px;align-items:center;margin:4px 0';
+  if (w && w.id) row.dataset.id = w.id;
+  const mkInput = (ph, val, minPx, isKey) => {
+    const inp = document.createElement('input');
+    inp.type = isKey ? 'password' : 'text';
+    inp.placeholder = ph;
+    if (!isKey && val != null) inp.value = val;
+    inp.style.cssText = 'flex:1 1 ' + minPx + 'px; min-width:0';
+    return inp;
+  };
+  const ep = mkInput('https://127.0.0.1:8000/v1', w && w.endpoint, 260, false);
+  const md = mkInput('model 名', w && w.model, 130, false);
+  const ky = mkInput(w && w.key ? '保持 ' + w.key : '新 key', '', 90, true);
+  const del = document.createElement('button');
+  del.className = 'btn danger';
+  del.style.cssText = 'flex:0 0 auto';
+  del.textContent = '删';
+  del.addEventListener('click', () => row.remove());
+  row.append(ep, md, ky, del);
+  container.appendChild(row);
+}
+function collectWorkers(container) {
+  return Array.from(container.children).map((row, i) => ({
+    id: row.dataset.id || ('w' + i),
+    endpoint: row.children[0].value.trim(),
+    model: row.children[1].value.trim(),
+    key: row.children[2].value,
   }));
 }
 
@@ -323,11 +383,55 @@ async function loadSettings() {
     $('ag-ctx').value = agent.maxContextTokens || 200000;
     $('ag-compact').value = agent.compactThresholdTokens || 120000;
     $('ag-keep').value = agent.keepRecentMessages || 12;
+    $('ag-auto-mode').checked = agent.approvalMode === 'auto';
+    $('ag-steps').value = agent.maxSteps || 24;
+    $('ag-toolmax').value = agent.toolResultMaxChars || 12000;
+    const agLlm = agent.llm || {};
+    $('ag-max').value = agLlm.maxInFlight != null ? agLlm.maxInFlight : 1;
+    $('ag-rpm').value = agLlm.rpm || 0;
+    $('ag-retries').value = agLlm.transportRetries != null ? agLlm.transportRetries : 3;
+    $('ag-prompt').value = agLlm.maxPromptChars || 12000;
+    $('ag-strict').checked = agLlm.strictPrompt === true;
     $('set-origin').value = (s.settings && s.settings.origin) || '';
-    $('cred').textContent = 'token：' + (s.settings.tokenSet ? '已同步' : '未同步（站点页面点「同步 Daemon」）') +
-      '；workers：' + ((s.settings.workers || []).map((w) => (w.id || '?') + '/' + (w.model || '?')).join('、') || '无');
+    $('cred').textContent = 'token：' + (s.settings.tokenSet ? '已同步' : '未同步') +
+      ' · 翻译池 ' + ((s.settings.workers || []).length) + ' 个 · 助手池 ' +
+      ((agent.workers || []).length > 0 ? (agent.workers.length + ' 个（显式）') : '跟随翻译池');
+    const tlBox = $('pool-tl');
+    const agBox = $('pool-ag');
+    tlBox.innerHTML = '';
+    agBox.innerHTML = '';
+    const tl = s.settings.workers || [];
+    tl.forEach((w) => workerRow(tlBox, w));
+    if (tl.length === 0) workerRow(tlBox, null);
+    (agent.workers || []).forEach((w) => workerRow(agBox, w));
   } catch (e) { toast(e.message, true); }
 }
+$('tl-add').addEventListener('click', () => workerRow($('pool-tl'), null));
+$('ag-add').addEventListener('click', () => workerRow($('pool-ag'), null));
+$('tl-save').addEventListener('click', async () => {
+  try { await post('/settings', { workers: collectWorkers($('pool-tl')) }); toast('翻译池已保存并生效'); loadSettings(); }
+  catch (e) { toast(e.message, true); }
+});
+$('ag-save').addEventListener('click', async () => {
+  try { await post('/settings', { agent: { workers: collectWorkers($('pool-ag')) } }); toast('助手池已保存并生效'); loadSettings(); }
+  catch (e) { toast(e.message, true); }
+});
+$('ag-clear').addEventListener('click', async () => {
+  try { await post('/settings', { agent: { workers: [] } }); toast('助手池已清空：跟随翻译池'); loadSettings(); }
+  catch (e) { toast(e.message, true); }
+});
+$('ag-llm-save').addEventListener('click', async () => {
+  try {
+    await post('/settings', { agent: { llm: {
+      maxInFlight: Number($('ag-max').value) || 1,
+      rpm: Number($('ag-rpm').value) || 0,
+      transportRetries: Number($('ag-retries').value) || 0,
+      maxPromptChars: Number($('ag-prompt').value) || 12000,
+      strictPrompt: $('ag-strict').checked,
+    } } });
+    toast('助手池调度已保存并生效'); loadSettings();
+  } catch (e) { toast(e.message, true); }
+});
 $('settings-save').addEventListener('click', async () => {
   try {
     await post('/settings', { llm: {
@@ -343,15 +447,29 @@ $('settings-save').addEventListener('click', async () => {
 $('agent-budget-save').addEventListener('click', async () => {
   try {
     await post('/settings', { agent: {
+      approvalMode: $('ag-auto-mode').checked ? 'auto' : 'manual',
+      maxSteps: Number($('ag-steps').value) || 24,
+      toolResultMaxChars: Number($('ag-toolmax').value) || 12000,
       maxContextTokens: Number($('ag-ctx').value) || 200000,
       compactThresholdTokens: Number($('ag-compact').value) || 120000,
       keepRecentMessages: Number($('ag-keep').value) || 12,
     } });
-    toast('助手预算已保存并生效');
+    const agAuto = $('agent-auto');
+    if (agAuto) agAuto.checked = $('ag-auto-mode').checked;
+    toast('助手参数已保存并生效');
   } catch (e) { toast(e.message, true); }
 });
 $('origin-save').addEventListener('click', async () => {
   try { await post('/settings', { origin: $('set-origin').value.trim() }); toast('origin 已保存'); } catch (e) { toast(e.message, true); }
+});
+$('token-save').addEventListener('click', async () => {
+  try {
+    const tok = $('set-token').value.trim();
+    if (!tok) { toast('token 为空', true); return; }
+    await post('/auth', { token: tok });
+    $('set-token').value = '';
+    toast('token 已保存'); loadSettings();
+  } catch (e) { toast(e.message, true); }
 });
 
 async function loadRules() {
