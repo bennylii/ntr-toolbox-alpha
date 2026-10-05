@@ -48,6 +48,16 @@ node daemon/index.mjs forget    <bookKey>
 
 安全：跨域仅放行 `n.novelia.cc` 与 `127.0.0.1/localhost`（其它 Origin 的写请求与预检直接 403）；服务只监听 127.0.0.1。
 
+### 托盘（Windows，零依赖）
+
+不想留一个终端窗口时，双击 **`daemon\tray.vbs`**（或 `powershell -NoProfile -ExecutionPolicy Bypass -File daemon\tray.ps1`）：托盘区出现蓝色 **N** 图标，daemon 以隐藏进程跑在它手下，控制台照常 <http://127.0.0.1:7331/ui>。
+
+- 菜单：**打开控制台**（双击图标同效）、**状态**（书数 / 已译章数 / 队列 / RSS 气泡）、**打开日志**（`daemon/.tray.log`）、**重启 daemon**、**退出**（一并停掉托盘拉起的 daemon）；
+- 启动时若端口已有 daemon 在跑，托盘只接管显示（不持有进程，退出仅关托盘）；daemon 意外退出会弹气泡提醒；
+- 日志：daemon 输出追加到 `daemon/.tray.log`（已被 `*.log` 忽略，需要时手动清）；
+- 开机自启：`Win+R` → `shell:startup` → 放入 `tray.vbs` 的快捷方式；
+- 实现是 PowerShell NotifyIcon（WinForms），无 npm 依赖、无编译步骤；测试口：`-TestSpawn`（拉起临时 db 的 daemon → 等就绪 → 杀掉）与 `-SmokeGui N`（只初始化托盘 GUI，N 秒后自退）。
+
 ## 调度与限流（默认单线程，适配 Gemini 逆向 / 单槽上游）
 
 所有 LLM 调用都经 `daemon/scheduler.mjs`（规格 `docs/cleanroom/spec-06-llm-scheduler.md`）：
@@ -175,5 +185,6 @@ node daemon/lg-align-test.mjs           # LG 译文对齐单测（导出行映�
 node daemon/agent-test.mjs              # Agent 单测（参数解析/裁剪/会话/压缩/决策/循环；无需 mock）
 node daemon/agent-skills-test.mjs       # 技能目录单测（frontmatter/发现/读取/逃逸；无需 mock）
 MOCK_ORIGIN=http://127.0.0.1:8790 node daemon/daemon-test.mjs   # 冒烟：全管线/跳过/续跑/控制面/调度器/质检/处理链/模板/互通/助手
+powershell -File daemon/tray.ps1 -TestSpawn -Port 7377          # 托盘冒烟：拉起(临时db)→等就绪→杀掉；-SmokeGui N 只验 GUI 初始化
 # 助手页 e2e（浏览器车道）：mock 在 8790，daemon 在 7355（--db daemon/.tmp-agent-ui.db），见 tools/.e2e-agent-ui.js 头部跑法
 ```
