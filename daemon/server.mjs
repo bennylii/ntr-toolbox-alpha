@@ -95,6 +95,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           ok: true,
           settings: {
             llm: llmConfig(),
+            agent: store.getConfig('agent') || {},
             origin: store.getConfig('origin') || 'https://n.novelia.cc',
             tokenSet: Boolean(store.getConfig('token')),
             workers: workers.map((w, i) => ({ id: w.id || `w${i}`, model: w.model || '', endpoint: w.endpoint || '', key: maskKey(w.key) })),
@@ -108,6 +109,12 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           const merged = { ...llmConfig(), ...body.llm };
           store.setConfig('llm', merged);
           if (scheduler) scheduler.setOptions(schedulerOptionsFrom(merged));
+        }
+        if (body.agent && typeof body.agent === 'object') {
+          const cfgAgent = store.getConfig('agent') || {};
+          const merged = { ...cfgAgent, ...body.agent };
+          store.setConfig('agent', merged);
+          if (agentLoop && agentLoop.setOptions) agentLoop.setOptions(merged);
         }
         if (typeof body.origin === 'string' && body.origin.trim() !== '') store.setConfig('origin', body.origin.trim());
         log.log('[settings] 设置已更新');

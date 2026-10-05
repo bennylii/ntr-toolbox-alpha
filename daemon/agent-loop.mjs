@@ -163,6 +163,18 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
     }
   }
 
+  // 运行中热更新（GUI / 设置页用）：只接受数值预算与审批模式
+  function setOptions(partial = {}) {
+    for (const [key, raw] of Object.entries(partial || {})) {
+      if (['maxContextTokens', 'compactThresholdTokens', 'keepRecentMessages', 'maxSteps', 'toolResultMaxChars'].includes(key)) {
+        const n = Math.floor(Number(raw));
+        if (Number.isFinite(n) && n > 0) opt[key] = n;
+      }
+      if (key === 'approvalMode' && (raw === 'auto' || raw === 'manual')) opt.approvalMode = raw;
+    }
+    return { ...opt };
+  }
+
   function stop(sessionId) {
     const controller = controllers.get(sessionId);
     if (controller) controller.abort();
@@ -179,6 +191,7 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
     registry,
     runTurn,
     stop,
+    setOptions,
     resolveDecision: (id, status, resolution) => sessionApi.resolveDecision(id, status, resolution),
     pending: (sessionId) => sessionApi.pending(sessionId),
     session: sessionApi,
