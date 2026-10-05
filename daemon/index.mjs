@@ -9,6 +9,8 @@
 //   prompt show|set|clear   提示词模板（prefix/base/thinking/suffix；base 必须含 {format_rules}）
 //   glossary-io import|export   LG 术语表互通（JSON；写站点=快照+全量替换+回读校验）
 //   agent [--book key] [--message "..."] [--session id] [--auto]   本地助手（工具调用；缺 --message 进交互模式）
+//   export-src --book key [--out file]   导出站点原文为 LG 可翻译的纯文本（+对齐清单）
+//   import-lg --book key --txt file --manifest file [--apply] [--limit N]   LG 译文结果对齐导入（gpt 端）
 //   translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 //   watch [--interval 分钟]  常驻：定期按 expire 档补翻未译/过期章节
 //   serve [--port 7331]     本机控制面（/status /progress /auth /run）
@@ -29,11 +31,13 @@ const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
 const { CheckPipeline, samplesToTsv } = await imp('check-pipeline.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
 const { parseBookUrl } = await imp('book-url.mjs');
+const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport } = await imp('lg-align.mjs');
 const { createAgentLlm } = await imp('agent-llm.mjs');
 const { createAgentLoop } = await imp('agent-loop.mjs');
 const { doingTool, askUserTool } = await imp('agent-tools.mjs');
 const { createReadTools } = await imp('agent-tools-read.mjs');
 const { createWriteTools } = await imp('agent-tools-write.mjs');
+const { createLgTools } = await imp('agent-tools-lg.mjs');
 const { createSkillCatalog } = await imp('agent-skills.mjs');
 const { createAgentEvents } = await imp('agent-events.mjs');
 const { createJobQueue } = await imp('job-queue.mjs');
@@ -138,7 +142,7 @@ const agentLoop = createAgentLoop({
   store,
   chat: agentLlm.chat,
   takeUsage: agentLlm.takeUsage,
-  tools: [...readTools, ...createWriteTools(), doingTool, askUserTool],
+  tools: [...readTools, ...createWriteTools(), ...createLgTools(), doingTool, askUserTool],
   log,
   options: {
     approvalMode: agentApprovalDefault,
@@ -149,6 +153,8 @@ const agentLoop = createAgentLoop({
       makeClient,
       skills: skillCatalog,
       enqueue: (payload) => jobQueue.enqueue(payload),
+      queueBusy: () => jobQueue.busy(),
+      exportsDir: path.join(repoRoot, 'daemon', 'exports'),
     },
   },
 });
@@ -405,6 +411,67 @@ switch (command) {
     }
     break;
   }
+  case 'export-src': {
+    const srcBookKey = typeof flags.book === 'string' ? flags.book : '';
+    const srcBook = store.getBook(srcBookKey);
+    if (!srcBook) { log.error(`book 不存在：${srcBookKey || '(缺 --book)'}`); break; }
+    if (jobQueue.busy()) { log.error('有翻译任务正在运行（单队列占用中），请等它结束再导出'); break; }
+    const srcClient = makeClient(srcBook);
+    const srcChapters = await collectChapters(srcClient, srcBook, (n, t) => log.log(`  取得 ${n}：${t}`));
+    if (srcChapters.length === 0) { log.error('没有可导出的章节'); break; }
+    const built = buildSourceExport(srcChapters);
+    const srcSafe = String(srcBook.title || srcBook.novelId).replace(/[/|\:*?"<>]/g, '').slice(0, 60) || srcBook.novelId;
+    const outFile = (typeof flags.out === 'string' && flags.out !== 'true')
+      ? path.resolve(flags.out)
+      : path.join(repoRoot, 'daemon', 'exports', `lg-src-${srcSafe}.txt`);
+    fs.mkdirSync(path.dirname(outFile), { recursive: true });
+    fs.writeFileSync(outFile, built.text, 'utf8');
+    fs.writeFileSync(`${outFile}.manifest.json`, JSON.stringify(manifestOf(srcBook, built), null, 2), 'utf8');
+    log.log(`已导出 ${built.linesTotal} 行（${srcChapters.length} 章）→ ${outFile}`);
+    log.log(`清单 → ${outFile}.manifest.json（交给 LG 翻译后用 import-lg 导回）`);
+    break;
+  }
+  case 'import-lg': {
+    const ioBookKey = typeof flags.book === 'string' ? flags.book : '';
+    const ioBook = store.getBook(ioBookKey);
+    if (!ioBook) { log.error(`book 不存在：${ioBookKey || '(缺 --book)'}`); break; }
+    if (typeof flags.txt !== 'string' || flags.txt === 'true' || typeof flags.manifest !== 'string' || flags.manifest === 'true') {
+      log.error('用法: import-lg --book <key> --txt <LG结果.txt> --manifest <清单.json> [--apply] [--limit N]（不带 --apply 只校验）');
+      break;
+    }
+    if (flags.apply === true && jobQueue.busy()) { log.error('有翻译任务正在运行（单队列占用中），请等它结束再导入'); break; }
+    const ioClient = makeClient(ioBook);
+    const ioLines = splitResultLines(fs.readFileSync(path.resolve(flags.txt), 'utf8'));
+    const ioManifest = JSON.parse(fs.readFileSync(path.resolve(flags.manifest), 'utf8'));
+    const ioReport = await verifyImport({
+      resultLines: ioLines,
+      manifest: ioManifest,
+      getChapter: (chapterId, volumeId) => ioClient.getChapterTask(ioBook, chapterId, 'gpt', volumeId),
+    });
+    if (ioReport.globalError) { log.error(ioReport.globalError); break; }
+    for (const c of ioReport.chapters) {
+      log.log(`  ${c.ok ? '✓' : '✗'} ${c.title || c.chapterId}（${c.count} 段）${c.ok ? '' : '：' + c.reason}`);
+    }
+    log.log(`校验：${ioReport.okCount}/${ioReport.total} 章通过；疑似未翻译 ${ioReport.untranslated} 行`);
+    if (flags.apply !== true) { log.log('dry-run：未提交（加 --apply 上传到 gpt 端）'); break; }
+    const ioLimit = Math.max(0, Number(flags.limit) || 0);
+    let uploaded = 0;
+    let failed = 0;
+    for (const c of ioReport.chapters) {
+      if (!c.ok) continue;
+      if (ioLimit > 0 && uploaded >= ioLimit) break;
+      try {
+        await ioClient.uploadChapter(ioBook, c.chapterId, { glossaryId: c.glossaryId, paragraphsZh: c.paragraphsZh }, 'gpt', c.volumeId);
+        uploaded += 1;
+        log.log(`  已提交 ${uploaded}：${c.title || c.chapterId}`);
+      } catch (e) {
+        failed += 1;
+        log.error(`  提交失败：${c.title || c.chapterId}：${(e && e.message) || e}`);
+      }
+    }
+    log.log(`提交完成：成功 ${uploaded}，失败 ${failed}，未过校验 ${ioReport.total - ioReport.okCount}`);
+    break;
+  }
   case 'translate': {
     await runBooks(flags.book);
     break;
@@ -456,6 +523,6 @@ switch (command) {
     break;
   }
   default:
-    log.error(`未知命令: ${command}（可用 auth/add/run/check/rules/prompt/glossary-io/agent/translate/watch/serve/status/forget）`);
+    log.error(`未知命令: ${command}（可用 auth/add/export-src/import-lg/run/check/rules/prompt/glossary-io/agent/translate/watch/serve/status/forget）`);
     process.exit(2);
 }

@@ -21,6 +21,8 @@ node daemon/index.mjs check     [--book key] [--codes A,B] [--limit N] [--propos
 node daemon/index.mjs rules     list|add|rm|enable|disable   # 文本处理链规则（pre/post 替换、保留段）
 node daemon/index.mjs prompt    show|set|clear               # 提示词模板（prefix/base/thinking/suffix）
 node daemon/index.mjs glossary-io import|export              # LG 术语表互通（JSON；写站点=快照+回读校验）
+node daemon/index.mjs export-src --book key [--out file]     # 导出站点原文为 LG 可译纯文本（+对齐清单）
+node daemon/index.mjs import-lg --book key --txt file --manifest file [--apply] [--limit N]   # LG 译文结果对齐导入（gpt 端）
 node daemon/index.mjs agent     [--book key] [--message "..."] [--session id] [--auto]   # 本地助手（工具调用）
 node daemon/index.mjs translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 node daemon/index.mjs watch     [--interval 30]    # 常驻：定期按 expire 档补翻
@@ -67,9 +69,9 @@ node daemon/index.mjs forget    <bookKey>
 - **会话**：`agent_sessions/agent_messages/agent_decisions` 落 SQLite；时间线全量保留，超阈值时把旧段摘要化（`summaryUpTo` 之后才进模型）。`--session <id>` 续用上次会话。
 - **审批**：默认 manual —— 标记 `requiresApproval` 的工具（写术语表/回滚/改规则与提示词等）会挂起为 decision，CLI 里 y/N 确认；`--auto` 跳过审批（等价 auto 模式）。追问（`ask_user`）同样是 decision。
 - **工具（A1–A3）**：
-  - 只读（自动）：`list_books`、`book_status`、`read_book`（按行窗口）、`read_translations`（对齐对窗口）、`list_proposals`、`list_snapshots`、`quality_report`、`list_skills`、`read_skill`、`export_glossary`；
+  - 只读（自动）：`list_books`、`book_status`、`read_book`（按行窗口）、`read_translations`（对齐对窗口）、`list_proposals`、`list_snapshots`、`quality_report`、`list_skills`、`read_skill`、`export_glossary`、`export_lg_source`（站点原文 → LG 纯文本+清单）；
   - 执行（需审批）：`run_translate`（补翻并上传译文）、`run_glossary`（术语管线，可能直写）、`run_check`（只读质检，自动）；
-  - 写入（需审批）：`glossary_apply`（快照+全量替换+回读校验）、`glossary_rollback`（回滚前自动再存快照）、`import_glossary`（LG JSON；regex 条目入本地规则且默认禁用）、`set_rule`/`delete_rule`、`set_prompt`；`close_proposal` 为本地状态、自动执行；
+  - 写入（需审批）：`glossary_apply`（快照+全量替换+回读校验）、`glossary_rollback`（回滚前自动再存快照）、`import_glossary`（LG JSON；regex 条目入本地规则且默认禁用）、`import_lg_result`（LG 译文结果导入 GPT 端，preview=完整校验报告）；`set_rule`/`delete_rule`、`set_prompt`；`close_proposal` 为本地状态、自动执行；
   - 交互：`doing`（进度）、`ask_user`（追问）。
 - **单队列**：执行类工具与 `/run` 共用进程内 FIFO（同一时刻只跑一个 runBook），不会和浏览器/其它会话抢同一本书。
 - **控制面新增**：`GET /snapshots`、`POST /snapshots/restore`、`POST /proposals/close`、`POST /proposals/apply`（人工/A4 GUI 用）。
@@ -120,6 +122,25 @@ node daemon/index.mjs glossary-io export --book <key> [--out <lg.json>]    # 导
 - 其余条目 = 术语表候选（值 = `dst #info`）；改原文/可疑条目默认跳过并计入报告，`--propose` 时进提案；
 - `xlsx` 与 `.lg` 工程文件暂不支持（列为可选）。
 
+## LG 译文对齐导入（用 LinguaGacha 翻整本书）
+
+不想（或不能）用 daemon 内置翻译时，可以把站点原文导出成 LG 可翻译的纯文本，用 LinguaGacha 翻完再原样导回站点 GPT 端。行号对齐由「配对清单 + 三层校验」保证，错位直接拒绝提交：
+
+```
+node daemon/index.mjs export-src --book <key> [--out <file>]          # 导出纯文本 + <file>.manifest.json 对齐清单
+#   → 把 txt 建成 LG 项目（一行一段，空行也占一行），翻完导出同格式 txt
+node daemon/index.mjs import-lg --book <key> --txt <LG结果.txt> --manifest <清单.json>            # dry-run：逐章校验报告
+node daemon/index.mjs import-lg --book <key> --txt <LG结果.txt> --manifest <清单.json> --apply    # 通过章提交站点 GPT 端
+#   [--limit N] 本次最多提交 N 章；有翻译任务在跑时会被单队列拒绝
+```
+
+- **兼容前提**（来自 LG 源码）：LG 的 TXT 格式一行一条 item、空行也是条目、写出逐行 join（空译文回退原文）→ 结果 txt 的行数与行号和输入天然一致。因此**不要在 LG 里增删行、不要开启会改行数的处理**；
+- **三层校验**：总行数 = 清单 `linesTotal`（否则全局拒绝）；每章行数 + 空/非空模式与站点当前 `paragraphJp` 一致（行错位检测）；每章原文 sha1 与导出时一致（源站更新/漂移 → 该章拒绝）；
+- **疑似未翻**：结果行 === 原文行（非空）的行数会统计进报告（LG 空译文回退原文的特性），dry-run 里先看这个数再 `--apply`；
+- **提交即 GPT 翻译器兼容**：逐章走站点既有 `POST .../translate-v2/gpt/chapter/{id}`（带当前 `glossaryId`、`sakuraVersion 0.9`、段落数严格一致），导入后站点与 daemon 都把该章视为已译；`--apply` 后可跑 `translate --level expire` 验证零目标；
+- **Agent 工具**：`export_lg_source({book, out?})` 自动执行（写 `daemon/exports/`）；`import_lg_result({book, txtPath, manifestPath, apply, limit})` 需审批，preview 即完整校验报告；
+- 边界：导入期间若站点原文更新（sha1 漂移）对应章自动跳过；文件读写仅限 `--out`/`exports/` 指定路径。
+
 ## 真机契约备忘（mock 已同步改严）
 
 - `GET /api/novel/{p}/{id}/file` 必须带 `filename` 参数，缺了 404（`createFileUrl` 的 `filename` 无默认值）；
@@ -150,6 +171,7 @@ node daemon/quality-test.mjs            # 质检纯函数单测（七码 + 批�
 node daemon/processors-test.mjs         # 处理链单测（占位符/保留段/替换表/标点；无需 mock）
 node daemon/prompt-test.mjs             # 提示词模板单测（默认逐字一致/回退/槽位；无需 mock）
 node daemon/glossary-io-test.mjs        # LG 互通单测（解析/分流/往返；无需 mock）
+node daemon/lg-align-test.mjs           # LG 译文对齐单测（导出行映射/解析容忍/三层校验；无需 mock）
 node daemon/agent-test.mjs              # Agent 单测（参数解析/裁剪/会话/压缩/决策/循环；无需 mock）
 node daemon/agent-skills-test.mjs       # 技能目录单测（frontmatter/发现/读取/逃逸；无需 mock）
 MOCK_ORIGIN=http://127.0.0.1:8790 node daemon/daemon-test.mjs   # 冒烟：全管线/跳过/续跑/控制面/调度器/质检/处理链/模板/互通/助手

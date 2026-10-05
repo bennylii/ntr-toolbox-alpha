@@ -26,6 +26,7 @@ const { createSkillCatalog } = await imp('agent-skills.mjs');
 const { createAgentEvents } = await imp('agent-events.mjs');
 const { createJobQueue } = await imp('job-queue.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
+const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport } = await imp('lg-align.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
 
@@ -995,6 +996,89 @@ await t('控制面：/proposals 可见提案、/run 支持 job=glossary', async 
   }).then((r) => r.json());
   assert.equal(run.job, 'glossary');
   server.close();
+});
+
+console.log('== LG 译文对齐导入（export-src → LG 结果 → import-lg --apply） ==');
+const LG_TXT = path.join(here, 'exports', `lg-src-${RUN}.txt`);
+const uploadSnapshot = async () => (await fetch(`${MOCK}/__stats`).then((r) => r.json())).lastChapterUpload || null;
+await t('导出：collectChapters 3 章 12 段，txt + 清单落盘（CLI 同路径）', async () => {
+  const key = `web:mock/mock-trans-lg-${RUN}`;
+  store.upsertBook({ key, kind: 'web', providerId: 'mock', novelId: `mock-trans-lg-${RUN}`, origin: MOCK, title: '' });
+  const book = store.getBook(key);
+  const chapters = await collectChapters(makeClient(book), book);
+  assert.equal(chapters.length, 3, JSON.stringify(chapters.map((c) => c.chapterId)));
+  assert.deepEqual(chapters.map((c) => c.paragraphs.length), [6, 4, 2]);
+  const built = buildSourceExport(chapters);
+  assert.equal(built.linesTotal, 12);
+  fs.mkdirSync(path.dirname(LG_TXT), { recursive: true });
+  fs.writeFileSync(LG_TXT, built.text, 'utf8');
+  fs.writeFileSync(`${LG_TXT}.manifest.json`, JSON.stringify(manifestOf(book, built), null, 2), 'utf8');
+  assert.equal(splitResultLines(fs.readFileSync(LG_TXT, 'utf8')).length, 12, '导出文本按行读取行数一致');
+});
+await t('dry-run：LG 结果行（逐行替换、行号不变）校验逐章 ✓、glossaryId 带出、不上传', async () => {
+  const book = store.getBook(`web:mock/mock-trans-lg-${RUN}`);
+  const client = makeClient(book);
+  const resultText = fs.readFileSync(LG_TXT, 'utf8').split('\n').map((l) => `【LG译】${l}`).join('\n');
+  fs.writeFileSync(`${LG_TXT}.result.txt`, resultText, 'utf8');
+  const before = await uploadSnapshot();
+  const report = await verifyImport({
+    resultLines: splitResultLines(resultText),
+    manifest: JSON.parse(fs.readFileSync(`${LG_TXT}.manifest.json`, 'utf8')),
+    getChapter: (chapterId, volumeId) => client.getChapterTask(book, chapterId, 'gpt', volumeId),
+  });
+  assert.equal(report.ok, true, JSON.stringify(report.chapters.filter((c) => !c.ok)));
+  assert.equal(report.untranslated, 0);
+  assert.ok(report.chapters.every((c) => c.glossaryId === 'g-current'), JSON.stringify(report.chapters.map((c) => c.glossaryId)));
+  assert.deepEqual(await uploadSnapshot(), before, 'dry-run 不产生章节上传');
+});
+await t('--apply：通过章逐章提交 GPT 槽（glossaryId + 段数严格一致）→ 站点视为已译', async () => {
+  const book = store.getBook(`web:mock/mock-trans-lg-${RUN}`);
+  const client = makeClient(book);
+  const report = await verifyImport({
+    resultLines: splitResultLines(fs.readFileSync(`${LG_TXT}.result.txt`, 'utf8')),
+    manifest: JSON.parse(fs.readFileSync(`${LG_TXT}.manifest.json`, 'utf8')),
+    getChapter: (chapterId, volumeId) => client.getChapterTask(book, chapterId, 'gpt', volumeId),
+  });
+  let uploaded = 0;
+  for (const c of report.chapters) {
+    if (!c.ok) continue;
+    await client.uploadChapter(book, c.chapterId, { glossaryId: c.glossaryId, paragraphsZh: c.paragraphsZh }, 'gpt', c.volumeId);
+    uploaded += 1;
+    const up = await uploadSnapshot();
+    assert.equal(up.chapterId, c.chapterId, `第 ${uploaded} 次提交落错章`);
+    assert.equal(up.glossaryId, 'g-current');
+    assert.equal(up.count, c.count, '段落数与站点原文严格一致');
+    assert.ok(String(up.preview[0]).startsWith('【LG译】'), up.preview[0]);
+  }
+  assert.equal(uploaded, 3);
+  const rerun = await mkPipeline({}).runBook(`web:mock/mock-trans-lg-${RUN}`);
+  assert.equal(rerun.stats.uploaded + rerun.stats.targets + rerun.stats.requests, 0, `导入后站点视为已译：管线零目标 ${JSON.stringify(rerun.stats)}`);
+});
+await t('源漂移章跳过：t2 清单 sha1 过期 → 该章 ✗ 不提交，其余正常入站', async () => {
+  const key = `web:mock/mock-trans-lg2-${RUN}`;
+  store.upsertBook({ key, kind: 'web', providerId: 'mock', novelId: `mock-trans-lg2-${RUN}`, origin: MOCK, title: '' });
+  const book = store.getBook(key);
+  const client = makeClient(book);
+  const built = buildSourceExport(await collectChapters(client, book));
+  const manifest = JSON.parse(JSON.stringify(manifestOf(book, built)));
+  manifest.chapters.find((c) => c.chapterId === 't2').jpSha1 = '0'.repeat(40);
+  const resultLines = splitResultLines(built.text.split('\n').map((l) => `【LG译】${l}`).join('\n'));
+  const report = await verifyImport({ resultLines, manifest, getChapter: (chapterId, volumeId) => client.getChapterTask(book, chapterId, 'gpt', volumeId) });
+  assert.equal(report.okCount, 2, JSON.stringify(report.chapters.map((c) => [c.chapterId, c.ok, c.reason])));
+  const t2 = report.chapters.find((c) => c.chapterId === 't2');
+  assert.equal(t2.ok, false);
+  assert.ok(/不一致（源站更新|漂移）/.test(t2.reason), t2.reason);
+  assert.equal(t2.paragraphsZh, null);
+  for (const c of report.chapters) {
+    if (!c.ok) continue;
+    await client.uploadChapter(book, c.chapterId, { glossaryId: c.glossaryId, paragraphsZh: c.paragraphsZh }, 'gpt', c.volumeId);
+  }
+  const rerun = await mkPipeline({}).runBook(key);
+  assert.equal(rerun.stats.targets, 1, JSON.stringify(rerun.stats), '只剩漂移的 t2 需要翻译');
+});
+await t('清理：exports 测试文件', () => {
+  for (const f of [LG_TXT, `${LG_TXT}.manifest.json`, `${LG_TXT}.result.txt`]) { try { fs.unlinkSync(f); } catch { } }
+  assert.ok(!fs.existsSync(LG_TXT));
 });
 
 console.log(`\n通过 ${pass}，失败 ${fail}`);
