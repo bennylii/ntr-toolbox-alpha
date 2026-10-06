@@ -31,7 +31,7 @@ const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
 const { CheckPipeline, samplesToTsv } = await imp('check-pipeline.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
 const { parseBookUrl } = await imp('book-url.mjs');
-const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport } = await imp('lg-align.mjs');
+const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport, exportBookSource, applyImportReport, createLgImportRunner } = await imp('lg-align.mjs');
 const { createAgentLlm } = await imp('agent-llm.mjs');
 const { createAgentLoop } = await imp('agent-loop.mjs');
 const { doingTool, askUserTool } = await imp('agent-tools.mjs');
@@ -144,8 +144,9 @@ const glossaryPipeline = new GlossaryPipeline({
 const checkPipeline = new CheckPipeline({ store, engine, makeClient, log });
 
 // Agent（助手池 = agentScheduler；与翻译池互不抢并发门）
+const lgImportRunner = createLgImportRunner({ store, makeClient, log });
 const jobQueue = createJobQueue({
-  resolveRunner: (job) => ({ glossary: glossaryPipeline, check: checkPipeline, translate: pipeline }[job]),
+  resolveRunner: (job) => ({ glossary: glossaryPipeline, check: checkPipeline, translate: pipeline, 'lg-import': lgImportRunner }[job]),
   log,
 });
 const skillCatalog = createSkillCatalog({ roots: [path.join(repoRoot, 'skills')], log });
@@ -435,18 +436,18 @@ switch (command) {
     if (!srcBook) { log.error(`book 不存在：${srcBookKey || '(缺 --book)'}`); break; }
     if (jobQueue.busy()) { log.error('有翻译任务正在运行（单队列占用中），请等它结束再导出'); break; }
     const srcClient = makeClient(srcBook);
-    const srcChapters = await collectChapters(srcClient, srcBook, (n, t) => log.log(`  取得 ${n}：${t}`));
-    if (srcChapters.length === 0) { log.error('没有可导出的章节'); break; }
-    const built = buildSourceExport(srcChapters);
-    const srcSafe = String(srcBook.title || srcBook.novelId).replace(/[/|\:*?"<>]/g, '').slice(0, 60) || srcBook.novelId;
-    const outFile = (typeof flags.out === 'string' && flags.out !== 'true')
-      ? path.resolve(flags.out)
-      : path.join(repoRoot, 'daemon', 'exports', `lg-src-${srcSafe}.txt`);
-    fs.mkdirSync(path.dirname(outFile), { recursive: true });
-    fs.writeFileSync(outFile, built.text, 'utf8');
-    fs.writeFileSync(`${outFile}.manifest.json`, JSON.stringify(manifestOf(srcBook, built), null, 2), 'utf8');
-    log.log(`已导出 ${built.linesTotal} 行（${srcChapters.length} 章）→ ${outFile}`);
-    log.log(`清单 → ${outFile}.manifest.json（交给 LG 翻译后用 import-lg 导回）`);
+    const outFile = (typeof flags.out === 'string' && flags.out !== 'true') ? path.resolve(flags.out) : '';
+    try {
+      const exported = await exportBookSource(srcClient, srcBook, {
+        outFile,
+        exportsDir: path.join(repoRoot, 'daemon', 'exports'),
+        onProgress: (n, t) => log.log(`  取得 ${n}：${t}`),
+      });
+      log.log(`已导出 ${exported.linesTotal} 行（${exported.chapters} 章）→ ${exported.file}`);
+      log.log(`清单 → ${exported.manifestFile}（交给 LG 翻译后用 import-lg 导回）`);
+    } catch (e) {
+      log.error((e && e.message) || String(e));
+    }
     break;
   }
   case 'import-lg': {
@@ -472,22 +473,14 @@ switch (command) {
     }
     log.log(`校验：${ioReport.okCount}/${ioReport.total} 章通过；疑似未翻译 ${ioReport.untranslated} 行`);
     if (flags.apply !== true) { log.log('dry-run：未提交（加 --apply 上传到 gpt 端）'); break; }
-    const ioLimit = Math.max(0, Number(flags.limit) || 0);
-    let uploaded = 0;
-    let failed = 0;
-    for (const c of ioReport.chapters) {
-      if (!c.ok) continue;
-      if (ioLimit > 0 && uploaded >= ioLimit) break;
-      try {
-        await ioClient.uploadChapter(ioBook, c.chapterId, { glossaryId: c.glossaryId, paragraphsZh: c.paragraphsZh }, 'gpt', c.volumeId);
-        uploaded += 1;
-        log.log(`  已提交 ${uploaded}：${c.title || c.chapterId}`);
-      } catch (e) {
-        failed += 1;
-        log.error(`  提交失败：${c.title || c.chapterId}：${(e && e.message) || e}`);
-      }
+    const applied = await applyImportReport(ioClient, ioBook, ioReport, {
+      limit: Math.max(0, Number(flags.limit) || 0),
+      onProgress: (n, c) => log.log(`  已提交 ${n}：${c.title || c.chapterId}`),
+    });
+    for (const r of applied.results) {
+      if (r.status === 'failed') log.error(`  提交失败：${r.title || r.chapterId}：${r.error}`);
     }
-    log.log(`提交完成：成功 ${uploaded}，失败 ${failed}，未过校验 ${ioReport.total - ioReport.okCount}`);
+    log.log(`提交完成：成功 ${applied.uploaded}，失败 ${applied.failed}，未过校验 ${ioReport.total - ioReport.okCount}`);
     break;
   }
   case 'translate': {
@@ -516,7 +509,7 @@ switch (command) {
     const cfgServe = store.getConfig('serve') || {};
     const port = Math.max(1, Number(flags.port) || Number(cfgServe.port) || 7331);
     try { fs.writeFileSync(path.join(here, '.serve-port'), String(port), 'utf8'); } catch { }
-    await startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler, queue: jobQueue, makeClient, engine, agentLoop, agentEvents, port, log });
+    await startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler, queue: jobQueue, makeClient, engine, agentLoop, agentEvents, port, log, lgImportRunner });
     log.log('serve 模式：Ctrl-C 退出');
     await new Promise(() => { });
   }

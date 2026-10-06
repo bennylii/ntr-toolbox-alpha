@@ -3,12 +3,19 @@
 // 安全：跨域仅放行 站点域名 与 本机；非白名单 Origin 的写请求/预检一律 403（页面自身同源访问不受影响）。
 // /run 为单队列（FIFO 串行）——同一时刻最多一个 runBook；每次 run 的选项按次传入，不改共享配置。
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseBookUrl } from './book-url.mjs';
 import { PROMPT_SLOTS, DEFAULT_TEMPLATE, FORMAT_RULES } from './prompt.mjs';
 import { UI_HTML } from './ui.mjs';
 import { createJobQueue } from './job-queue.mjs';
 import { restoreSnapshot, applyProposal } from './glossary-io.mjs';
+import { exportBookSource, splitResultLines, verifyImport } from './lg-align.mjs';
 import { VERSION } from './version.mjs';
+
+const DAEMON_DIR = path.dirname(fileURLToPath(import.meta.url));
+const UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
 
 const CORS_BASE = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -50,7 +57,7 @@ const maskKey = (key) => {
   return s.length <= 8 ? s.slice(0, 2) + '…' : s.slice(0, 4) + '…' + s.slice(-2);
 };
 
-export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler = null, queue, makeClient, engine, agentLoop, agentEvents, port = 7331, log = console }) {
+export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler = null, queue, makeClient, engine, agentLoop, agentEvents, port = 7331, log = console, lgImportRunner = null, lgDirs = null }) {
   // 单队列（控制面 /run 与 Agent 工具共用；未传入时按本进程管线自建）
   const jobQueue = queue || createJobQueue({
     resolveRunner: (job) => ({ glossary: glossaryPipeline, check: checkPipeline, translate: pipeline }[job]),
@@ -84,6 +91,22 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
 
   const serveConfig = () => store.getConfig('serve') || {};
   const extraOrigins = () => (Array.isArray(serveConfig().origins) ? serveConfig().origins : []);
+
+  // LG 译文导入（GUI 与 CLI 同一套函数）：文件只在 exports/ 与 uploads/ 流转
+  const lgDirsResolved = {
+    exportsDir: (lgDirs && lgDirs.exportsDir) || path.join(DAEMON_DIR, 'exports'),
+    uploadsDir: (lgDirs && lgDirs.uploadsDir) || path.join(DAEMON_DIR, 'uploads'),
+  };
+  const safeFilename = (name) => String(name || 'file').replace(/[^\w.\-\u4e00-\u9fa5]/g, '_').slice(-80) || 'file';
+  // 路径白名单：只允许 exports/ 与 uploads/ 下的文件（防任意文件读取）
+  const resolveLgPath = (p) => {
+    const abs = path.resolve(String(p || ''));
+    for (const root of [lgDirsResolved.exportsDir, lgDirsResolved.uploadsDir]) {
+      const rootAbs = path.resolve(root) + path.sep;
+      if (abs.startsWith(rootAbs)) return abs;
+    }
+    return null;
+  };
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
@@ -341,13 +364,78 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
       if (req.method === 'POST' && url.pathname === '/run') {
         const body = await readBody();
         if (!body.bookKey) { send(400, { ok: false, error: '缺少 bookKey' }); return; }
-        const job = ['glossary', 'check', 'translate'].includes(body.job) ? body.job : 'translate';
-        const runner = { glossary: glossaryPipeline, check: checkPipeline, translate: pipeline }[job];
+        const job = ['glossary', 'check', 'translate', 'lg-import'].includes(body.job) ? body.job : 'translate';
+        const runner = { glossary: glossaryPipeline, check: checkPipeline, translate: pipeline, 'lg-import': lgImportRunner }[job];
         if (!runner) { send(400, { ok: false, error: `${job} 管线未装配` }); return; }
         const options = { ...(body.options || {}) };
         if (job === 'translate' && body.level) options.level = body.level;
+        if (job === 'lg-import') {
+          options.txtPath = resolveLgPath(options.txtPath);
+          options.manifestPath = resolveLgPath(options.manifestPath);
+          if (!options.txtPath || !options.manifestPath) { send(400, { ok: false, error: 'lg-import 的 txtPath/manifestPath 必须位于 exports/ 或 uploads/ 下' }); return; }
+        }
         const { id } = jobQueue.enqueue({ bookKey: body.bookKey, job, options });
         send(202, { ok: true, accepted: true, queued: true, id, bookKey: body.bookKey, job });
+        return;
+      }
+      // ---- LG 译文导入（GUI）：导出 / 上传 / 校验（apply 走 /run job=lg-import） ----
+      if (req.method === 'POST' && url.pathname === '/lg/export') {
+        const body = await readBody();
+        const book = store.getBook(String(body.bookKey || ''));
+        if (!book) { send(400, { ok: false, error: 'book 不存在' }); return; }
+        if (jobQueue.busy()) { send(409, { ok: false, error: '有翻译任务正在运行（单队列占用中），稍后再导出' }); return; }
+        try {
+          const exported = await exportBookSource(makeClient(book), book, { exportsDir: lgDirsResolved.exportsDir });
+          log.log(`[lg] 已导出 ${book.key}：${exported.linesTotal} 行 / ${exported.chapters} 章`);
+          send(200, { ok: true, ...exported });
+        } catch (e) {
+          send(400, { ok: false, error: (e && e.message) || String(e) });
+        }
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/lg/upload') {
+        const body = await readBody();
+        const content = String(body.content == null ? '' : body.content);
+        if (Buffer.byteLength(content, 'utf8') > UPLOAD_MAX_BYTES) { send(400, { ok: false, error: '文件超过 20MB 上限' }); return; }
+        const ext = path.extname(String(body.filename || '')).toLowerCase();
+        if (!['.txt', '.json', '.md'].includes(ext)) { send(400, { ok: false, error: '仅支持 .txt / .json / .md' }); return; }
+        fs.mkdirSync(lgDirsResolved.uploadsDir, { recursive: true });
+        const file = path.join(lgDirsResolved.uploadsDir, `upload-${Date.now()}-${safeFilename(body.filename)}`);
+        fs.writeFileSync(file, content, 'utf8');
+        send(200, { ok: true, path: file, bytes: Buffer.byteLength(content, 'utf8') });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/lg/verify') {
+        const body = await readBody();
+        const book = store.getBook(String(body.bookKey || ''));
+        if (!book) { send(400, { ok: false, error: 'book 不存在' }); return; }
+        const txtPath = resolveLgPath(body.txtPath);
+        const manifestPath = resolveLgPath(body.manifestPath || `${body.txtPath || ''}.manifest.json`);
+        if (!txtPath) { send(400, { ok: false, error: 'txtPath 必须位于 exports/ 或 uploads/ 下' }); return; }
+        if (!manifestPath || !fs.existsSync(manifestPath)) { send(400, { ok: false, error: '找不到清单：请上传或指定 .manifest.json', manifestPath: manifestPath || '' }); return; }
+        try {
+          const lines = splitResultLines(fs.readFileSync(txtPath, 'utf8'));
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+          const client = makeClient(book);
+          const report = await verifyImport({
+            resultLines: lines,
+            manifest,
+            getChapter: (chapterId, volumeId) => client.getChapterTask(book, chapterId, 'gpt', volumeId),
+          });
+          send(200, {
+            ok: true,
+            globalError: report.globalError,
+            okCount: report.okCount,
+            total: report.total,
+            untranslated: report.untranslated,
+            linesIn: lines.length,
+            linesTotal: manifest.linesTotal || 0,
+            chapters: report.chapters.map((c) => ({ chapterId: c.chapterId, title: c.title || '', count: c.count, start: c.start, ok: c.ok, reason: c.reason || '' })),
+            note: report.globalError ? '行数无法对齐，拒绝导入' : (report.okCount === report.total ? '全部章节通过，可提交' : '部分章节未通过，提交时自动跳过'),
+          });
+        } catch (e) {
+          send(400, { ok: false, error: (e && e.message) || String(e) });
+        }
         return;
       }
       // ---- Agent（本地助手） ----

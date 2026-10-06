@@ -393,6 +393,8 @@ async function renderBooks() {
       '<div class="proj-actions">' +
       '<button class="btn ghost" data-cur="' + esc(b.key) + '">设为当前</button> ' +
       '<button class="btn" data-run="' + esc(b.key) + '">派发任务</button> ' +
+      '<button class="btn ghost" data-lgexport="' + esc(b.key) + '">导出 LG 源文</button> ' +
+      '<button class="btn ghost" data-lgimport="' + esc(b.key) + '">导入 LG 译文</button> ' +
       '<button class="btn danger" data-forget="' + esc(b.key) + '">忘记</button></div>' +
       '<div class="proj-detail" style="display:none"></div>' +
       '</div>';
@@ -413,6 +415,91 @@ async function renderBooks() {
     if (!confirm('从本地 daemon 忘记 ' + btn.dataset.forget + '？（站点数据不动）')) return;
     try { await post('/books', { action: 'forget', key: btn.dataset.forget }); toast('已忘记'); refresh(); } catch (e) { toast(e.message, true); }
   }));
+  document.querySelectorAll('[data-lgexport]').forEach((btn) => btn.addEventListener('click', async () => {
+    const bookKey = btn.dataset.lgexport;
+    const card = btn.closest('.proj-card');
+    const box = card.querySelector('.proj-detail');
+    box.style.display = 'block';
+    box.textContent = '导出中（逐章取原文）…';
+    try {
+      const r = await post('/lg/export', { bookKey });
+      LG_LAST[bookKey] = { file: r.file, manifestFile: r.manifestFile };
+      box.innerHTML = '<div><b>已导出 ' + esc(String(r.linesTotal)) + ' 行 / ' + esc(String(r.chapters)) + ' 章</b></div>' +
+        '<div>源文：<code>' + esc(r.file) + '</code>（交给 LinguaGacha 建项目翻译，保持行数）</div>' +
+        '<div>清单：<code>' + esc(r.manifestFile) + '</code>（导入时用；已为本项目记住）</div>' +
+        '<div class="muted">翻译完成后点「导入 LG 译文」，选择 LG 导出的结果 txt 即可。</div>';
+      toast('已导出 ' + r.linesTotal + ' 行');
+    } catch (e) { box.textContent = ''; box.style.display = 'none'; toast(e.message, true); }
+  }));
+  document.querySelectorAll('[data-lgimport]').forEach((btn) => btn.addEventListener('click', () => {
+    openLgImportPanel(btn.closest('.proj-card'), btn.dataset.lgimport);
+  }));
+}
+// 项目页：LG 译文导入面板（本会话记住最近一次导出的清单路径）
+const LG_LAST = {};
+function openLgImportPanel(card, bookKey) {
+  const box = card.querySelector('.proj-detail');
+  box.style.display = 'block';
+  box.innerHTML = '';
+  const state = { txtPath: '', manifestPath: (LG_LAST[bookKey] || {}).manifestFile || '' };
+  const mkRow = () => { const row = document.createElement('div'); row.style.cssText = 'margin:4px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap'; return row; };
+  // 结果 txt
+  const txtRow = mkRow();
+  const txtLabel = document.createElement('span'); txtLabel.textContent = 'LG 结果 txt：';
+  const txtInput = document.createElement('input'); txtInput.type = 'file'; txtInput.accept = '.txt,text/plain';
+  txtRow.append(txtLabel, txtInput);
+  // 清单
+  const mfRow = mkRow();
+  const mfLabel = document.createElement('span'); mfLabel.textContent = '清单 json：';
+  const mfInput = document.createElement('input'); mfInput.type = 'file'; mfInput.accept = '.json,application/json';
+  const mfHint = document.createElement('span'); mfHint.className = 'muted';
+  mfHint.textContent = state.manifestPath ? ('默认用本会话导出时的清单：' + state.manifestPath + '（可另选覆盖）') : '未记住清单，请选择导出时生成的 .manifest.json';
+  mfRow.append(mfLabel, mfInput, mfHint);
+  // 操作行
+  const opRow = mkRow();
+  const verifyBtn = document.createElement('button'); verifyBtn.className = 'btn'; verifyBtn.textContent = '校验';
+  const limitLabel = document.createElement('span'); limitLabel.textContent = '限章数';
+  const limitInput = document.createElement('input'); limitInput.type = 'number'; limitInput.min = '0'; limitInput.value = '0';
+  const applyBtn = document.createElement('button'); applyBtn.className = 'btn'; applyBtn.textContent = '提交通过章'; applyBtn.disabled = true;
+  opRow.append(verifyBtn, limitLabel, limitInput, applyBtn);
+  const report = document.createElement('div'); report.className = 'muted';
+  report.textContent = '选好文件后点「校验」：逐章核对行数/空行模式/源 sha1，再决定提交。';
+  box.append(txtRow, mfRow, opRow, report);
+  const uploadFile = async (file) => {
+    const text = await file.text();
+    const r = await post('/lg/upload', { filename: file.name, content: text });
+    return r.path;
+  };
+  verifyBtn.addEventListener('click', async () => {
+    try {
+      const txtFile = txtInput.files && txtInput.files[0];
+      if (!txtFile) { toast('请先选择 LG 结果 txt', true); return; }
+      report.textContent = '上传并校验中…';
+      state.txtPath = await uploadFile(txtFile);
+      const mfFile = mfInput.files && mfInput.files[0];
+      if (mfFile) state.manifestPath = await uploadFile(mfFile);
+      const v = await post('/lg/verify', { bookKey, txtPath: state.txtPath, manifestPath: state.manifestPath || undefined });
+      if (v.globalError) {
+        applyBtn.disabled = true;
+        report.innerHTML = '<div class="bad">' + esc(v.globalError) + '</div>' +
+          '<div class="muted">结果 ' + v.linesIn + ' 行 / 清单 ' + v.linesTotal + ' 行</div>';
+        return;
+      }
+      const rows = (v.chapters || []).map((c) =>
+        '<div>' + (c.ok ? '<span class="ok">✓</span>' : '<span class="bad">✗</span>') + ' ' +
+        esc(c.title || c.chapterId) + '（' + c.count + ' 段）' + (c.ok ? '' : '：' + esc(c.reason)) + '</div>').join('');
+      report.innerHTML = '<div><b>校验：' + v.okCount + '/' + v.total + ' 章通过 · 疑似未翻 ' + v.untranslated + ' 行</b>（' + esc(v.note) + '）</div>' + rows;
+      applyBtn.disabled = !(v.okCount > 0);
+      toast('校验完成：' + v.okCount + '/' + v.total + ' 章通过');
+    } catch (e) { report.textContent = '校验失败：' + e.message; applyBtn.disabled = true; }
+  });
+  applyBtn.addEventListener('click', async () => {
+    try {
+      const limit = Math.max(0, Number(limitInput.value) || 0);
+      const r = await post('/run', { bookKey, job: 'lg-import', options: { txtPath: state.txtPath, manifestPath: state.manifestPath, limit } });
+      toast('已入队 lg-import（#' + r.id + '）；进度看「任务」页');
+    } catch (e) { toast(e.message, true); }
+  });
 }
 async function toggleProjectDetail(card) {
   const box = card.querySelector('.proj-detail');
@@ -504,7 +591,7 @@ async function loadSettings() {
     $('set-origin').value = (s.settings && s.settings.origin) || '';
     const serve = (s.settings && s.settings.serve) || {};
     $('conn-port').value = serve.port || 7331;
-    $('conn-origins').value = (serve.origins || []).join('\n');
+    $('conn-origins').value = (serve.origins || []).join('\\n');
     const ls = (s.settings && s.settings.lastSync) || null;
     $('conn-info').textContent = '当前监听 127.0.0.1:' + (serve.port || 7331) + ' · ' +
       (ls ? '上次同步 ' + new Date(ls.at).toLocaleString() + ' · ' + (ls.origin || '?') + ' · ' + (ls.ua || '?') +
@@ -580,7 +667,7 @@ $('origin-save').addEventListener('click', async () => {
 });
 $('conn-save').addEventListener('click', async () => {
   try {
-    const origins = $('conn-origins').value.split('\n').map((x) => x.trim()).filter(Boolean);
+    const origins = $('conn-origins').value.split('\\n').map((x) => x.trim()).filter(Boolean);
     await post('/settings', { serve: { port: Number($('conn-port').value) || 7331, origins } });
     toast('连接设置已保存（端口重启后生效）'); loadSettings();
   } catch (e) { toast(e.message, true); }

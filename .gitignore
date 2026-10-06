@@ -40,3 +40,5 @@ tools/.ab-fixture.txt
 daemon/work/
 daemon/.tmp-ws-root/
 daemon/.serve-port
+daemon/uploads/
+daemon/.tmp-*/

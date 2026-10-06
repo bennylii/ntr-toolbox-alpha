@@ -27,7 +27,7 @@ const { createSkillCatalog } = await imp('agent-skills.mjs');
 const { createAgentEvents } = await imp('agent-events.mjs');
 const { createJobQueue } = await imp('job-queue.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
-const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport } = await imp('lg-align.mjs');
+const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport, createLgImportRunner } = await imp('lg-align.mjs');
 const { createWorkspaceTools } = await imp('agent-workspace.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
@@ -1332,6 +1332,101 @@ await t('serve 端口持久化：config.serve.port + .serve-port 落盘（子进
   assert.equal(portOnDisk, 7371, '.serve-port 已写实际端口');
 });
 await t('清理：连接配置服务器', () => { connServer.close(); });
+
+const { UI_HTML } = await imp('ui.mjs');
+console.log('== LG 导入 GUI：/lg/export、/lg/upload、/lg/verify、/run lg-import ==');
+await t('/ui 内嵌脚本可解析（防 UI_HTML 模板字面量转义回归）', () => {
+  const html = UI_HTML;
+  const body = html.slice(html.indexOf('<script>') + 8, html.lastIndexOf('</script>'));
+  assert.ok(body.length > 1000, '脚本体存在');
+  // 注意：模板字面量里写 '\n' 会被外层吃掉成真换行 → 内嵌脚本语法错误（页面静默失效）
+  new Function(body);
+});const LGG_BOOK = `mock-trans-lg3-${RUN}`;
+store.upsertBook({ key: `web:mock/${LGG_BOOK}`, kind: 'web', providerId: 'mock', novelId: LGG_BOOK, origin: MOCK, title: 'LG GUI 测试' });
+const lgTmp = { exportsDir: path.join(here, '.tmp-lg-exports'), uploadsDir: path.join(here, '.tmp-lg-uploads') };
+for (const d of [lgTmp.exportsDir, lgTmp.uploadsDir]) fs.rmSync(d, { recursive: true, force: true });
+const lgRunner = createLgImportRunner({ store, makeClient, log: quiet });
+const lgQueue = createJobQueue({
+  resolveRunner: (job) => ({ glossary: glossaryPipeline, check: null, translate: mkPipeline({}), 'lg-import': lgRunner }[job]),
+  log: quiet,
+});
+const lgServer = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline, scheduler: setSched, agentScheduler: setAgSched, queue: lgQueue, makeClient, engine, port: 7372, log: quiet, lgImportRunner: lgRunner, lgDirs: lgTmp });
+const LG = 'http://127.0.0.1:7372';
+const lgPost = async (p, body) => fetch(LG + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, body: await r.json() }));
+let lgExport = null;
+await t('/lg/export：导出 txt + 清单落盘（测试目录）', async () => {
+  const r = await lgPost('/lg/export', { bookKey: `web:mock/${LGG_BOOK}` });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.linesTotal, 12, JSON.stringify(r.body));
+  assert.equal(r.body.chapters, 3);
+  assert.ok(r.body.file.startsWith(lgTmp.exportsDir), r.body.file);
+  assert.ok(fs.existsSync(r.body.file) && fs.existsSync(r.body.manifestFile), '两个文件都应存在');
+  lgExport = r.body;
+});
+await t('/lg/upload：内容落盘；扩展名白名单与越界路径被拒', async () => {
+  const manifest = JSON.parse(fs.readFileSync(lgExport.manifestFile, 'utf8'));
+  const resultText = fs.readFileSync(lgExport.file, 'utf8').split('\n').map((l) => `【译】${l}`).join('\n');
+  const up = await lgPost('/lg/upload', { filename: 'lg-result.txt', content: resultText });
+  assert.equal(up.status, 200, JSON.stringify(up.body));
+  assert.ok(up.body.path.startsWith(lgTmp.uploadsDir) && fs.existsSync(up.body.path), up.body.path);
+  globalThis.__lgResult = up.body.path;
+  const badExt = await lgPost('/lg/upload', { filename: 'evil.exe', content: 'x' });
+  assert.equal(badExt.status, 400, JSON.stringify(badExt.body));
+  const escape = await lgPost('/lg/verify', { bookKey: `web:mock/${LGG_BOOK}`, txtPath: 'C:/Windows/win.ini', manifestPath: lgExport.manifestFile });
+  assert.equal(escape.status, 400, JSON.stringify(escape.body));
+  assert.ok(/exports|uploads/.test(escape.body.error), escape.body.error);
+  assert.equal(manifest.linesTotal, 12);
+});
+await t('/lg/verify：全对齐 3/3；缺一行 → 全局拒绝', async () => {
+  const good = await lgPost('/lg/verify', { bookKey: `web:mock/${LGG_BOOK}`, txtPath: globalThis.__lgResult, manifestPath: lgExport.manifestFile });
+  assert.equal(good.status, 200, JSON.stringify(good.body));
+  assert.ok(!good.body.globalError, good.body.globalError);
+  assert.equal(good.body.okCount, 3, JSON.stringify(good.body));
+  assert.equal(good.body.untranslated, 0);
+  const shortText = fs.readFileSync(globalThis.__lgResult, 'utf8').split('\n').slice(0, -1).join('\n');
+  const shortUp = await lgPost('/lg/upload', { filename: 'short.txt', content: shortText });
+  const short = await lgPost('/lg/verify', { bookKey: `web:mock/${LGG_BOOK}`, txtPath: shortUp.body.path, manifestPath: lgExport.manifestFile });
+  assert.equal(short.status, 200, JSON.stringify(short.body));
+  assert.ok(/行数不符/.test(short.body.globalError), short.body.globalError);
+});
+await t('/run lg-import：入队 → 队列执行 → 逐章提交（limit=1 只传 t1）', async () => {
+  const run = await lgPost('/run', { bookKey: `web:mock/${LGG_BOOK}`, job: 'lg-import', options: { txtPath: globalThis.__lgResult, manifestPath: lgExport.manifestFile, limit: 1 } });
+  assert.equal(run.status, 202, JSON.stringify(run.body));
+  let item = null;
+  for (let i = 0; i < 60; i++) {
+    await new Promise((res) => setTimeout(res, 200));
+    item = lgQueue.get(run.body.id);
+    if (item && (item.state === 'done' || item.state === 'failed')) break;
+  }
+  assert.equal(item && item.state, 'done', JSON.stringify(item));
+  assert.equal(item.stats.uploaded, 1, JSON.stringify(item.stats));
+  const stats = await fetch(`${MOCK}/__stats`).then((r) => r.json());
+  assert.equal(stats.lastChapterUpload.chapterId, 't1', JSON.stringify(stats.lastChapterUpload));
+  const runs = store.listRuns(20).filter((r) => r.job === 'lg-import' && r.bookKey === `web:mock/${LGG_BOOK}`);
+  assert.ok(runs.length >= 1, 'runs 表应有 lg-import 记录');
+});
+await t('/run lg-import：全量提交 t2/t3；越界 options 被拒', async () => {
+  const bad = await lgPost('/run', { bookKey: `web:mock/${LGG_BOOK}`, job: 'lg-import', options: { txtPath: 'C:/Windows/win.ini', manifestPath: lgExport.manifestFile } });
+  assert.equal(bad.status, 400, JSON.stringify(bad.body));
+  const run = await lgPost('/run', { bookKey: `web:mock/${LGG_BOOK}`, job: 'lg-import', options: { txtPath: globalThis.__lgResult, manifestPath: lgExport.manifestFile, limit: 0 } });
+  assert.equal(run.status, 202, JSON.stringify(run.body));
+  let item = null;
+  for (let i = 0; i < 60; i++) {
+    await new Promise((res) => setTimeout(res, 200));
+    item = lgQueue.get(run.body.id);
+    if (item && (item.state === 'done' || item.state === 'failed')) break;
+  }
+  assert.equal(item && item.state, 'done', JSON.stringify(item));
+  assert.equal(item.stats.uploaded, 3, JSON.stringify(item.stats));
+  const stats = await fetch(`${MOCK}/__stats`).then((r) => r.json());
+  assert.equal(stats.lastChapterUpload.chapterId, 't3', JSON.stringify(stats.lastChapterUpload));
+});
+await t('清理：LG GUI 测试目录与服务器', () => {
+  lgServer.close();
+  fs.rmSync(lgTmp.exportsDir, { recursive: true, force: true });
+  fs.rmSync(lgTmp.uploadsDir, { recursive: true, force: true });
+  assert.ok(!fs.existsSync(lgTmp.exportsDir));
+});
 
 console.log(`\n通过 ${pass}，失败 ${fail}`);
 store.close();

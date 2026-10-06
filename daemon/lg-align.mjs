@@ -3,6 +3,8 @@
 // 写出 effective_dst() 逐行 join（空译文回退原文）→ 结果行数与行号和输入天然一致。
 // 对齐保证 = 配对使用 export-src（清单）→ LG 翻译 → import-lg（总行数 + 每章行数 + 空模式 + 源 sha1 校验）。
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const sha1 = (text) => crypto.createHash('sha1').update(String(text == null ? '' : text), 'utf8').digest('hex');
 
@@ -116,4 +118,86 @@ export async function verifyImport({ resultLines, manifest, getChapter }) {
     });
   }
   return { ok: okCount === out.length, globalError: '', chapters: out, untranslated, okCount, total: out.length };
+}
+
+// ---- GUI / CLI 共用：导出 / 应用 / 队列 runner ----
+// 导出原文+清单（outFile 缺省 = <exportsDir>/lg-src-<书名>.txt；同名覆盖）
+export async function exportBookSource(client, book, { outFile = '', exportsDir = '', onProgress = null } = {}) {
+  const chapters = await collectChapters(client, book, onProgress);
+  if (chapters.length === 0) throw Object.assign(new Error('没有可导出的章节'), { code: 'no_chapters' });
+  const built = buildSourceExport(chapters);
+  const safe = String(book.title || book.novelId).replace(/[/|\:*?"<>]/g, '').slice(0, 60) || book.novelId;
+  const file = outFile || path.join(exportsDir, `lg-src-${safe}.txt`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, built.text, 'utf8');
+  const manifestFile = `${file}.manifest.json`;
+  fs.writeFileSync(manifestFile, JSON.stringify(manifestOf(book, built), null, 2), 'utf8');
+  return {
+    file, manifestFile, linesTotal: built.linesTotal, chapters: built.chapters.length,
+    titles: chapters.map((c) => c.title || c.chapterId).slice(0, 50),
+  };
+}
+
+// 逐章提交（只传 ok 章；limit>0 限量）；上传契约与站点 GPT 工作区一致
+export async function applyImportReport(client, book, report, { limit = 0, onProgress = null } = {}) {
+  let uploaded = 0;
+  let failed = 0;
+  const results = [];
+  const okTotal = report.chapters.filter((c) => c.ok).length;
+  for (const c of report.chapters) {
+    if (!c.ok) continue;
+    if (limit > 0 && uploaded >= limit) break;
+    try {
+      await client.uploadChapter(book, c.chapterId, { glossaryId: c.glossaryId, paragraphsZh: c.paragraphsZh }, 'gpt', c.volumeId);
+      uploaded += 1;
+      results.push({ chapterId: c.chapterId, title: c.title || '', status: 'uploaded', count: c.count });
+      if (onProgress) onProgress(uploaded, c);
+    } catch (e) {
+      failed += 1;
+      results.push({ chapterId: c.chapterId, title: c.title || '', status: 'failed', error: String((e && e.message) || e).slice(0, 200) });
+    }
+  }
+  return { uploaded, failed, pending: okTotal - uploaded - failed, results };
+}
+
+// 队列 runner：读文件 → 校验 → 逐章提交；run 记录落库（任务页可见）
+export function createLgImportRunner({ store, makeClient, log = console }) {
+  return {
+    async runBook(bookKey, { options = {} } = {}) {
+      const { txtPath, manifestPath, limit = 0 } = options;
+      if (!txtPath || !manifestPath) throw Object.assign(new Error('lg-import 需要 options.txtPath 与 options.manifestPath'), { code: 'bad_options' });
+      const book = store.getBook(bookKey);
+      if (!book) throw new Error(`book 不存在：${bookKey}`);
+      const runId = store.startRun(bookKey, 'lg-import');
+      try {
+        const lines = splitResultLines(fs.readFileSync(txtPath, 'utf8'));
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        const client = makeClient(book);
+        const report = await verifyImport({
+          resultLines: lines,
+          manifest,
+          getChapter: (chapterId, volumeId) => client.getChapterTask(book, chapterId, 'gpt', volumeId),
+        });
+        if (report.globalError) throw new Error(report.globalError);
+        for (const c of report.chapters) {
+          if (!c.ok) log.log(`  ✗ ${c.title || c.chapterId}：${c.reason}`);
+        }
+        const applied = await applyImportReport(client, book, report, {
+          limit: Math.max(0, Number(limit) || 0),
+          onProgress: (n, c) => log.log(`  已提交 ${n}：${c.title || c.chapterId}`),
+        });
+        const stats = {
+          total: report.total, ok: report.okCount, untranslated: report.untranslated,
+          uploaded: applied.uploaded, failed: applied.failed, pending: applied.pending,
+        };
+        store.finishRun(runId, applied.uploaded === 0 && applied.failed > 0 ? 'failed' : 'done', stats);
+        return {
+          stats: { ...stats, results: applied.results.slice(0, 100) },
+        };
+      } catch (e) {
+        store.finishRun(runId, 'failed', { error: (e && e.message) || String(e) });
+        throw e;
+      }
+    },
+  };
 }
