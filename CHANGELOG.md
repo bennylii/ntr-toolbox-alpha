@@ -2,9 +2,9 @@
 
 All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 
-## 未发布（v0.8.0-alpha.2-dev）
+## v0.8.0-alpha.2（2026-10-07）
 
-自 v0.8.0-alpha.1 之后的增量（均已合入 main，未打 tag）：
+自 v0.8.0-alpha.1 之后的增量：
 
 ### 用户脚本
 
