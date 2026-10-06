@@ -17,7 +17,7 @@ expire/normal/all 档位、`oldGlossaryId === glossaryId` 跳过），并修复�
 ```
 node daemon/index.mjs add       <novel-url>        # 登记（/novel/{provider}/{id} 或 /wenku/{id}）
 node daemon/index.mjs run       [--book key]       # 术语管线：提取→核实→回扫→直写/提案（含快照）
-node daemon/index.mjs check     [--book key] [--codes A,B] [--limit N] [--propose] [--tsv]   # 质检：七码报告
+node daemon/index.mjs check     [--book key] [--codes A,B] [--limit N] [--propose] [--tsv]   # 质检：七码报告（v2 对齐 LG；结果落 warnings 表）
 node daemon/index.mjs rules     list|add|rm|enable|disable   # 文本处理链规则（pre/post 替换、保留段）
 node daemon/index.mjs prompt    show|set|clear               # 提示词模板（prefix/base/thinking/suffix）
 node daemon/index.mjs glossary-io import|export              # LG 术语表互通（JSON；写站点=快照+回读校验）
@@ -102,7 +102,7 @@ node daemon/index.mjs forget    <bookKey>
   - 目录：`daemon/work/<sessionId>/`（已 gitignore）；通用会话（未绑书）没有工作区。
 - **审批**：默认 manual —— 标记 `requiresApproval` 的工具（写术语表/回滚/改规则与提示词等）会挂起为 decision，CLI 里 y/N 确认；`--auto` 跳过审批（等价 auto 模式）。追问（`ask_user`）同样是 decision。
 - **工具（A1–A3）**：
-  - 只读（自动）：`list_books`、`book_status`、`read_book`（按行窗口）、`read_translations`（对齐对窗口）、`list_proposals`、`list_snapshots`、`quality_report`、`list_skills`、`read_skill`、`export_glossary`、`export_lg_source`（站点原文 → LG 纯文本+清单）；
+  - 只读（自动）：`list_books`、`book_status`、`read_book`（按行窗口）、`read_translations`（对齐对窗口）、`list_proposals`、`list_snapshots`、`quality_report`、`list_warnings`（读落库的质检警告：摘要+明细+证据）、`list_skills`、`read_skill`、`export_glossary`、`export_lg_source`（站点原文 → LG 纯文本+清单）；
   - 执行（需审批）：`run_translate`（补翻并上传译文）、`run_glossary`（术语管线，可能直写）、`run_check`（只读质检，自动）；
   - 写入（需审批）：`glossary_apply`（快照+全量替换+回读校验）、`glossary_rollback`（回滚前自动再存快照）、`import_glossary`（LG JSON；regex 条目入本地规则且默认禁用）、`import_lg_result`（LG 译文结果导入 GPT 端，preview=完整校验报告）；`set_rule`/`delete_rule`、`set_prompt`；`close_proposal` 为本地状态、自动执行；
   - 交互：`doing`（进度）、`ask_user`（追问）。
@@ -133,6 +133,12 @@ node daemon/index.mjs forget    <bookKey>
 - 硬不变量：行数不变、占位符不得残留、还原失败该行回退原文；
 - 处理链版本参与段缓存键：规则改动自动失效旧缓存；
 - 管理：`node daemon/index.mjs rules add --kind post_replacement --pattern '【模拟译】' --replace '【译】' [--book key] [--regex] [--cs] [--priority N]`、`rules list|rm <id>|enable <id>|disable <id>`。
+
+## 质检（check）
+
+- **七码**（规格 `docs/cleanroom/spec-07`，v2 对齐 LinguaGacha）：`FOREIGN_CHAR_RESIDUE`（字素分割+书写系统分类，输出片段证据；短大写缩写豁免）/ `SIMILARITY`（原始文本包含或字符集 Jaccard > 0.8；JA→ZH 需残留证据护栏）/ `LINE_COUNT_MISMATCH` / `GLOSSARY`（术语未落地，scanAcceptance 语义）/ `TEXT_PRESERVE`（保留段实装：按处理链同款规则提取两侧片段逐位比对，带证据）/ `PUNCTUATION_MISMATCH`（标点组序列，顺序敏感）/ `RETRY_THRESHOLD`（章级重试 ≥2，纯提示）；
+- **运行**：`check` 任务（CLI / 任务页 / `/run job=check`）、agent `run_check`·`quality_report`；全部确定性启发式、无 LLM、不写站点（`--propose` 仅把样例转提案，`--tsv` 导表）；
+- **警告落库**：每次 check **全量替换**该书 `warnings` 表（章节/行号/码/细节/证据 JSON）；消费面：`GET /warnings?book=&code=&limit=`、agent 只读工具 `list_warnings`、工作区数据集 `warnings/entries.jsonl`、控制台项目详情（按码计数 + 前 20 条）。
 
 ## 提示词模板
 

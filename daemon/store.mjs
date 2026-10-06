@@ -66,6 +66,11 @@ CREATE TABLE IF NOT EXISTS usage (
 );
 CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS locks (bookKey TEXT PRIMARY KEY, holder TEXT, at INTEGER);
+CREATE TABLE IF NOT EXISTS warnings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, bookKey TEXT, chapterId TEXT, lineNo INTEGER,
+  code TEXT, detail TEXT, evidenceJson TEXT, runId INTEGER, at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_warnings_book ON warnings(bookKey, code);
 `;
 
 const LOCK_TTL_MS = 6 * 60 * 60 * 1000;   // 锁超过 6 小时视为残留（崩溃遗留），可被接管
@@ -294,6 +299,41 @@ export class Store {
   }
   listChapterMeta(bookKey) {
     return this.db.prepare('SELECT * FROM chaptermeta WHERE bookKey = ?').all(bookKey);
+  }
+
+  // ---- 质检警告（check 任务全量替换；供 /warnings、agent 工具与工作区数据集消费） ----
+  replaceWarnings(bookKey, runId, rows) {
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare('DELETE FROM warnings WHERE bookKey = ?').run(bookKey);
+      const insert = this.db.prepare('INSERT INTO warnings(bookKey, chapterId, lineNo, code, detail, evidenceJson, runId, at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)');
+      const now = Date.now();
+      for (const w of rows || []) {
+        insert.run(bookKey, String(w.chapterId || ''), Number(w.lineNo) || 0, String(w.code || ''),
+          String(w.detail || ''), w.evidence ? JSON.stringify(w.evidence) : '', Number(runId) || 0, now);
+      }
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+    return (rows || []).length;
+  }
+  listWarnings(bookKey, { code = '', limit = 200, offset = 0 } = {}) {
+    const lim = Math.max(1, Math.min(5000, Math.floor(Number(limit) || 200)));
+    const off = Math.max(0, Math.floor(Number(offset) || 0));
+    const rows = code
+      ? this.db.prepare('SELECT * FROM warnings WHERE bookKey = ? AND code = ? ORDER BY chapterId, lineNo, id LIMIT ? OFFSET ?').all(bookKey, code, lim, off)
+      : this.db.prepare('SELECT * FROM warnings WHERE bookKey = ? ORDER BY chapterId, lineNo, id LIMIT ? OFFSET ?').all(bookKey, lim, off);
+    return rows.map((r) => ({ ...r, evidence: r.evidenceJson ? JSON.parse(r.evidenceJson) : null }));
+  }
+  warningSummary(bookKey) {
+    const rows = this.db.prepare('SELECT code, COUNT(*) AS n FROM warnings WHERE bookKey = ? GROUP BY code').all(bookKey);
+    const counts = {};
+    let total = 0;
+    for (const r of rows) { counts[r.code] = r.n; total += r.n; }
+    const at = this.db.prepare('SELECT MAX(at) AS at FROM warnings WHERE bookKey = ?').get(bookKey);
+    return { total, counts, at: (at && at.at) || 0 };
   }
 
   // ---- 快照（写回前自动留存，回滚用） ----

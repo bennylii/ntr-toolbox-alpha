@@ -46,19 +46,40 @@ export class CheckPipeline {
       for (const row of this.store.listChapterMeta(bookKey)) {
         if ((row.retries || 0) >= 2) retriesByChapter[row.chapterKey] = row.retries;
       }
+      // TEXT_PRESERVE 实装后需要真实规则（全局 + 本书；enabled 由 compileRules 过滤由 collectPreserveSegments 内部完成）
+      const preserveRules = this.store.listRules(bookKey).filter((r) => r.kind === 'text_preserve');
+      // 警告落库：行号 = 该章内配对序号（1 基）；-1 表示整书级（如缺译标记）
+      const lineNos = [];
+      const perChapter = {};
+      for (const p of aligned.pairs || []) {
+        const ch = p.chapterId || '';
+        perChapter[ch] = (perChapter[ch] || 0) + 1;
+        lineNos.push(perChapter[ch]);
+      }
+      const warningRows = [];
       const report = checkAligned({
         pairs: aligned.pairs,
         glossary,
         engine: this.engine,
-        rules: [],   // P3 接入 text_preserve 规则后生效
+        rules: preserveRules,
         translationMissing: aligned.translationMissing || 0,
         retriesByChapter,
         limit: Math.max(1, Number(opt.limit) || 50),
         codes: Array.isArray(opt.codes) && opt.codes.length > 0 ? opt.codes : null,
+        onHit: (pairIndex, hit, pair) => {
+          warningRows.push({
+            chapterId: pairIndex >= 0 ? ((pair && pair.chapterId) || '') : '',
+            lineNo: pairIndex >= 0 ? (lineNos[pairIndex] || 0) : 0,
+            code: hit.code,
+            detail: hit.detail || '',
+            evidence: hit.evidence || null,
+          });
+        },
       });
+      const stored = this.store.replaceWarnings(bookKey, runId, warningRows);
       const hits = Object.values(report.codes).reduce((a, b) => a + b, 0);
       const summary = Object.entries(report.codes).map(([k, v]) => `${k}=${v}`).join(' ') || '无';
-      this.log.log(`[check] 配对 ${report.pairs}（缺译 ${report.translationMissing}）：命中 ${hits}（${summary}）`);
+      this.log.log(`[check] 配对 ${report.pairs}（缺译 ${report.translationMissing}）：命中 ${hits}（${summary}）；警告落库 ${stored} 条`);
 
       const stats = {
         translator: opt.translator,
@@ -66,6 +87,7 @@ export class CheckPipeline {
         translationMissing: report.translationMissing,
         codes: report.codes,
         hits,
+        warningsStored: stored,
         samples: report.samples,
         requests: 0,
         ms: Date.now() - t0,

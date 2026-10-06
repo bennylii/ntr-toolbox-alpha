@@ -31,11 +31,26 @@
 
 ## 4. 刻意差异（与 LG）
 
-- 不做 grapheme 级 `Intl.Segmenter` 分类（改用正则；CJK 场景足够，且 Node 环境无需 ICU 假设）。
-- 不做交互式校对页/过滤 UI；报告落库与 CLI 输出 TSV（`--tsv` 输出到 stdout）。
+- ~~不做 grapheme 级 `Intl.Segmenter` 分类~~ → **v2 已对齐**（见下节 §6）。
+- 不做交互式校对页/过滤 UI；报告落库与 CLI 输出 TSV（`--tsv` 输出到 stdout）；警告落库与控制台明细见 §6。
 - 不警告「术语用错」（dst 出现在 zh 但 src 未出现）——站点指南不做反向控制。
 
 ## 5. 等价验证
 
 - 纯函数用例（`daemon/quality-test.mjs` 或并入 translate-test）：每码至少 2 例（命中/不命中），含假名残留、CJK 引号、Jaccard 边界（0.79/0.81）、全角空白归一。
 - 端到端：mock（`mock-trans*` 家族，web 族可造缺失行/漏译样例）+ daemon-test 断言报告码计数与样例数。
+
+## 6. v2 算法升级（对齐 LinguaGacha，2026-10）
+
+上述 §2 的 2/3/5/6 号码判定更新为 LG 同款算法（确定性启发式，无 LLM）：
+
+- `FOREIGN_CHAR_RESIDUE`：**字素分割（`Intl.Segmenter`）+ 书写系统分类**（`\p{Script_Extensions=Han}` 允许，其余字母脚本=残留）；拉丁短串豁免（单字素 或 `^[A-Z]{2,4}$`，混其它脚本残留时不豁免）；相邻残留合并为片段（`fragments` 证据）。取代「假名 + 汉字占比 <50%」启发式——**任何量的假名夹杂现在都会告警**（LG 语义）。
+- `SIMILARITY`：trim 后**原始文本**双向包含 或字符集 Jaccard > 0.8；新增 **JA→ZH 护栏**——命中后还需 `FOREIGN_CHAR_RESIDUE` 有片段证据才最终触发（防汉字-heavy 的合法直译误报；`requireResidueEvidence:false` 可关）。
+- `PUNCTUATION_MISMATCH`：**标点组序列**逐位比对（引号变体合并为一组；圆/方/花括号与书名号开闭分明、顺序敏感）；不再有「句末标点」单项检查（LG 无此项）。
+- `TEXT_PRESERVE`（**实装**）：两侧按处理链同款规则（`collectPreserveSegments`，priority 顺序、占位替换防重叠）提取受保护片段，逐位比对；不等返回 `{sourceFragments, translationFragments}` 证据。此前为空实现（恒不触发）。
+
+警告持久化与消费（v2 新增）：
+
+- `warnings` 表（bookKey/chapterId/lineNo/code/detail/evidenceJson/runId/at）：每次 check **全量替换**该书落库（onHit 全量采集，不受 `--codes` 报告过滤影响）；lineNo = 该章内配对序号（1 基），整书级命中为 0。
+- 端点 `GET /warnings?book=&code=&limit=`（摘要 + 明细）；agent 只读工具 `list_warnings`；工作区数据集 `warnings/entries.jsonl`（agent 的 item-review 式流程可用）；控制台项目详情显示按码计数与前 20 条。
+- 消费方式与 LG 的差异：LG 校对结果只驻内存 + 导出前摘要 + 校对页；我们**落库**（SQLite）供端点/工具/工作区复用，重跑 check 即刷新。

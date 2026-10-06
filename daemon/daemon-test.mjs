@@ -228,21 +228,36 @@ await t('控制面：/auth 热更新 workers、/run 单队列串行', async () =
 
 console.log('== 质检（check job） ==');
 const CHECK_KEY = `web:mock/mock-check-${RUN}`;
-await t('check：mock-check 出报告（七码计数与样例）', async () => {
+await t('check：mock-check 出报告（v2 计数与样例 + 警告落库）', async () => {
   store.upsertBook({ key: CHECK_KEY, kind: 'web', providerId: 'mock', novelId: `mock-check-${RUN}`, origin: MOCK, title: '' });
   const cp = new CheckPipeline({ store, engine, makeClient, log: quiet });
   const r = await cp.runBook(CHECK_KEY);
   assert.equal(r.stats.pairs, 6, JSON.stringify(r.stats));
   assert.deepEqual(r.stats.codes, {
-    GLOSSARY: 1,
     FOREIGN_CHAR_RESIDUE: 1,
     SIMILARITY: 1,
-    PUNCTUATION_MISMATCH: 1,
+    GLOSSARY: 1,
     LINE_COUNT_MISMATCH: 1,
   }, JSON.stringify(r.stats.codes));
-  assert.ok(r.stats.samples.length >= 5, JSON.stringify(r.stats.samples.length));
+  assert.ok(r.stats.samples.length >= 4, JSON.stringify(r.stats.samples.length));
+  assert.equal(r.stats.warningsStored, 4, JSON.stringify(r.stats));
   const runs = store.listRuns(10).filter((x) => x.job === 'check');
   assert.ok(runs.length >= 1 && runs[0].stats.codes, JSON.stringify(runs.map((x) => x.job)));
+});
+await t('check：警告落库可查（summary + 明细 + 重跑全量替换）', async () => {
+  const summary = store.warningSummary(CHECK_KEY);
+  assert.equal(summary.total, 4, JSON.stringify(summary));
+  assert.equal(summary.counts.GLOSSARY, 1, JSON.stringify(summary.counts));
+  const rows = store.listWarnings(CHECK_KEY, { limit: 50 });
+  assert.equal(rows.length, 4);
+  const g = rows.find((w) => w.code === 'GLOSSARY');
+  assert.ok(g && g.lineNo >= 1 && g.detail === 'ローズ', JSON.stringify(g));
+  const residue = rows.find((w) => w.code === 'FOREIGN_CHAR_RESIDUE');
+  assert.ok(residue && residue.evidence && Array.isArray(residue.evidence.fragments), JSON.stringify(residue));
+  // 重跑（只过滤 GLOSSARY）→ 落库仍为全量（onHit 不受 codes 过滤）
+  const cp = new CheckPipeline({ store, engine, makeClient, log: quiet });
+  await cp.runBook(CHECK_KEY, { options: { codes: ['GLOSSARY'] } });
+  assert.equal(store.warningSummary(CHECK_KEY).total, 4, JSON.stringify(store.warningSummary(CHECK_KEY)));
 });
 await t('check：--propose 出 quality 提案、--codes 过滤', async () => {
   const cp = new CheckPipeline({ store, engine, makeClient, log: quiet });
@@ -565,6 +580,15 @@ await t('quality_report：对 mock-check 出七码报告（只读）', async () 
   const parsed = await runToolOnce('quality_report', { book: CHECK_KEY, limit: 5 }, { books: true });
   assert.ok(parsed.result.codes.GLOSSARY >= 1, JSON.stringify(parsed.result.codes));
   assert.ok(parsed.result.samples.length >= 1);
+});
+await t('list_warnings：读落库警告（摘要 + 明细 + 证据；无需重跑）', async () => {
+  const parsed = await runToolOnce('list_warnings', { book: CHECK_KEY, limit: 10 }, { books: true });
+  assert.equal(parsed.result.summary.total, 4, JSON.stringify(parsed.result.summary));
+  assert.equal(parsed.result.summary.counts.GLOSSARY, 1, JSON.stringify(parsed.result.summary));
+  const g = parsed.result.warnings.find((w) => w.code === 'GLOSSARY');
+  assert.ok(g && g.detail === 'ローズ' && g.lineNo >= 1, JSON.stringify(g));
+  const residue = parsed.result.warnings.find((w) => w.code === 'FOREIGN_CHAR_RESIDUE');
+  assert.ok(residue && residue.evidence && Array.isArray(residue.evidence.fragments), JSON.stringify(residue));
 });
 await t('read_skill / list_skills：技能目录注入与读取（含 references 防护）', async () => {
   const list = await runToolOnce('list_skills', {}, { books: true });
@@ -1203,6 +1227,7 @@ await t('run：脚本读数据集 + ws.doing + ws.read 章节 + 写变更文件'
   assert.ok(fs.existsSync(path.join(WS_ROOT, 'ws-test-session', 'changes', 'rules', 'creates.jsonl')), '变更文件已写');
   assert.ok(fs.existsSync(path.join(WS_ROOT, 'ws-test-session', 'contract.json')), '契约已落盘');
   assert.ok(fs.existsSync(path.join(WS_ROOT, 'ws-test-session', 'reference', 'workspace.md')), '参考文档已生成');
+  assert.ok(fs.existsSync(path.join(WS_ROOT, 'ws-test-session', 'warnings', 'entries.jsonl')), 'warnings 数据集已生成');
 });
 await t('沙箱：写工作区外 / 子进程 被权限模型拒绝', async () => {
   const record = await wsRunTool.execute({ script: [
@@ -1421,6 +1446,13 @@ await t('/run lg-import：全量提交 t2/t3；越界 options 被拒', async () 
   assert.equal(item.stats.uploaded, 3, JSON.stringify(item.stats));
   const stats = await fetch(`${MOCK}/__stats`).then((r) => r.json());
   assert.equal(stats.lastChapterUpload.chapterId, 't3', JSON.stringify(stats.lastChapterUpload));
+});
+await t('GET /warnings：质检警告端点（摘要 + 明细）', async () => {
+  const r = await fetch(`${LG}/warnings?book=${encodeURIComponent(CHECK_KEY)}&limit=10`).then((x) => x.json());
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.summary.total, 4, JSON.stringify(r.summary));
+  assert.equal(r.warnings.length, 4);
+  assert.ok(r.warnings.every((w) => w.code && w.chapterId !== undefined), JSON.stringify(r.warnings));
 });
 await t('清理：LG GUI 测试目录与服务器', () => {
   lgServer.close();

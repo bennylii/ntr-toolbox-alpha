@@ -91,6 +91,15 @@ const markPreserves = (rule, text, ctx) => {
   return text.replace(new RegExp(escapeRegExp(rule.pattern), 'gi'), mark);
 };
 
+// 提取受保护片段（与处理链同款匹配语义：同名同参、按 priority 顺序、占位替换防重叠）——质检 TEXT_PRESERVE 复用
+export function collectPreserveSegments(text, rules = []) {
+  const compiled = compileRules(rules).list.filter((r) => r.kind === 'text_preserve');
+  const ctx = { source: '', resources: [], preserves: [] };
+  let out = String(text == null ? '' : text);
+  for (const rule of compiled) out = markPreserves(rule, out, ctx);
+  return ctx.preserves.slice();
+}
+
 // 标点稳定化：jp 句末标点 → zh 半角转全角（jp-end）；full 模式恒转
 const applyPunctuation = (sourceLine, zhLine, mode) => {
   if (mode === 'off' || !zhLine) return zhLine;

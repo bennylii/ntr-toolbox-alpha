@@ -55,6 +55,7 @@ const DATASETS = {
   progress: { path: 'progress/entries.jsonl', format: 'jsonl', purpose: '章节进度（chapterKey/state/glossaryUuid）' },
   rules: { path: 'rules/entries.jsonl', format: 'jsonl', purpose: '文本处理链规则（全局 + 当前项目，行内带 fp）' },
   glossary: { path: 'glossary/entries.jsonl', format: 'jsonl', purpose: '站点术语表快照（src/dst/info，行内带 fp）' },
+  warnings: { path: 'warnings/entries.jsonl', format: 'jsonl', purpose: '最近一次 check 落库的质检警告（chapterId/lineNo/code/detail/evidence；只读，重跑 check 后更新）' },
   prompts: { path: 'prompts.json', format: 'json', purpose: '全局提示词模板四槽（text/fp，null=默认）' },
   runs: { path: 'runs/entries.jsonl', format: 'jsonl', purpose: '最近 50 次 run（id/job/state/stats）' },
 };
@@ -102,7 +103,7 @@ async function ensureWorkspace(ctx, { freshChanges = false } = {}) {
   const deps = ctx.deps || {};
   if (!deps.workspaceRoot) throw Object.assign(new Error('工作区根未装配（workspaceRoot）'), { code: 'deps_unavailable' });
   const root = path.join(deps.workspaceRoot, String(ctx.sessionId || 'anon'));
-  for (const dir of ['progress', 'rules', 'glossary', 'runs', 'reference', 'changes/rules', 'changes/glossary', 'changes/prompts', path.join('work', 'runs')]) {
+  for (const dir of ['progress', 'rules', 'glossary', 'warnings', 'runs', 'reference', 'changes/rules', 'changes/glossary', 'changes/prompts', path.join('work', 'runs')]) {
     fs.mkdirSync(path.join(root, dir), { recursive: true });
   }
   const store = ctx.store;
@@ -144,6 +145,7 @@ async function ensureWorkspace(ctx, { freshChanges = false } = {}) {
   writeJsonl('progress/entries.jsonl', progressRows);
   writeJsonl('rules/entries.jsonl', ruleRows);
   writeJsonl('glossary/entries.jsonl', glossaryRows);
+  writeJsonl('warnings/entries.jsonl', bookKey ? store.listWarnings(bookKey, { limit: 2000 }) : []);
   writeJsonl('runs/entries.jsonl', runRows);
   fs.writeFileSync(path.join(root, 'prompts.json'), JSON.stringify(promptRows, null, 2), 'utf8');
   const contract = {
@@ -502,7 +504,7 @@ export function createWorkspaceTools() {
         'CodeAct：执行一段 JavaScript（ESM）脚本完成程序化数据处理（读取/分页/筛选/关联/去重/聚合/检查/准备变更清单）。',
         '每次调用启动独立沙箱 Node 进程（--permission）：可读整个工作区、可写 changes/ 与 work/，禁止子进程/worker/原生扩展，网络可用，120s 超时 SIGKILL。',
         '全局对象 ws：ws.contract（契约，含数据集路径与变更 schema）；await ws.doing(text) 汇报进度；await ws.read({kind:"read", subkind:"chapter", chapterId, volumeId?}) 读章节 {paragraphJp, oldParagraphZh, glossaryId}。',
-        '数据集文件（JSONL，行内带 fp）：project_meta.json、progress/entries.jsonl、rules/entries.jsonl、glossary/entries.jsonl、prompts.json、runs/entries.jsonl；详见 reference/workspace.md。',
+        '数据集文件（JSONL，行内带 fp）：project_meta.json、progress/entries.jsonl、rules/entries.jsonl、glossary/entries.jsonl、warnings/entries.jsonl、prompts.json、runs/entries.jsonl；详见 reference/workspace.md。',
         '要提交修改时：把变更行写入 changes/<域>/<op>.jsonl（schema 见 ws.contract.changes），再用 workspace_apply 提交。跨调用数据放 work/ 下文件。',
         '返回：{scriptPath, exitCode, signal, stdout:{path,bytes,content?}, stderr:{...}}（单流超 64KiB 只给路径）。',
       ].join('\n'),

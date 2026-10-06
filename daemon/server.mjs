@@ -308,6 +308,18 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         send(200, { ok: true, proposals: store.listProposals(url.searchParams.get('book')) });
         return;
       }
+      if (req.method === 'GET' && url.pathname === '/warnings') {
+        const book = String(url.searchParams.get('book') || '');
+        if (!book) { send(400, { ok: false, error: '缺少 book' }); return; }
+        const code = String(url.searchParams.get('code') || '');
+        const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get('limit')) || 200));
+        send(200, {
+          ok: true,
+          summary: store.warningSummary(book),
+          warnings: store.listWarnings(book, { code, limit }),
+        });
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/snapshots') {
         send(200, { ok: true, snapshots: store.listSnapshots(url.searchParams.get('book') || '') });
         return;

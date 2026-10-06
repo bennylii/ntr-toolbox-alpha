@@ -1,8 +1,8 @@
-// daemon/quality-test.mjs —— 质检纯函数单测（无需 mock；engine 仅用于术语落地检查）
+// daemon/quality-test.mjs —— 质检纯函数单测（算法 v2，对齐 LinguaGacha；engine 仅用于术语落地检查）
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { checkPair, checkAligned, foreignResidue, similarityWarning, punctuationMismatch, jaccard } from './quality.mjs';
+import { checkPair, checkAligned, foreignResidue, foreignResidueFragments, similarityWarning, punctuationMismatch, preserveMisses, jaccard } from './quality.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const { loadEngine } = await import(pathToFileURL(path.join(here, 'engine.mjs')).href);
@@ -14,26 +14,69 @@ const t = (name, fn) => {
   try { fn(); pass += 1; console.log('  ok  ' + name); } catch (e) { fail += 1; console.log('FAIL  ' + name + '\n      ' + (e && e.message)); }
 };
 
-console.log('== 质检：源语言残留（FOREIGN_CHAR_RESIDUE） ==');
+console.log('== 质检：源语言残留（FOREIGN_CHAR_RESIDUE，v2 字素+书写系统分类） ==');
 t('全假名行 → 命中', () => assert.equal(foreignResidue('オルトは大声で叫んだ。'), true));
 t('中文行 → 不命中', () => assert.equal(foreignResidue('阿尔蒂拔出了剑。'), false));
-t('中文为主夹杂少量假名 → 不命中', () => assert.equal(foreignResidue('阿尔蒂说了声「はい」，然后拔出了剑。'), false));
-t('英文行 → 不命中', () => assert.equal(foreignResidue('Alice drew her sword.'), false));
+t('中文夹假名（任何量）→ 命中（LG：非目标脚本即残留）', () => assert.equal(foreignResidue('阿尔蒂说了声「はい」，然后拔出了剑。'), true));
+t('英文整行 → 命中（未翻译残留）', () => assert.equal(foreignResidue('Alice drew her sword.'), true));
+t('短大写缩写豁免：OK / ABC → 不命中', () => {
+  assert.equal(foreignResidue('他说 OK。'), false);
+  assert.equal(foreignResidue('代号 ABC 行动。'), false);
+});
+t('超长/带小写拉丁串 → 命中（OpenAI / Hello）', () => {
+  assert.deepEqual(foreignResidueFragments('用了 OpenAI 的接口。'), ['OpenAI']);
+  assert.deepEqual(foreignResidueFragments('她说 Hello。'), ['Hello']);
+});
+t('单字素拉丁豁免，但混其它脚本不豁免：A 不报 / Aあ 报', () => {
+  assert.equal(foreignResidue('编号 A。'), false);
+  assert.deepEqual(foreignResidueFragments('编号 Aあ。'), ['Aあ']);
+});
+t('西里尔文残留 → 命中（中文行里的非目标脚本）', () => assert.equal(foreignResidue('他说 Привет。'), true));
+t('相邻残留合并为片段证据', () => assert.deepEqual(foreignResidueFragments('他说 はい、そう です。'), ['はい', 'そう', 'です']));
 
-console.log('== 质检：相似度（SIMILARITY） ==');
-t('完全相同（≥8 字）→ 命中', () => assert.equal(similarityWarning('オルトは大声で叫んだ。', 'オルトは大声で叫んだ。'), true));
-t('一方包含另一方 → 命中', () => assert.equal(similarityWarning('アリスは魔導書を読んだ。', 'アリスは魔導書を読んだ、そして笑った。'), true));
+console.log('== 质检：相似度（SIMILARITY，v2 原始文本 + JA→ZH 残留护栏） ==');
+t('完全相同 → 命中（有残留证据）', () => assert.equal(similarityWarning('オルトは大声で叫んだ。', 'オルトは大声で叫んだ。'), true));
+t('原始文本包含（一方是另一方前缀）→ 命中', () => assert.equal(similarityWarning('アリスは魔導書を読んだ。', 'アリスは魔導書を読んだ。そして笑った。'), true));
 t('正常译文 → 不命中', () => assert.equal(similarityWarning('アリスは魔導書を読んだ。', '爱丽丝读了魔导书。'), false));
+t('JA→ZH 护栏：汉字-heavy 相似但无残留 → 不命中', () => {
+  // 相似度命中（包含关系）但译文无残留证据 → 视为合法直译，不报（LG 同款策略）
+  assert.equal(similarityWarning('魔王城門前', '魔王城門前立'), false);
+});
+t('护栏可关（requireResidueEvidence:false）→ 报', () => {
+  assert.equal(similarityWarning('魔王城門前', '魔王城門前立', { requireResidueEvidence: false }), true);
+});
 t('Jaccard 边界：0.818 命中 / 0.667 不命中', () => {
   assert.ok(jaccard('ABCDEFGHIJ', 'ABCDEFGHIX') > 0.8);
   assert.ok(jaccard('ABCDEFGHIJ', 'ABCDEFGHXY') <= 0.8);
 });
 
-console.log('== 质检：标点（PUNCTUATION_MISMATCH） ==');
-t('句末标点缺失 → 命中', () => assert.equal(punctuationMismatch('彼女は静かに言った。', '她静静地低语'), true));
-t('两侧句末标点齐 → 不命中', () => assert.equal(punctuationMismatch('魔王が現れた。', '魔王出现了。'), false));
+console.log('== 质检：标点（PUNCTUATION_MISMATCH，v2 组序列） ==');
+t('句末标点差异但结构一致 → 不命中（LG：只比结构）', () => assert.equal(punctuationMismatch('彼女は静かに言った。', '她静静地低语'), false));
 t('引号不平衡 → 命中', () => assert.equal(punctuationMismatch('「おはよう」', '「早上好'), true));
 t('对话行收尾引号一致 → 不命中', () => assert.equal(punctuationMismatch('「おはよう」', '「早上好」'), false));
+t('引号变体（「」→“”）→ 不命中（LG 已知取舍）', () => assert.equal(punctuationMismatch('「おはよう」', '“早上好”'), false));
+t('括号类型变化（数量同、类别不同）→ 命中', () => assert.equal(punctuationMismatch('（甲）', '【甲】'), true));
+t('结构数量不同 → 命中', () => assert.equal(punctuationMismatch('「甲」と「乙」', '「甲乙」'), true));
+
+console.log('== 质检：保留段（TEXT_PRESERVE，v2 实装） ==');
+const PRESERVE_RULES = [{ kind: 'text_preserve', pattern: '<br>', regex: false, case_sensitive: true, priority: 100 }];
+t('无规则 → 不检查（null）', () => assert.equal(preserveMisses('甲<br>乙', '甲乙', []), null));
+t('保留段完整 → 通过（null）', () => assert.equal(preserveMisses('甲<br>乙', '丙<br>丁', PRESERVE_RULES), null));
+t('保留段丢失 → 命中并带证据', () => {
+  const r = preserveMisses('甲<br>乙', '甲乙', PRESERVE_RULES);
+  assert.ok(r && r.sourceFragments.length === 1 && r.sourceFragments[0] === '<br>', JSON.stringify(r));
+  assert.equal(r.translationFragments.length, 0);
+});
+t('保留段数量变化 → 命中', () => assert.ok(preserveMisses('甲<br>乙', '丙<br>丁<br>戊', PRESERVE_RULES)));
+t('正则规则同款语义（priority 顺序、重叠规避）', () => {
+  const rules = [{ kind: 'text_preserve', pattern: '\\{\\{[^}]+\\}\\}', regex: true, priority: 10 }];
+  assert.equal(preserveMisses('前{{A}}后', '前{{A}}后', rules), null);
+  assert.ok(preserveMisses('前{{A}}后', '前后', rules));
+});
+t('checkPair 集成：保留段丢失 → TEXT_PRESERVE 码', () => {
+  const r = checkPair({ jp: '甲<br>乙', zh: '甲乙' }, { rules: PRESERVE_RULES });
+  assert.ok(r.codes.includes('TEXT_PRESERVE'), JSON.stringify(r));
+});
 
 console.log('== 质检：术语落地 / 缺译 / 重试 ==');
 t('术语未落地 → GLOSSARY（带命中术语）', () => {
@@ -70,30 +113,36 @@ const FIXTURE = (() => {
   ];
   const text = jp.join('\n');
   const parsed = engine.parseParallelText(text);
+  const hits = [];
   const report = checkAligned({
     pairs: parsed.pairs,
     glossary: { 'アルテ': '阿尔蒂 #女性', 'ローズ': '罗丝琳 #女性' },
     engine,
     translationMissing: parsed.translationMissing,
     limit: 8,
+    onHit: (pairIndex, hit, pair) => hits.push({ pairIndex, code: hit.code, chapterId: pair && pair.chapterId, detail: hit.detail }),
   });
-  return { parsed, report };
+  return { parsed, report, hits };
 })();
 t('配对 6 个、缺译 1 个', () => {
   assert.equal(FIXTURE.parsed.pairs.length, 6, JSON.stringify(FIXTURE.parsed));
   assert.equal(FIXTURE.parsed.translationMissing, 1);
 });
-t('七码计数与预期一致（各 1，其余为 0）', () => {
+t('v2 计数：残留/相似/术语/缺译 各 1（标点结构一致 → 0）', () => {
   assert.deepEqual(FIXTURE.report.codes, {
-    GLOSSARY: 1,
     FOREIGN_CHAR_RESIDUE: 1,
     SIMILARITY: 1,
-    PUNCTUATION_MISMATCH: 1,
+    GLOSSARY: 1,
     LINE_COUNT_MISMATCH: 1,
   }, JSON.stringify(FIXTURE.report.codes));
 });
+t('onHit 全量回调（落库用）带 pairIndex/detail', () => {
+  assert.ok(FIXTURE.hits.length >= 4, JSON.stringify(FIXTURE.hits));
+  const g = FIXTURE.hits.find((h) => h.code === 'GLOSSARY');
+  assert.ok(g && g.detail === 'ローズ' && g.pairIndex >= 0, JSON.stringify(g));
+});
 t('样例带码/章节/截断文本，且受 limit 约束', () => {
-  assert.ok(FIXTURE.report.samples.length >= 5 && FIXTURE.report.samples.length <= 8, JSON.stringify(FIXTURE.report.samples.length));
+  assert.ok(FIXTURE.report.samples.length >= 4 && FIXTURE.report.samples.length <= 8, JSON.stringify(FIXTURE.report.samples.length));
   const g = FIXTURE.report.samples.find((s) => s.code === 'GLOSSARY');
   assert.ok(g && g.detail === 'ローズ' && /微微一笑/.test(g.zh), JSON.stringify(g));
 });

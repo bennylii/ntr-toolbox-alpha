@@ -187,6 +187,33 @@ export function createReadTools({ store, engine, makeClient, log = console, text
       },
     },
     {
+      name: 'list_warnings',
+      description: '读取上次质检（check 任务）落库的警告列表（不需重跑）：按码计数 + 明细（章节/行号/代码/细节/证据）。找要处理的译文问题时先看这里。',
+      parameters: {
+        type: 'object',
+        properties: {
+          book: BOOK_PARAM,
+          code: { type: 'string', description: '可选：只看某个码（如 FOREIGN_CHAR_RESIDUE / TEXT_PRESERVE）' },
+          limit: { type: 'number', description: '条数上限，默认 100' },
+        },
+        required: ['book'],
+      },
+      async execute(args) {
+        const book = getBook(args.book);
+        const summary = store.warningSummary(book.key);
+        const warnings = store.listWarnings(book.key, {
+          code: String(args.code || ''),
+          limit: Math.min(500, Math.max(1, Math.floor(Number(args.limit) || 100))),
+        });
+        return {
+          book: book.key,
+          summary,
+          note: summary.total === 0 ? '暂无落库警告（先跑 check 任务）' : '来自最近一次 check 落库',
+          warnings,
+        };
+      },
+    },
+    {
       name: 'list_skills',
       description: '列出可用技能包（名称/描述/文件数）。',
       parameters: { type: 'object', properties: {} },

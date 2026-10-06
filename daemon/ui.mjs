@@ -544,6 +544,7 @@ async function toggleProjectDetail(card) {
   const prog = await api('/progress?book=' + encodeURIComponent(key)).catch(() => null);
   const rules = await api('/rules?book=' + encodeURIComponent(key)).catch(() => null);
   const sessions = await api('/agent/sessions').catch(() => null);
+  const warnings = await api('/warnings?book=' + encodeURIComponent(key) + '&limit=20').catch(() => null);
   const rows = (prog && prog.progress) || [];
   const byState = {};
   rows.forEach((p) => { byState[p.state] = (byState[p.state] || 0) + 1; });
@@ -551,9 +552,18 @@ async function toggleProjectDetail(card) {
   const sessList = ((sessions && sessions.sessions) || []).filter((x) => (x.bookKey || '') === key);
   const recent = (STATE.runs || []).filter((r) => r.bookKey === key).slice(0, 3)
     .map((r) => esc(r.job + '/' + r.state)).join('、') || '—';
+  const warnSummary = (warnings && warnings.summary) || null;
+  const warnRows = (warnings && warnings.warnings) || [];
+  const warnLine = warnSummary && warnSummary.total > 0
+    ? '<div>质检警告 ' + warnSummary.total + ' 条（' + Object.entries(warnSummary.counts).map(([c, n]) => esc(c) + ' ' + n).join(' / ') + '）'
+      + (warnSummary.at ? ' · ' + new Date(warnSummary.at).toLocaleString() : '') + '</div>'
+    : '<div class="muted">质检警告：暂无（跑一次「派发任务 → 质检 check」后更新）</div>';
   box.innerHTML =
     '<div>进度：' + rows.length + ' 章' + (Object.keys(byState).length ? '（' + Object.keys(byState).map((s) => esc(s) + ' ' + byState[s]).join(' / ') + '）' : '') + ' · 最近 run：' + recent + '</div>' +
     '<div>本项目规则覆盖 ' + ruleCount + ' 条 · 助手会话 ' + sessList.length + ' 个</div>' +
+    warnLine +
+    (warnRows.length ? '<table><tr><th>章节</th><th>行</th><th>码</th><th>细节</th></tr>' +
+      warnRows.slice(0, 20).map((w) => '<tr><td>' + esc(w.chapterId) + '</td><td>' + w.lineNo + '</td><td>' + esc(w.code) + '</td><td class="muted">' + esc(w.detail || '') + '</td></tr>').join('') + '</table>' : '') +
     (sessList.length ? '<div>' + sessList.slice(0, 5).map((x) => '<span class="sess-row" data-jumpsess="' + esc(x.id) + '" style="display:inline-block;padding:2px 8px">' + esc(String(x.title || x.id).slice(0, 20)) + '</span>').join(' ') + '</div>' : '') +
     '<div class="muted">进度明细（前 8）：</div>' +
     '<table><tr><th>章节</th><th>状态</th><th>glossaryUuid</th></tr>' +
