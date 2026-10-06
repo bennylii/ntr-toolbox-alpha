@@ -85,6 +85,12 @@ node daemon/index.mjs forget    <bookKey>
 - **循环**：系统提示 + 历史 → 模型 → 顺序派发工具 → 回填 `role:'tool'` 结果 → 直到无工具调用；单轮步数上限 24（可配）、支持中止与失败续聊。
 - **会话**：`agent_sessions/agent_messages/agent_decisions` 落 SQLite；时间线全量保留，超阈值时把旧段摘要化（`summaryUpTo` 之后才进模型）。`--session <id>` 续用上次会话。
 - **项目绑定**：会话可绑书（控制台新会话挂「当前项目」；`POST /agent/session {bookKey}`、CLI `agent --book` 同效）；绑书会话每轮注入【当前项目】上下文——工具的 book 参数缺省即此书，操作其它书需用户明说；侧栏会话按项目分组，「通用」组收无书会话。
+- **工作区（CodeAct，LG 同款）**：
+  - `workspace_run {script}`：把模型写的 JS（ESM）丢进沙箱子进程跑——`fork` + `node --permission`（可读工作区、可写 `changes/` 与 `work/`，禁子进程/worker/原生扩展；网络可用；120s 超时 SIGKILL）。全局 `ws` 经 IPC 桥接：`ws.contract`（契约）、`ws.doing(text)`（进度直达助手页）、`ws.read({kind:'read', subkind:'chapter', chapterId})`（站点章节按需拉取，不落盘）。stdout/stderr 全量落 `work/runs/<id>/`，进模型上下文每流截 64KiB；返回 `{scriptPath, exitCode, signal, stdout, stderr}`；
+  - 数据集快照（每次 run 重建）：`project_meta.json`、`progress/`、`rules/`、`glossary/`、`prompts.json`、`runs/`（JSONL 行内带 fp）+ `reference/workspace.md`；`changes/` 也在 run 前清空重置（LG 同款）；
+  - `workspace_apply {}`（需审批）：提交 `changes/**.jsonl` 变更清单——解析 → fp 漂移/缺失/冲突检测 → 预览摘要（审批预览=实际提交差异）→ 逐 op 提交 → 回执 `{status: applied|partial|rejected|unchanged, applied, rejected, destroyed, results}`；`destroyed`（有漂移/缺失）或全量成功后清空清单；glossary 域合并后走"快照 → 全量替换 → 回读校验"；与翻译任务单队列互斥；
+  - 变更域 v1：rules / glossary / prompts；章节译文提交不经过工作区（用 run_translate / import_lg_result）；
+  - 目录：`daemon/work/<sessionId>/`（已 gitignore）；通用会话（未绑书）没有工作区。
 - **审批**：默认 manual —— 标记 `requiresApproval` 的工具（写术语表/回滚/改规则与提示词等）会挂起为 decision，CLI 里 y/N 确认；`--auto` 跳过审批（等价 auto 模式）。追问（`ask_user`）同样是 decision。
 - **工具（A1–A3）**：
   - 只读（自动）：`list_books`、`book_status`、`read_book`（按行窗口）、`read_translations`（对齐对窗口）、`list_proposals`、`list_snapshots`、`quality_report`、`list_skills`、`read_skill`、`export_glossary`、`export_lg_source`（站点原文 → LG 纯文本+清单）；

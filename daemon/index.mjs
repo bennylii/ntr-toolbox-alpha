@@ -38,6 +38,7 @@ const { doingTool, askUserTool } = await imp('agent-tools.mjs');
 const { createReadTools } = await imp('agent-tools-read.mjs');
 const { createWriteTools } = await imp('agent-tools-write.mjs');
 const { createLgTools } = await imp('agent-tools-lg.mjs');
+const { createWorkspaceTools } = await imp('agent-workspace.mjs');
 const { createSkillCatalog } = await imp('agent-skills.mjs');
 const { createAgentEvents } = await imp('agent-events.mjs');
 const { createJobQueue } = await imp('job-queue.mjs');
@@ -158,7 +159,7 @@ const agentLoop = createAgentLoop({
   store,
   chat: agentLlm.chat,
   takeUsage: agentLlm.takeUsage,
-  tools: [...readTools, ...createWriteTools(), ...createLgTools(), doingTool, askUserTool],
+  tools: [...readTools, ...createWriteTools(), ...createLgTools(), ...createWorkspaceTools(), doingTool, askUserTool],
   log,
   options: {
     approvalMode: agentApprovalDefault,
@@ -171,6 +172,7 @@ const agentLoop = createAgentLoop({
       enqueue: (payload) => jobQueue.enqueue(payload),
       queueBusy: () => jobQueue.busy(),
       exportsDir: path.join(repoRoot, 'daemon', 'exports'),
+      workspaceRoot: path.join(repoRoot, 'daemon', 'work'),
     },
   },
 });

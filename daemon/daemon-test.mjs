@@ -27,6 +27,7 @@ const { createAgentEvents } = await imp('agent-events.mjs');
 const { createJobQueue } = await imp('job-queue.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
 const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport } = await imp('lg-align.mjs');
+const { createWorkspaceTools } = await imp('agent-workspace.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
 
@@ -1163,6 +1164,104 @@ await t('绑书会话系统提示含【当前项目】；无书会话不含', as
   assert.ok(!String(st2.lastSystem || '').includes('【当前项目】'), String(st2.lastSystem || '').slice(0, 240));
 });
 await t('清理：项目化测试服务器', () => { projServer.close(); });
+
+console.log('== Agent 工作区（workspace_run / workspace_apply） ==');
+const WS_ROOT = path.join(here, '.tmp-ws-root');
+const WS_BOOK_KEY = `web:mock/mock-import-ws-${RUN}`;
+store.upsertBook({ key: WS_BOOK_KEY, kind: 'web', providerId: 'mock', novelId: `mock-import-ws-${RUN}`, origin: MOCK, title: '工作区测试书' });
+const wsDoing = [];
+const wsCtx = {
+  store,
+  sessionId: 'ws-test-session',
+  bookKey: WS_BOOK_KEY,
+  book: store.getBook(WS_BOOK_KEY),
+  onEvent: (e) => { if (e.type === 'doing') wsDoing.push(e.text); },
+  options: {},
+  approvalMode: 'auto',
+  deps: { engine, makeClient, workspaceRoot: WS_ROOT, queueBusy: () => false },
+};
+const [wsRunTool, wsApplyTool] = createWorkspaceTools();
+const wsApplyPreviewAndExecute = async () => {
+  const preview = await wsApplyTool.preview({}, wsCtx);
+  const result = await wsApplyTool.execute({}, wsCtx);
+  return { preview, result };
+};
+await t('run：脚本读数据集 + ws.doing + ws.read 章节 + 写变更文件', async () => {
+  const record = await wsRunTool.execute({ script: [
+    'const fs = await import("node:fs");',
+    'const rules = fs.readFileSync("rules/entries.jsonl", "utf8").trim().split("\\n").filter(Boolean);',
+    'await ws.doing("已读 " + rules.length + " 条规则");',
+    'const ch = await ws.read({ kind: "read", subkind: "chapter", chapterId: "ch1" });',
+    'console.log("WS-OK rules=" + rules.length + " jpLines=" + ch.paragraphJp.length);',
+    'fs.writeFileSync("changes/rules/creates.jsonl", JSON.stringify({ kind: "post_replacement", pattern: "【工作区】", replacement: "【译】" }) + "\\n");',
+  ].join('\n') }, wsCtx);
+  assert.equal(record.exitCode, 0, JSON.stringify(record));
+  assert.equal(record.stderr.bytes, 0, JSON.stringify(record.stderr));
+  assert.ok(String(record.stdout.content).includes('WS-OK'), JSON.stringify(record.stdout));
+  assert.ok(wsDoing.some((t) => t.includes('条规则')), JSON.stringify(wsDoing));
+  assert.ok(fs.existsSync(path.join(WS_ROOT, 'ws-test-session', 'changes', 'rules', 'creates.jsonl')), '变更文件已写');
+  assert.ok(fs.existsSync(path.join(WS_ROOT, 'ws-test-session', 'contract.json')), '契约已落盘');
+  assert.ok(fs.existsSync(path.join(WS_ROOT, 'ws-test-session', 'reference', 'workspace.md')), '参考文档已生成');
+});
+await t('沙箱：写工作区外 / 子进程 被权限模型拒绝', async () => {
+  const record = await wsRunTool.execute({ script: [
+    'const fs = await import("node:fs");',
+    'try { fs.writeFileSync("../outside.txt", "x"); console.log("WROTE-OUTSIDE"); } catch (e) { console.log("FS-DENIED"); }',
+    'try { const cp = await import("node:child_process"); cp.execSync("echo hi"); console.log("CHILD-OK"); } catch (e) { console.log("CHILD-DENIED"); }',
+  ].join('\n') }, wsCtx);
+  assert.equal(record.exitCode, 0, JSON.stringify(record));
+  const text = String(record.stdout.content || '');
+  assert.ok(text.includes('FS-DENIED'), text);
+  assert.ok(text.includes('CHILD-DENIED'), text);
+  assert.ok(!text.includes('WROTE-OUTSIDE') && !text.includes('CHILD-OK'), text);
+});
+await t('apply 全绿批（auto）：规则 + 术语 + 提示词 → applied、回读校验过', async () => {
+  const root = path.join(WS_ROOT, 'ws-test-session');
+  const promptFp = JSON.parse(fs.readFileSync(path.join(root, 'prompts.json'), 'utf8')).thinking.fp;
+  fs.writeFileSync(path.join(root, 'changes', 'rules', 'creates.jsonl'), JSON.stringify({ kind: 'post_replacement', pattern: '【工作区】', replacement: '【译】' }) + '\n', 'utf8');
+  fs.writeFileSync(path.join(root, 'changes', 'glossary', 'creates.jsonl'), JSON.stringify({ src: 'アルテ', dst: '阿尔缇', info: '主角' }) + '\n', 'utf8');
+  fs.writeFileSync(path.join(root, 'changes', 'prompts', 'updates.jsonl'), JSON.stringify({ kind: 'thinking', fp: promptFp, text: '{format_rules} 工作区测试' }) + '\n', 'utf8');
+  const { preview, result } = await wsApplyPreviewAndExecute();
+  assert.equal(preview.counts.rules, 1, JSON.stringify(preview));
+  assert.equal(result.status, 'applied', JSON.stringify(result));
+  assert.ok(result.applied.rules === 1 && result.applied.glossary === 1 && result.applied.prompts === 1, JSON.stringify(result.applied));
+  assert.ok((store.listRules(WS_BOOK_KEY) || []).some((r) => r.pattern === '【工作区】'), '规则已入库');
+  const stats = await fetch(`${MOCK}/__stats`).then((r) => r.json());
+  assert.equal(stats.lastGlossaryPut.body['アルテ'], '阿尔缇 #主角', JSON.stringify(stats.lastGlossaryPut));
+  assert.ok((store.listPrompts('') || []).some((p) => p.slot === 'thinking' && p.text.includes('工作区测试')), '提示词已写入');
+});
+await t('apply fp 漂移：rejected + destroyed + changes 清空', async () => {
+  const root = path.join(WS_ROOT, 'ws-test-session');
+  fs.writeFileSync(path.join(root, 'changes', 'glossary', 'updates.jsonl'), JSON.stringify({ src: 'アルテ', fp: 'zzzz', dst: '错译' }) + '\n', 'utf8');
+  const { result } = await wsApplyPreviewAndExecute();
+  assert.equal(result.status, 'rejected', JSON.stringify(result));
+  assert.equal(result.destroyed, true);
+  assert.ok(result.rejected.some((r) => r.reason === 'fp_mismatch'), JSON.stringify(result.rejected));
+  assert.equal(fs.readFileSync(path.join(root, 'changes', 'glossary', 'updates.jsonl'), 'utf8'), '', 'changes 已清空');
+});
+await t('apply partial：合法规则 + 漂移提示词 → 部分提交', async () => {
+  const root = path.join(WS_ROOT, 'ws-test-session');
+  fs.writeFileSync(path.join(root, 'changes', 'rules', 'creates.jsonl'), JSON.stringify({ kind: 'pre_replacement', pattern: '部分提交', replacement: 'OK' }) + '\n', 'utf8');
+  fs.writeFileSync(path.join(root, 'changes', 'prompts', 'updates.jsonl'), JSON.stringify({ kind: 'base', fp: 'aaaa', text: '{format_rules} 漂移' }) + '\n', 'utf8');
+  const { result } = await wsApplyPreviewAndExecute();
+  assert.equal(result.status, 'partial', JSON.stringify(result));
+  assert.ok((store.listRules(WS_BOOK_KEY) || []).some((r) => r.pattern === '部分提交'), '合法规则已入库');
+  assert.equal(result.destroyed, true);
+});
+await t('apply 坏 JSONL：invalid_change 行被拒、好行照常', async () => {
+  const root = path.join(WS_ROOT, 'ws-test-session');
+  fs.writeFileSync(path.join(root, 'changes', 'rules', 'creates.jsonl'), 'not-json\n' + JSON.stringify({ kind: 'post_replacement', pattern: '坏行邻居' }) + '\n', 'utf8');
+  const { result } = await wsApplyPreviewAndExecute();
+  assert.equal(result.status, 'partial', JSON.stringify(result));
+  assert.ok(result.rejected.some((r) => r.reason === 'invalid_change'), JSON.stringify(result.rejected));
+  assert.ok((store.listRules(WS_BOOK_KEY) || []).some((r) => r.pattern === '坏行邻居'), '好行已入库');
+});
+await t('清理：工作区测试目录 + 工具元数据', () => {
+  fs.rmSync(WS_ROOT, { recursive: true, force: true });
+  assert.ok(wsRunTool.requiresApproval !== true, 'workspace_run 自动执行');
+  assert.equal(wsApplyTool.requiresApproval, true, 'workspace_apply 需审批');
+  assert.ok(!fs.existsSync(WS_ROOT));
+});
 
 console.log(`\n通过 ${pass}，失败 ${fail}`);
 store.close();
