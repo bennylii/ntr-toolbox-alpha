@@ -1135,6 +1135,35 @@ await t('助手参数：agent.llm 热更新 + maxSteps/toolResultMaxChars/approv
 });
 await t('清理：设置页 v2 服务器', () => { setServer.close(); });
 
+console.log('== 项目化：会话绑定项目 + 系统提示注入 ==');
+const projBook = `web:mock/${TRANS_BOOK}`;
+const projSched = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW('proj', 'projkey', '')], maxInFlight: 1 } });
+const projLlm = createAgentLlm({ scheduler: projSched, log: quiet });
+const projLoop = createAgentLoop({ store, chat: projLlm.chat, takeUsage: projLlm.takeUsage, tools: [doingTool], log: quiet });
+const projServer = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline, scheduler: projSched, agentScheduler: projSched, agentLoop: projLoop, makeClient, engine, port: 7368, log: quiet });
+await t('会话绑书：创建带 bookKey → /agent/config 回读', async () => {
+  const r = await fetch('http://127.0.0.1:7368/agent/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'proj-session', bookKey: projBook }) }).then((x) => x.json());
+  assert.ok(r.sessionId, JSON.stringify(r));
+  globalThis.__projSession = r.sessionId;
+  const cfg = await fetch('http://127.0.0.1:7368/agent/config').then((x) => x.json());
+  const row = (cfg.sessions || []).find((x) => x.id === r.sessionId);
+  assert.ok(row, '会话应在列表中（上限 100）');
+  assert.equal(row.bookKey, projBook, JSON.stringify(row));
+});
+await t('绑书会话系统提示含【当前项目】；无书会话不含', async () => {
+  const r1 = await projLoop.runTurn(globalThis.__projSession, '你好', {});
+  assert.equal(r1.ok, true, JSON.stringify(r1));
+  const st1 = await fetch(`${MOCK}/__stats`).then((x) => x.json());
+  assert.ok(String(st1.lastSystem || '').includes('【当前项目】'), String(st1.lastSystem || '').slice(0, 240));
+  assert.ok(String(st1.lastSystem).includes(projBook), '应含项目 key');
+  const sid2 = store.createAgentSession({ title: 'plain-session' });
+  const r2 = await projLoop.runTurn(sid2, '你好', {});
+  assert.equal(r2.ok, true, JSON.stringify(r2));
+  const st2 = await fetch(`${MOCK}/__stats`).then((x) => x.json());
+  assert.ok(!String(st2.lastSystem || '').includes('【当前项目】'), String(st2.lastSystem || '').slice(0, 240));
+});
+await t('清理：项目化测试服务器', () => { projServer.close(); });
+
 console.log(`\n通过 ${pass}，失败 ${fail}`);
 store.close();
 process.exit(fail === 0 ? 0 : 1);

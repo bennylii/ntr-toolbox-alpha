@@ -107,6 +107,14 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
 
         // 压缩（失败不影响主流程）+ 硬预算裁剪
         let extraSystem = opt.extraSystem;
+        if (session.bookKey) {
+          const bk = store.getBook(session.bookKey);
+          const title = bk && bk.title ? String(bk.title).replace(/\s+/g, ' ').slice(0, 60) : '';
+          extraSystem = `${extraSystem}
+
+【当前项目】${session.bookKey}${title ? '（' + title + '）' : ''}
+本会话绑定这本书：阅读、翻译、术语、质检等操作的 book 参数缺省即此书；操作其它书需用户明说。`;
+        }
         for (const name of pinnedSkills || []) {
           const loaded = opt.deps.skills.read(name);
           extraSystem = `${extraSystem}

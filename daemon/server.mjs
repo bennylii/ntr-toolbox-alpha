@@ -309,7 +309,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           ok: true,
           approvalMode: cfg.approvalMode === 'auto' ? 'auto' : 'manual',
           tools: agentLoop ? [...agentLoop.registry.keys()] : [],
-          sessions: store.listAgentSessions(20).map((x) => ({ id: x.id, bookKey: x.bookKey, title: x.title, state: x.state, updatedAt: x.updatedAt, running: agentLoop ? agentLoop.running(x.id) : false })),
+          sessions: store.listAgentSessions(100).map((x) => ({ id: x.id, bookKey: x.bookKey, title: x.title, state: x.state, updatedAt: x.updatedAt, running: agentLoop ? agentLoop.running(x.id) : false })),
         });
         return;
       }
@@ -336,7 +336,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         return;
       }
       if (req.method === 'GET' && url.pathname === '/agent/sessions') {
-        send(200, { ok: true, sessions: store.listAgentSessions(20).map((x) => ({ id: x.id, bookKey: x.bookKey, title: x.title, state: x.state, updatedAt: x.updatedAt, running: agentLoop ? agentLoop.running(x.id) : false })) });
+        send(200, { ok: true, sessions: store.listAgentSessions(100).map((x) => ({ id: x.id, bookKey: x.bookKey, title: x.title, state: x.state, updatedAt: x.updatedAt, running: agentLoop ? agentLoop.running(x.id) : false })) });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/agent/session') {

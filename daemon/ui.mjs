@@ -34,6 +34,13 @@ export const UI_HTML = `<!doctype html>
   .sess-row { all: unset; cursor: pointer; display: block; padding: 7px 12px; border-radius: 10px; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .sess-row:hover { background: var(--panel2); color: var(--text); }
   .sess-row.active { background: var(--panel2); color: var(--text); }
+  .sess-group { padding: 10px 12px 2px; font-size: 11px; color: var(--muted); letter-spacing: .5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .proj-card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); padding: 10px 14px; margin: 8px 0; cursor: pointer; }
+  .proj-card:hover { border-color: var(--accent); }
+  .proj-card.current { border-color: var(--accent); background: var(--panel2); }
+  .proj-actions { margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .proj-detail { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 8px; font-size: 12.5px; cursor: default; }
+  .proj-detail table { font-size: 12px; }
   .side-foot { padding: 10px 14px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--muted); }
 
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -105,17 +112,20 @@ export const UI_HTML = `<!doctype html>
 <div class="app">
   <aside class="side">
     <div class="brand"><span class="logo">◆</span> NTR Daemon</div>
+    <div style="padding:0 12px 6px">
+      <select id="project-select" style="width:100%" title="当前项目：任务/规则/助手/状态默认作用于它；通用 = 全局视角"></select>
+    </div>
     <nav id="side-nav">
       <button data-tab="agent" class="active"><span class="ico">💬</span>助手</button>
       <button data-tab="jobs"><span class="ico">🚚</span>任务</button>
       <button data-tab="settings"><span class="ico">⚙️</span>设置</button>
       <button data-tab="rules"><span class="ico">📏</span>规则</button>
       <button data-tab="prompts"><span class="ico">📝</span>提示词</button>
-      <button data-tab="books"><span class="ico">📚</span>书籍</button>
+      <button data-tab="books"><span class="ico">📚</span>项目</button>
       <button data-tab="status"><span class="ico">📊</span>状态</button>
     </nav>
     <div class="divider"></div>
-    <div class="side-title">助手会话</div>
+    <div class="side-title">项目 / 会话</div>
     <div id="side-sessions"></div>
     <div class="side-foot" id="side-status"></div>
   </aside>
@@ -173,6 +183,7 @@ export const UI_HTML = `<!doctype html>
   </div>
 
   <div class="page" id="tab-settings" data-title="设置">
+    <div class="muted" style="margin:0 0 10px">以下均为全局设置，作用于所有项目（规则可按项目覆盖，见「规则」页）。</div>
     <fieldset><legend>翻译模型池（translate · 站点上传用；保存后立即生效）</legend>
       <div id="pool-tl"></div>
       <div><button class="btn ghost" id="tl-add">＋ 添加端点</button> <button class="btn" id="tl-save">保存翻译池</button></div>
@@ -231,7 +242,7 @@ export const UI_HTML = `<!doctype html>
         <label><input type="checkbox" id="rule-regex"> 正则</label>
         <label><input type="checkbox" id="rule-cs"> 大小写敏感</label>
         <label>priority <input type="number" id="rule-priority" value="100" min="0"></label>
-        <label>book <input type="text" id="rule-book" placeholder="空=全局" size="18"></label>
+        <label>作用域 <select id="rule-scope"><option value="project">当前项目</option><option value="global">全局（所有项目）</option></select></label>
         <button class="btn" id="rule-add">添加</button>
       </div>
       <div id="rules-table" style="margin-top:10px"></div>
@@ -239,22 +250,20 @@ export const UI_HTML = `<!doctype html>
   </div>
 
   <div class="page" id="tab-prompts" data-title="提示词">
-    <fieldset><legend>提示词模板（base 必须含 {format_rules}；空槽=默认）</legend>
-      <label>book <input type="text" id="prompt-book" placeholder="空=全局" size="24"></label>
-      <button class="btn ghost" id="prompt-load">读取</button>
+    <fieldset><legend>提示词模板（全局 · 所有项目共用；base 必须含 {format_rules}；空槽=默认）</legend>
       <div id="prompt-fields"></div>
-      <button class="btn" id="prompt-save">保存当前 book 的模板</button>
-      <button class="btn ghost" id="prompt-clear">清除当前 book 的模板</button>
+      <button class="btn" id="prompt-save">保存全局模板</button>
+      <button class="btn ghost" id="prompt-clear">清除覆盖（回退默认）</button>
       <div class="muted" id="prompt-hint"></div>
     </fieldset>
   </div>
 
-  <div class="page" id="tab-books" data-title="书籍">
-    <fieldset><legend>登记新书</legend>
+  <div class="page" id="tab-books" data-title="项目">
+    <fieldset><legend>登记新项目（书 URL）</legend>
       <label>URL <input type="text" id="book-url" size="52" placeholder="https://n.novelia.cc/novel/syosetu/nXXXXxx"></label>
       <button class="btn" id="book-add">登记</button>
     </fieldset>
-    <fieldset><legend>已登记</legend><div id="books-table"></div></fieldset>
+    <fieldset><legend>项目列表（点卡片展开详情）</legend><div id="books-table"></div></fieldset>
   </div>
 
   <div class="page" id="tab-status" data-title="状态">
@@ -292,16 +301,37 @@ document.querySelectorAll('#side-nav button').forEach((btn) => btn.addEventListe
   refresh();
 }));
 
-let STATE = { books: [] };
+let STATE = { books: [], runs: [], queue: [] };
+let PROJECT = localStorage.getItem('ntr-daemon-project') || '';
+function renderProjectSelect() {
+  const sel = $('project-select');
+  if (!sel) return;
+  if (PROJECT && !(STATE.books || []).some((b) => b.key === PROJECT)) { PROJECT = ''; localStorage.removeItem('ntr-daemon-project'); }
+  sel.innerHTML = '<option value="">通用（全局视角）</option>' + (STATE.books || []).map((b) =>
+    '<option value="' + esc(b.key) + '"' + (b.key === PROJECT ? ' selected' : '') + '>' + esc(String(b.title || b.key).slice(0, 30)) + '</option>').join('');
+  const scope = $('rule-scope');
+  if (scope) scope.value = PROJECT ? 'project' : 'global';
+}
+$('project-select').addEventListener('change', function () {
+  PROJECT = this.value || '';
+  if (PROJECT) localStorage.setItem('ntr-daemon-project', PROJECT); else localStorage.removeItem('ntr-daemon-project');
+  refresh(); loadRules(); loadPrompts();
+});
 async function refresh() {
   try {
     const status = await api('/status');
     STATE.books = status.books || [];
+    STATE.runs = status.runs || [];
     const q = status.queue || [];
-    $('hdr').textContent = '队列 ' + q.filter((x) => x.state === 'running' || x.state === 'queued').length +
-      ' · 在途 ' + ((status.llm && status.llm.inFlightNow) || 0) + '/' + ((status.llm && status.llm.maxInFlight) || '?') +
-      ' · workers ' + ((status.llm && status.llm.workers) || 0) +
-      ' · 用量 ' + ((status.usage && status.usage.requests) || 0) + ' req / ' + ((status.usage && (status.usage.promptTokens + status.usage.completionTokens)) || 0) + ' tok';
+    STATE.queue = q;
+    renderProjectSelect();
+    const hdrParts = [];
+    if (PROJECT) hdrParts.push('📚 ' + String(((STATE.books || []).find((b) => b.key === PROJECT) || {}).title || PROJECT).slice(0, 18));
+    hdrParts.push('队列 ' + q.filter((x) => x.state === 'running' || x.state === 'queued').length);
+    hdrParts.push('在途 ' + ((status.llm && status.llm.inFlightNow) || 0) + '/' + ((status.llm && status.llm.maxInFlight) || '?'));
+    hdrParts.push('workers ' + ((status.llm && status.llm.workers) || 0));
+    hdrParts.push('用量 ' + ((status.usage && status.usage.requests) || 0) + ' req / ' + ((status.usage && (status.usage.promptTokens + status.usage.completionTokens)) || 0) + ' tok');
+    $('hdr').textContent = hdrParts.join(' · ');
     $('side-status').textContent = '队列 ' + q.filter((x) => x.state !== 'done' && x.state !== 'failed').length +
       ' · 在途 ' + ((status.llm && status.llm.inFlightNow) || 0) +
       ' · RSS ' + ((status.metrics || []).length ? (status.metrics[status.metrics.length - 1].rss || 0).toFixed(0) + 'MB' : '—');
@@ -312,6 +342,7 @@ async function refresh() {
 }
 function renderJobs(status) {
   $('job-book').innerHTML = STATE.books.map((b) => '<option value="' + esc(b.key) + '">' + esc(b.key) + '</option>').join('');
+  if (PROJECT && STATE.books.some((b) => b.key === PROJECT)) $('job-book').value = PROJECT;
   $('queue').innerHTML = (status.queue || []).slice().reverse().map((x) =>
     '<div>' + esc(x.job) + ' · ' + esc(x.bookKey) + ' · <b>' + esc(x.state) + '</b>' +
     (x.stats ? ' · ' + esc(JSON.stringify(x.stats).slice(0, 160)) : '') +
@@ -321,19 +352,90 @@ function renderJobs(status) {
 }
 function renderStatus(status) {
   const m = (status.metrics || []).slice(-3).map((x) => 'rss ' + x.rss.toFixed(1) + 'MB').join(' / ');
-  $('status-box').innerHTML =
+  let pj = '';
+  if (PROJECT) {
+    const b = (STATE.books || []).find((x) => x.key === PROJECT) || {};
+    const runs = (STATE.runs || []).filter((r) => r.bookKey === PROJECT).slice(0, 3)
+      .map((r) => r.job + '/' + r.state).join('、') || '—';
+    pj = '<div>当前项目：' + esc(String(b.title || PROJECT).slice(0, 40)) + ' · 状态 ' + esc(b.state || 'idle') +
+      ' · 已译 ' + (b.progress || 0) + ' 章 · 最近 run ' + esc(runs) + '</div>';
+  }
+  $('status-box').innerHTML = pj +
     '<div>llm（翻译池）：' + esc(JSON.stringify(status.llm || {})) + '</div>' +
     '<div>llm（助手/术语池）：' + esc(JSON.stringify(status.llmAgent || null)) + '</div>' +
     '<div>usage：' + esc(JSON.stringify(status.usage || {})) + '</div>' +
     '<div>metrics：' + esc(m) + '</div>';
 }
-function renderBooks() {
-  $('books-table').innerHTML = '<table><tr><th>key</th><th>state</th><th>title</th><th>已译章</th><th></th></tr>' +
-    STATE.books.map((b) => '<tr><td>' + esc(b.key) + '</td><td>' + esc(b.state) + '</td><td>' + esc(b.title) + '</td><td>' + b.progress + '</td>' +
-      '<td><button class="btn danger" data-forget="' + esc(b.key) + '">忘记</button></td></tr>').join('') + '</table>';
+async function renderBooks() {
+  let openByBook = {};
+  try {
+    const pr = await api('/proposals');
+    (pr.proposals || []).forEach((p) => { if (p.status === 'open') openByBook[p.bookKey] = (openByBook[p.bookKey] || 0) + 1; });
+  } catch (e) { }
+  const queueByBook = {};
+  (STATE.queue || []).forEach((q) => { if (q.state !== 'done' && q.state !== 'failed') queueByBook[q.bookKey] = (queueByBook[q.bookKey] || 0) + 1; });
+  const runsByBook = {};
+  (STATE.runs || []).forEach((r) => { if (!runsByBook[r.bookKey]) runsByBook[r.bookKey] = r; });
+  $('books-table').innerHTML = (STATE.books || []).map((b) => {
+    const run = runsByBook[b.key];
+    return '<div class="proj-card' + (b.key === PROJECT ? ' current' : '') + '" data-pk="' + esc(b.key) + '">' +
+      '<div><b>' + esc(String(b.title || b.key).slice(0, 46)) + '</b>' + (b.key === PROJECT ? ' <span class="ok">当前</span>' : '') + '</div>' +
+      '<div class="muted">' + esc(b.key) + ' · ' + esc(b.state || 'idle') + '</div>' +
+      '<div class="muted">已译 ' + (b.progress || 0) + ' 章 · 最近 run ' + (run ? esc(run.job + '/' + run.state) : '—') +
+      ' · 队列 ' + (queueByBook[b.key] || 0) + ' · open 提案 ' + (openByBook[b.key] || 0) + '</div>' +
+      '<div class="proj-actions">' +
+      '<button class="btn ghost" data-cur="' + esc(b.key) + '">设为当前</button> ' +
+      '<button class="btn" data-run="' + esc(b.key) + '">派发任务</button> ' +
+      '<button class="btn danger" data-forget="' + esc(b.key) + '">忘记</button></div>' +
+      '<div class="proj-detail" style="display:none"></div>' +
+      '</div>';
+  }).join('') || '<span class="muted">还没有项目：用上方 URL 登记一本书。</span>';
+  document.querySelectorAll('#books-table .proj-card').forEach((card) => {
+    card.addEventListener('click', (ev) => { if (ev.target && ev.target.tagName === 'BUTTON') return; toggleProjectDetail(card); });
+  });
+  document.querySelectorAll('[data-cur]').forEach((btn) => btn.addEventListener('click', () => {
+    PROJECT = btn.dataset.cur;
+    localStorage.setItem('ntr-daemon-project', PROJECT);
+    refresh(); loadRules(); loadPrompts(); toast('当前项目：' + PROJECT);
+  }));
+  document.querySelectorAll('[data-run]').forEach((btn) => btn.addEventListener('click', () => {
+    document.querySelector('#side-nav button[data-tab=jobs]').click();
+    $('job-book').value = btn.dataset.run;
+  }));
   document.querySelectorAll('[data-forget]').forEach((btn) => btn.addEventListener('click', async () => {
     if (!confirm('从本地 daemon 忘记 ' + btn.dataset.forget + '？（站点数据不动）')) return;
     try { await post('/books', { action: 'forget', key: btn.dataset.forget }); toast('已忘记'); refresh(); } catch (e) { toast(e.message, true); }
+  }));
+}
+async function toggleProjectDetail(card) {
+  const box = card.querySelector('.proj-detail');
+  if (!box) return;
+  if (box.style.display !== 'none') { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  box.textContent = '加载详情…';
+  const key = card.dataset.pk;
+  const fallback = (v) => v;
+  const prog = await api('/progress?book=' + encodeURIComponent(key)).catch(() => null);
+  const rules = await api('/rules?book=' + encodeURIComponent(key)).catch(() => null);
+  const sessions = await api('/agent/sessions').catch(() => null);
+  const rows = (prog && prog.progress) || [];
+  const byState = {};
+  rows.forEach((p) => { byState[p.state] = (byState[p.state] || 0) + 1; });
+  const ruleCount = ((rules && rules.rules) || []).filter((r) => (r.bookKey || '') === key).length;
+  const sessList = ((sessions && sessions.sessions) || []).filter((x) => (x.bookKey || '') === key);
+  const recent = (STATE.runs || []).filter((r) => r.bookKey === key).slice(0, 3)
+    .map((r) => esc(r.job + '/' + r.state)).join('、') || '—';
+  box.innerHTML =
+    '<div>进度：' + rows.length + ' 章' + (Object.keys(byState).length ? '（' + Object.keys(byState).map((s) => esc(s) + ' ' + byState[s]).join(' / ') + '）' : '') + ' · 最近 run：' + recent + '</div>' +
+    '<div>本项目规则覆盖 ' + ruleCount + ' 条 · 助手会话 ' + sessList.length + ' 个</div>' +
+    (sessList.length ? '<div>' + sessList.slice(0, 5).map((x) => '<span class="sess-row" data-jumpsess="' + esc(x.id) + '" style="display:inline-block;padding:2px 8px">' + esc(String(x.title || x.id).slice(0, 20)) + '</span>').join(' ') + '</div>' : '') +
+    '<div class="muted">进度明细（前 8）：</div>' +
+    '<table><tr><th>章节</th><th>状态</th><th>glossaryUuid</th></tr>' +
+    rows.slice(0, 8).map((p) => '<tr><td>' + esc(p.chapterKey) + '</td><td>' + esc(p.state) + '</td><td class="muted">' + esc(p.glossaryUuid || '—') + '</td></tr>').join('') + '</table>' +
+    (rows.length > 8 ? '<div class="muted">…其余 ' + (rows.length - 8) + ' 章略</div>' : '');
+  box.querySelectorAll('[data-jumpsess]').forEach((el) => el.addEventListener('click', () => {
+    document.querySelector('#side-nav button[data-tab=agent]').click();
+    agentSetSession(el.dataset.jumpsess);
   }));
 }
 
@@ -474,9 +576,10 @@ $('token-save').addEventListener('click', async () => {
 
 async function loadRules() {
   try {
-    const data = await api('/rules');
-    $('rules-table').innerHTML = '<table><tr><th>id</th><th>on</th><th>kind</th><th>pattern</th><th>replacement</th><th>re/cs</th><th>prio</th><th>book</th><th></th></tr>' +
-      (data.rules || []).map((r) => '<tr><td>' + r.id + '</td><td>' + (r.enabled ? '<span class="ok">✓</span>' : '—') + '</td><td>' + esc(r.kind) + '</td><td><code>' + esc(r.pattern) + '</code></td><td>' + esc(r.replacement) + '</td><td>' + (r.regex ? 're ' : '') + (r.case_sensitive ? 'cs' : '') + '</td><td>' + r.priority + '</td><td>' + esc(r.bookKey || '全局') + '</td>' +
+    const data = await api('/rules?book=' + encodeURIComponent(PROJECT));
+    $('rules-table').innerHTML = '<div class="muted" style="margin-bottom:4px">展示：全局 + ' + (PROJECT ? '当前项目' : '通用视角仅全局；在侧栏选项目后可看项目覆盖') + '</div>' +
+      '<table><tr><th>id</th><th>on</th><th>kind</th><th>pattern</th><th>replacement</th><th>re/cs</th><th>prio</th><th>来源</th><th></th></tr>' +
+      (data.rules || []).map((r) => '<tr><td>' + r.id + '</td><td>' + (r.enabled ? '<span class="ok">✓</span>' : '—') + '</td><td>' + esc(r.kind) + '</td><td><code>' + esc(r.pattern) + '</code></td><td>' + esc(r.replacement) + '</td><td>' + (r.regex ? 're ' : '') + (r.case_sensitive ? 'cs' : '') + '</td><td>' + r.priority + '</td><td>' + (r.bookKey ? '<span class="ok">项目</span> ' + esc(r.bookKey.slice(0, 16)) : '全局') + '</td>' +
         '<td><button class="btn ghost" data-toggle="' + r.id + '" data-on="' + (r.enabled ? 1 : 0) + '">' + (r.enabled ? '禁用' : '启用') + '</button> ' +
         '<button class="btn danger" data-del="' + r.id + '">删除</button></td></tr>').join('') + '</table>';
     document.querySelectorAll('[data-toggle]').forEach((b) => b.addEventListener('click', async () => {
@@ -493,7 +596,7 @@ $('rule-add').addEventListener('click', async () => {
       action: 'add', kind: $('rule-kind').value, pattern: $('rule-pattern').value,
       replacement: $('rule-replacement').value, regex: $('rule-regex').checked,
       case_sensitive: $('rule-cs').checked, priority: Number($('rule-priority').value) || 100,
-      bookKey: $('rule-book').value.trim(),
+      bookKey: ($('rule-scope').value === 'global' || !PROJECT) ? '' : PROJECT,
     });
     $('rule-pattern').value = ''; $('rule-replacement').value = '';
     toast('规则已添加'); loadRules();
@@ -503,32 +606,29 @@ $('rule-add').addEventListener('click', async () => {
 let PROMPT_DEFAULTS = {};
 async function loadPrompts() {
   try {
-    const book = $('prompt-book').value.trim();
-    const data = await api('/prompts?book=' + encodeURIComponent(book));
+    const data = await api('/prompts?book=');
     PROMPT_DEFAULTS = data.defaults || {};
-    $('prompt-hint').textContent = '协议段（代码注入，不可覆盖）：' + (data.formatRules || '') + '；默认模板渲染与站点镜像提示逐字一致。';
-    const rows = new Map((data.rows || []).filter((r) => (r.bookKey || '') === book).map((r) => [r.slot, r.text]));
+    $('prompt-hint').textContent = '协议段（代码注入，不可覆盖）：' + (data.formatRules || '') + '；默认模板渲染与站点镜像提示逐字一致。全局模板，所有项目共用。';
+    const rows = new Map((data.rows || []).filter((r) => (r.bookKey || '') === '').map((r) => [r.slot, r.text]));
     $('prompt-fields').innerHTML = ['prefix', 'base', 'thinking', 'suffix'].map((slot) =>
       '<div><b>' + slot + '</b>' + (rows.has(slot) ? '' : ' <span class="muted">（默认）</span>') +
       '<textarea id="prompt-' + slot + '" placeholder="' + esc(String(PROMPT_DEFAULTS[slot] || '').slice(0, 120)) + '">' + esc(rows.get(slot) || '') + '</textarea></div>').join('');
   } catch (e) { toast(e.message, true); }
 }
-$('prompt-load').addEventListener('click', loadPrompts);
 $('prompt-save').addEventListener('click', async () => {
   try {
-    const book = $('prompt-book').value.trim();
     for (const slot of ['prefix', 'base', 'thinking', 'suffix']) {
       const text = $('prompt-' + slot).value;
-      if (text.trim() === '') await post('/prompts', { action: 'clear', bookKey: book, slot });
-      else await post('/prompts', { bookKey: book, slot, text });
+      if (text.trim() === '') await post('/prompts', { action: 'clear', bookKey: '', slot });
+      else await post('/prompts', { bookKey: '', slot, text });
     }
-    toast('模板已保存'); loadPrompts();
+    toast('全局模板已保存'); loadPrompts();
   } catch (e) { toast(e.message, true); }
 });
 $('prompt-clear').addEventListener('click', async () => {
   try {
-    await post('/prompts', { action: 'clear-all', bookKey: $('prompt-book').value.trim() });
-    toast('已清除该 book 的模板'); loadPrompts();
+    await post('/prompts', { action: 'clear-all', bookKey: '' });
+    toast('已清除全局覆盖（回退默认）'); loadPrompts();
   } catch (e) { toast(e.message, true); }
 });
 
@@ -549,7 +649,7 @@ $('job-run').addEventListener('click', async () => {
 });
 
 // ---------------- 助手（Agent） ----------------
-let AGENT = { session: localStorage.getItem('ntr-daemon-agent-session') || '', es: null, polling: null, messages: [], pending: null, running: false, usage: null, transport: '' };
+let AGENT = { session: localStorage.getItem('ntr-daemon-agent-session') || '', es: null, polling: null, messages: [], pending: null, running: false, usage: null, transport: '', sessionBook: '' };
 let lastSessions = [];
 function agentLine(cls, text) { const d = document.createElement('div'); d.className = cls; d.textContent = text; return d; }
 function renderAgentMessages() {
@@ -622,9 +722,11 @@ async function agentResolve(id, status, resolution) {
   agentRefresh();
 }
 function renderAgentStatus() {
+  const pj = AGENT.sessionBook ? ' · 项目 ' + String(((STATE.books || []).find((b) => b.key === AGENT.sessionBook) || {}).title || AGENT.sessionBook).slice(0, 16) : '';
   $('agent-status').textContent = (AGENT.running ? '进行中…' : '空闲') +
     ' · 请求 ' + (AGENT.usage ? AGENT.usage.requests : 0) +
     ' · tokens ' + (AGENT.usage ? (AGENT.usage.promptTokens + AGENT.usage.completionTokens) : 0) +
+    pj +
     (AGENT.transport ? ' · ' + AGENT.transport : '');
 }
 async function agentSnapshot() {
@@ -634,6 +736,7 @@ async function agentSnapshot() {
   AGENT.pending = data.pendingDecision || null;
   AGENT.running = !!data.running;
   AGENT.usage = data.usage || null;
+  AGENT.sessionBook = (data.session && data.session.bookKey) || '';
   AGENT.transport = '在线';
   renderAgentMessages(); renderAgentDecision(); renderAgentStatus();
   $('agent-send').disabled = AGENT.running;
@@ -671,10 +774,29 @@ function renderAgentSessions(list) {
   lastSessions = list || [];
   const box = $('side-sessions');
   if (!box) return;
-  box.innerHTML = (list || []).map(function (x) {
-    return '<div class="sess-row' + (x.id === AGENT.session ? ' active' : '') + '" data-sid="' + esc(x.id) + '">' +
-      esc(String(x.title || x.id).slice(0, 26)) + (x.running ? ' ●' : '') + '</div>';
-  }).join('') || '<div class="muted" style="padding:4px 12px">无会话</div>';
+  const groups = {};
+  (list || []).forEach(function (x) {
+    const g = x.bookKey || '';
+    (groups[g] = groups[g] || []).push(x);
+  });
+  const bookTitle = function (key) {
+    const b = (STATE.books || []).find(function (b) { return b.key === key; });
+    return b ? (b.title || b.key) : key;
+  };
+  const keys = Object.keys(groups).sort(function (a, b) {
+    if (!a) return 1;
+    if (!b) return -1;
+    return (groups[b][0].updatedAt || 0) - (groups[a][0].updatedAt || 0);
+  });
+  let html = '';
+  keys.forEach(function (g) {
+    html += '<div class="sess-group">' + esc(String(g ? bookTitle(g) : '通用（未绑定项目）').slice(0, 26)) + (g ? ' <span style="opacity:.6">' + esc(g.slice(0, 20)) + '</span>' : '') + '</div>';
+    html += groups[g].map(function (x) {
+      return '<div class="sess-row' + (x.id === AGENT.session ? ' active' : '') + '" data-sid="' + esc(x.id) + '">' +
+        esc(String(x.title || x.id).slice(0, 26)) + (x.running ? ' ●' : '') + '</div>';
+    }).join('');
+  });
+  box.innerHTML = html || '<div class="muted" style="padding:4px 12px">无会话</div>';
   box.querySelectorAll('[data-sid]').forEach(function (rowEl) {
     rowEl.addEventListener('click', function () { agentSetSession(rowEl.dataset.sid); });
   });
@@ -693,7 +815,7 @@ async function agentInit() {
   } catch (e) { toast(e.message, true); }
 }
 $('agent-new').addEventListener('click', async function () {
-  try { const r = await post('/agent/session', { title: '新会话' }); agentSetSession(r.sessionId); agentInit(); }
+  try { const r = await post('/agent/session', { title: '新会话', bookKey: PROJECT || '' }); agentSetSession(r.sessionId); agentInit(); }
   catch (e) { toast(e.message, true); }
 });
 $('agent-auto').addEventListener('change', async function () {
@@ -710,7 +832,7 @@ async function agentSend() {
   agentMentionClose();
   if (text.startsWith('/')) { agentCommand(text); return; }
   try {
-    if (!AGENT.session) { const r = await post('/agent/session', { title: text.slice(0, 30) }); agentSetSession(r.sessionId); }
+    if (!AGENT.session) { const r = await post('/agent/session', { title: text.slice(0, 30), bookKey: PROJECT || '' }); agentSetSession(r.sessionId); }
     await post('/agent/message', { session: AGENT.session, message: text, approvalMode: $('agent-auto').checked ? 'auto' : 'manual' });
     $('agent-doing').textContent = '';
     agentRefresh();
@@ -819,7 +941,7 @@ async function agentCommand(text) {
   if (cmd === 'help') {
     agentLocalLine('命令：' + AGENT_COMMANDS.map(function (c) { return c.cmd; }).join('  ') + '；消息里 @技能名 可点名技能');
   } else if (cmd === 'new') {
-    try { const r = await post('/agent/session', { title: args.join(' ') || '新会话' }); agentSetSession(r.sessionId); agentInit(); agentLocalLine('已新建会话 ' + r.sessionId.slice(0, 8)); }
+    try { const r = await post('/agent/session', { title: args.join(' ') || '新会话', bookKey: PROJECT || '' }); agentSetSession(r.sessionId); agentInit(); agentLocalLine('已新建会话 ' + r.sessionId.slice(0, 8) + (PROJECT ? '（项目 ' + PROJECT.slice(0, 20) + '）' : '')); }
     catch (e) { agentLocalLine('失败：' + e.message, 'bad'); }
   } else if (cmd === 'stop') {
     try { await post('/agent/stop', { session: AGENT.session }); agentLocalLine('已请求停止'); agentRefresh(); }
