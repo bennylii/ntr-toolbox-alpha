@@ -9,13 +9,25 @@
 #   powershell -File daemon\tray.ps1 -TestSpawn -Port 7377   # 拉起(临时db)→等就绪→打印 TEST OK→杀掉
 #   powershell -File daemon\tray.ps1 -SmokeGui 3             # 只初始化托盘 GUI，3 秒后自动退出（不杀已连 daemon）
 param(
-  [int]$Port = 7331,
+  [int]$Port = 0,          # 0 = 不传 --port，由 daemon 读 config.serve.port（缺省 7331）；显式传 N 才覆盖
   [switch]$TestSpawn,
   [int]$SmokeGui = 0
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $logFile = Join-Path $repoRoot 'daemon\.tray.log'
+$PortExplicit = ($Port -ge 1)
+
+# 实际端口探测：显式 -Port 优先；否则读 daemon 写的 .serve-port（serve 启动即落盘），缺省 7331
+function Get-ServePort {
+  $portFile = Join-Path $repoRoot 'daemon\.serve-port'
+  if (Test-Path $portFile) {
+    $p = 0
+    if ([int]::TryParse((Get-Content $portFile -Raw).Trim(), [ref]$p) -and $p -ge 1) { return $p }
+  }
+  return 7331
+}
+if (-not $PortExplicit) { $Port = Get-ServePort }
 $base = "http://127.0.0.1:$Port"
 
 function Get-Status {
@@ -23,10 +35,11 @@ function Get-Status {
 }
 
 function Start-DaemonChild([string]$extraArgs = '') {
-  # cmd 包一层做日志重定向；CreateNoWindow 保持无窗口
+  # cmd 包一层做日志重定向；CreateNoWindow 保持无窗口；端口默认由 daemon 自读（config.serve.port）
+  $portArg = if ($PortExplicit) { " --port $Port" } else { '' }
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $env:ComSpec
-  $psi.Arguments = "/c node daemon/index.mjs serve --port $Port $extraArgs >> `"$logFile`" 2>&1"
+  $psi.Arguments = "/c node daemon/index.mjs serve$portArg $extraArgs >> `"$logFile`" 2>&1"
   $psi.WorkingDirectory = $repoRoot
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
@@ -36,6 +49,11 @@ function Start-DaemonChild([string]$extraArgs = '') {
 function Wait-Ready {
   for ($i = 0; $i -lt 40; $i++) {
     Start-Sleep -Milliseconds 500
+    # daemon 可能把端口写到 .serve-port（config.serve.port）——非显式端口时跟随
+    if (-not $PortExplicit) {
+      $newPort = Get-ServePort
+      if ($newPort -ne $Port) { $Port = $newPort; $script:base = "http://127.0.0.1:$Port" }
+    }
     if (Get-Status) { return $true }
   }
   return $false

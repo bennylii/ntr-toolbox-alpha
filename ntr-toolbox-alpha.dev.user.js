@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NTR Toolbox Alpha (dev)
 // @namespace    https://github.com/bennylii
-// @version      0.8.0-alpha.1-dev
+// @version      0.8.0-alpha.2-dev
 // @author       bennylii
 // @description  ToolBox for novel translation sites, with an AI glossary pipeline (alpha)
 // @match        https://books.fishhawk.top/*
@@ -1880,20 +1880,52 @@
         },
     };
 
+    // ---- Daemon 连接：探测 /ping → 推送 /auth；状态写入「连接状态」只读行 + 行尾角标 ----
+    const daemonProbe = async (base) => {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 3000);
+        try {
+            const res = await fetch(`${base}/ping`, { signal: ctrl.signal });
+            if (!res.ok) return null;
+            return await res.json();
+        } catch (e) { return null; } finally { clearTimeout(timer); }
+    };
+    const daemonSetStatus = (cfg, text) => {
+        const s = ((cfg && cfg.settings) || []).find((x) => x && x.name === '连接状态');
+        if (s) s.value = text;
+        const el = document.querySelector('[data-role="daemon-status"]');
+        if (el) el.textContent = text;
+    };
+
     const moduleDaemonSync = {
-        name: '同步 Daemon',
+        name: 'Daemon 连接',
         type: 'onclick',
         whitelist: ['/novel', '/wenku', '/favorite', '/workspace'],
         settings: [
             newStringSetting('Daemon 地址', 'http://127.0.0.1:7331'),
+            { name: '连接状态', type: 'status', value: '未探测' },
             newStringSetting('bind', 'none'),
         ],
         run: async function (cfg) {
             const base = (getModuleSetting(cfg, 'Daemon 地址') || '').trim().replace(/\/$/, '');
-            if (!base) { NotificationUtils.showError('未配置 Daemon 地址（如 http://127.0.0.1:7331）'); return; }
+            if (!base) { daemonSetStatus(cfg, '未配置'); NotificationUtils.showError('未配置 Daemon 地址（如 http://127.0.0.1:7331）'); return; }
+            const ping = await daemonProbe(base);
+            if (!ping || !ping.ok) {
+                const lnaHint = (window.location.protocol === 'https:')
+                    ? '；HTTPS 页面若被浏览器拦（Failed to fetch），在地址栏允许本站的本地网络访问权限'
+                    : '';
+                daemonSetStatus(cfg, '离线');
+                if (window._NTRToolBox && typeof window._NTRToolBox.refreshDaemonGlance === 'function') window._NTRToolBox.refreshDaemonGlance(true);
+                NotificationUtils.showError(`daemon 不可达（${base}）：是否在跑？node daemon/index.mjs serve${lnaHint}`);
+                return;
+            }
             let token = '';
             try { token = (JSON.parse(localStorage.getItem('auth-v2')) || {}).token || ''; } catch (e) { }
-            if (!token) { NotificationUtils.showError('读不到站点凭据（auth-v2）：请先在站点登录'); return; }
+            if (!token) {
+                daemonSetStatus(cfg, `在线 ${ping.version || ''} · 未同步（读不到 auth-v2，请先登录站点）`);
+                NotificationUtils.showError('读不到站点凭据（auth-v2）：请先在站点登录');
+                return;
+            }
             const workers = readWorkspaceGptWorkers();
             try {
                 const res = await fetch(`${base}/auth`, {
@@ -1902,7 +1934,8 @@
                     body: JSON.stringify({ token, workers, origin: window.location.origin }),
                 });
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                NotificationUtils.showSuccess(`已同步到 Daemon：凭据 + ${workers.length} 个翻译器`);
+                daemonSetStatus(cfg, `在线 ${ping.version || ''} · 已同步 ${new Date().toLocaleString()}`);
+                NotificationUtils.showSuccess(`已同步到 Daemon（${ping.version || 'daemon'}）：凭据 + ${workers.length} 个翻译器`);
             } catch (e) {
                 const lnaHint = (e instanceof TypeError && window.location.protocol === 'https:')
                     ? '；HTTPS 页面若被浏览器拦（Failed to fetch），在地址栏允许本站的本地网络访问权限'
@@ -7779,6 +7812,10 @@
             }
             // 以默认深拷贝为底合并：名字对不上号的存储模块直接忽略；
             // whitelist/needsTarget/settingGroups 属代码结构，一律以代码为准（spec §1.2）
+            // 模块改名迁移：「同步 Daemon」→「Daemon 连接」（Daemon 地址等设置值原样保留）
+            for (const savedMod of stored.modules) {
+                if (savedMod && savedMod.name === '同步 Daemon') savedMod.name = 'Daemon 连接';
+            }
             const modules = NTRToolBox.cloneDefaultModules();
             const byName = new Map(modules.map(m => [m.name, m]));
             for (const savedMod of stored.modules) {
@@ -7915,6 +7952,14 @@
                     glance.textContent = '|队列:0|运行中:0|';
                     header.appendChild(glance);
                     this.glanceMap.set(mod.name, glance);
+                }
+                // 「Daemon 连接」行尾状态角标（在线/离线），由 refreshDaemonGlance 节流探测刷新
+                if (mod.name === 'Daemon 连接') {
+                    const glance = document.createElement('span');
+                    glance.className = 'ntr-module-glance';
+                    glance.textContent = '|…|';
+                    header.appendChild(glance);
+                    this.daemonGlanceEl = glance;
                 }
 
                 const settingsDiv = document.createElement('div');
@@ -8119,6 +8164,7 @@
                                 input = document.createElement('span');
                                 input.style.color = '#999';
                                 input.textContent = String(setting.value);
+                                if (setting.name === '连接状态') input.dataset.role = 'daemon-status';
                             }
                         }
                         row.appendChild(input);
@@ -8248,9 +8294,39 @@
                 this._lastVisRun = now;
             }
             this.refreshQueueGlance();
+            this.refreshDaemonGlance();
             this._pollTimer = setTimeout(() => {
                 this.scheduleNextPoll();
             }, 10);
+        }
+
+        // 「Daemon 连接」行尾角标：探测 {base}/ping，30s 节流（无常驻心跳压力）
+        refreshDaemonGlance(force) {
+            const el = this.daemonGlanceEl;
+            if (!el) return;
+            const now = Date.now();
+            if (!force && now - (this._lastDaemonPing || 0) < 30000) return;
+            this._lastDaemonPing = now;
+            const mod = this.configuration.modules.find((m) => m.name === 'Daemon 连接');
+            const base = mod ? (getModuleSetting(mod, 'Daemon 地址') || '').trim().replace(/\/$/, '') : '';
+            if (!base) {
+                el.textContent = '|未配置|';
+                el.classList.remove('busy');
+                el.classList.add('has');
+                return;
+            }
+            daemonProbe(base).then((ping) => {
+                if (this.daemonGlanceEl !== el) return;
+                if (ping && ping.ok) {
+                    el.textContent = '|在线|';
+                    el.classList.add('busy');
+                    el.classList.remove('has');
+                } else {
+                    el.textContent = '|离线|';
+                    el.classList.remove('busy');
+                    el.classList.add('has');
+                }
+            }).catch(() => { });
         }
 
         // 「术语队列」行尾速览：队列（待处理）+ 运行中，1s 节流；队列有变化时由 notify() 直接推一次（分叉自有）

@@ -184,6 +184,13 @@ export const UI_HTML = `<!doctype html>
 
   <div class="page" id="tab-settings" data-title="设置">
     <div class="muted" style="margin:0 0 10px">以下均为全局设置，作用于所有项目（规则可按项目覆盖，见「规则」页）。</div>
+    <fieldset><legend>连接（端口 / 跨域白名单 / 上次同步）</legend>
+      <label>默认端口（重启生效） <input type="number" id="conn-port" min="1" max="65535"></label>
+      <button class="btn ghost" id="conn-save">保存连接设置</button>
+      <div style="margin-top:8px"><label>跨域白名单附加条目（每行一个 hostname 或 origin；内置默认 n.novelia.cc / 127.0.0.1 / localhost 不可移除）</label></div>
+      <textarea id="conn-origins" style="min-height:56px" placeholder="例：novelia.cc 或 https://mirror.example.com"></textarea>
+      <div class="muted" id="conn-info" style="margin-top:6px"></div>
+    </fieldset>
     <fieldset><legend>翻译模型池（translate · 站点上传用；保存后立即生效）</legend>
       <div id="pool-tl"></div>
       <div><button class="btn ghost" id="tl-add">＋ 添加端点</button> <button class="btn" id="tl-save">保存翻译池</button></div>
@@ -495,6 +502,13 @@ async function loadSettings() {
     $('ag-prompt').value = agLlm.maxPromptChars || 12000;
     $('ag-strict').checked = agLlm.strictPrompt === true;
     $('set-origin').value = (s.settings && s.settings.origin) || '';
+    const serve = (s.settings && s.settings.serve) || {};
+    $('conn-port').value = serve.port || 7331;
+    $('conn-origins').value = (serve.origins || []).join('\n');
+    const ls = (s.settings && s.settings.lastSync) || null;
+    $('conn-info').textContent = '当前监听 127.0.0.1:' + (serve.port || 7331) + ' · ' +
+      (ls ? '上次同步 ' + new Date(ls.at).toLocaleString() + ' · ' + (ls.origin || '?') + ' · ' + (ls.ua || '?') +
+        ' · ' + (ls.workersCount == null ? '?' : ls.workersCount) + ' 个翻译器' : '从未同步（在站点页面点「同步 Daemon」）');
     $('cred').textContent = 'token：' + (s.settings.tokenSet ? '已同步' : '未同步') +
       ' · 翻译池 ' + ((s.settings.workers || []).length) + ' 个 · 助手池 ' +
       ((agent.workers || []).length > 0 ? (agent.workers.length + ' 个（显式）') : '跟随翻译池');
@@ -563,6 +577,13 @@ $('agent-budget-save').addEventListener('click', async () => {
 });
 $('origin-save').addEventListener('click', async () => {
   try { await post('/settings', { origin: $('set-origin').value.trim() }); toast('origin 已保存'); } catch (e) { toast(e.message, true); }
+});
+$('conn-save').addEventListener('click', async () => {
+  try {
+    const origins = $('conn-origins').value.split('\n').map((x) => x.trim()).filter(Boolean);
+    await post('/settings', { serve: { port: Number($('conn-port').value) || 7331, origins } });
+    toast('连接设置已保存（端口重启后生效）'); loadSettings();
+  } catch (e) { toast(e.message, true); }
 });
 $('token-save').addEventListener('click', async () => {
   try {

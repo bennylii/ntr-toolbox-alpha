@@ -512,7 +512,10 @@ switch (command) {
     }
   }
   case 'serve': {
-    const port = Math.max(1, Number(flags.port) || 7331);
+    // 端口：--port 旗标 > config.serve.port > 7331；实际端口写 .serve-port 供托盘/脚本探测
+    const cfgServe = store.getConfig('serve') || {};
+    const port = Math.max(1, Number(flags.port) || Number(cfgServe.port) || 7331);
+    try { fs.writeFileSync(path.join(here, '.serve-port'), String(port), 'utf8'); } catch { }
     await startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler, queue: jobQueue, makeClient, engine, agentLoop, agentEvents, port, log });
     log.log('serve 模式：Ctrl-C 退出');
     await new Promise(() => { });

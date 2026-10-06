@@ -39,3 +39,4 @@ tools/.ab-report.json
 tools/.ab-fixture.txt
 daemon/work/
 daemon/.tmp-ws-root/
+daemon/.serve-port

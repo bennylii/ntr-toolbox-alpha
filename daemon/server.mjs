@@ -8,6 +8,7 @@ import { PROMPT_SLOTS, DEFAULT_TEMPLATE, FORMAT_RULES } from './prompt.mjs';
 import { UI_HTML } from './ui.mjs';
 import { createJobQueue } from './job-queue.mjs';
 import { restoreSnapshot, applyProposal } from './glossary-io.mjs';
+import { VERSION } from './version.mjs';
 
 const CORS_BASE = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -17,14 +18,30 @@ const CORS_BASE = {
   'Access-Control-Allow-Private-Network': 'true',
 };
 
-const originAllowed = (origin) => {
+const cut0 = (s, n) => { const t = String(s == null ? '' : s); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
+
+const originAllowed = (origin, extraOrigins = []) => {
   if (!origin) return true;   // curl/Node 直连（无 Origin）
-  try {
-    const u = new URL(origin);
-    if (u.hostname === 'n.novelia.cc') return true;
-    if ((u.hostname === '127.0.0.1' || u.hostname === 'localhost') && (u.protocol === 'http:' || u.protocol === 'https:')) return true;
-    return false;
-  } catch { return false; }
+  let u;
+  try { u = new URL(origin); } catch { return false; }
+  if (u.hostname === 'n.novelia.cc') return true;   // 内置默认，不可移除
+  if ((u.hostname === '127.0.0.1' || u.hostname === 'localhost') && (u.protocol === 'http:' || u.protocol === 'https:')) return true;
+  for (const item of extraOrigins || []) {
+    const entry = String(item || '').trim();
+    if (entry === '') continue;
+    if (entry === u.hostname || entry === origin) return true;
+    try { if (new URL(entry).hostname === u.hostname) return true; } catch { /* 非法条目忽略 */ }
+  }
+  return false;
+};
+
+// UA 摘要（只记浏览器名+版本主干，用于"上次同步是谁推的"）
+const uaSummary = (ua) => {
+  const s = String(ua || '');
+  const m = /(Edg|OPR|Chrome|Firefox|Version)\/(\d+)/.exec(s);
+  if (!m) return cut0(s, 40) || '未知';
+  const name = m[1] === 'Edg' ? 'Edge' : m[1] === 'OPR' ? 'Opera' : m[1] === 'Version' ? 'Safari' : m[1];
+  return `${name}/${m[2]}`;
 };
 
 const maskKey = (key) => {
@@ -65,10 +82,13 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
       });
   };
 
+  const serveConfig = () => store.getConfig('serve') || {};
+  const extraOrigins = () => (Array.isArray(serveConfig().origins) ? serveConfig().origins : []);
+
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
     const origin = req.headers.origin;
-    const allowed = originAllowed(origin);
+    const allowed = originAllowed(origin, extraOrigins());
     const cors = { ...CORS_BASE, ...(allowed && origin ? { 'Access-Control-Allow-Origin': origin } : (allowed ? { 'Access-Control-Allow-Origin': '*' } : {})) };
     const send = (code, obj) => { res.writeHead(code, { ...cors, 'content-type': 'application/json' }); res.end(JSON.stringify(obj, null, 2)); };
     const html = (code, text) => { res.writeHead(code, { ...cors, 'content-type': 'text/html; charset=utf-8' }); res.end(text); };
@@ -89,6 +109,10 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         html(200, UI_HTML);
         return;
       }
+      if (req.method === 'GET' && url.pathname === '/ping') {
+        send(200, { ok: true, name: 'ntr-daemon', port, version: VERSION });
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/status') {
         const books = store.listBooks().map((b) => ({
           ...b,
@@ -103,6 +127,8 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           llm: scheduler ? scheduler.stats() : null,
           llmAgent: agentScheduler ? agentScheduler.stats() : null,
           usage: store.usageTotals(),
+          lastSync: store.getConfig('lastSync') || null,
+          serve: { port, ...serveConfig() },
         });
         return;
       }
@@ -118,6 +144,8 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
             origin: store.getConfig('origin') || 'https://n.novelia.cc',
             tokenSet: Boolean(store.getConfig('token')),
             workers: maskList(workers),
+            lastSync: store.getConfig('lastSync') || null,
+            serve: { port, ...serveConfig() },
           },
         });
         return;
@@ -152,6 +180,18 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           if (agentLoop && agentLoop.setOptions) agentLoop.setOptions(merged);
         }
         if (typeof body.origin === 'string' && body.origin.trim() !== '') store.setConfig('origin', body.origin.trim());
+        if (body.serve && typeof body.serve === 'object') {
+          const cur = serveConfig();
+          const next = { ...cur };
+          if (body.serve.port !== undefined) {
+            const portNum = Math.floor(Number(body.serve.port));
+            if (Number.isFinite(portNum) && portNum >= 1 && portNum <= 65535) next.port = portNum;
+          }
+          if (Array.isArray(body.serve.origins)) {
+            next.origins = body.serve.origins.map((o) => String(o || '').trim()).filter(Boolean).slice(0, 32);
+          }
+          store.setConfig('serve', next);
+        }
         log.log('[settings] 设置已更新');
         send(200, { ok: true });
         return;
@@ -286,6 +326,14 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         if (scheduler && Array.isArray(body.workers)) scheduler.setWorkers(body.workers);   // 热更新，无需重启
         // 助手池「跟随翻译池」模式：同步镜像；显式配置过则不被推送覆盖
         if (agentScheduler && Array.isArray(body.workers) && !agentPoolExplicit(store.getConfig('agent'))) agentScheduler.setWorkers(body.workers);
+        // 同步来源可观测：只记元数据，不记 token
+        store.setConfig('lastSync', {
+          at: Date.now(),
+          origin: String(body.origin || ''),
+          ua: uaSummary(req.headers['user-agent']),
+          workersCount: Array.isArray(body.workers) ? body.workers.length : null,
+          tokenSet: Boolean(body.token),
+        });
         log.log('[auth] 凭据/翻译器配置已更新');
         send(200, { ok: true, workers: Array.isArray(body.workers) ? body.workers.length : undefined });
         return;
