@@ -18,7 +18,7 @@
 - **站点自检** — 启动/路由切换时检查脚本依赖的「站点挂点」是否因改版变动，变动时面板角标告警。
 - **Daemon 连接** — 把站点凭据（auth-v2 token）与 GPT 工作区翻译器推给本地 daemon：一键探测+同步；「自动同步」默认开（页面加载即推、token 刷新后 ≤30s 自动重推、指纹去重无变化零请求）；连接状态行 + 行尾在线/离线角标。
 - 翻译器小工具：添加/删除/启动翻译器、复制翻译器到 BETA 工作区、工作区翻译器自动同步、填充术语表（可自动翻页至末页）。
-- 本地 daemon（GPT 翻译 worker + 控制台 + Agent + LG 互通）见 **`daemon/README.md`**；安装后油猴会自动把凭据同步过去。
+- 本地 daemon（GPT 翻译 worker + 控制台 + Agent + LG 互通）见 **`daemon/README.md`**；安装后油猴会自动把凭据同步过去。站点被墙时在控制台设置页「**网络代理**」填本机代理（保存即生效，直连列表默认含回环），一并按「测试」做直连/代理对比探测。
 
 ## 目录导航（新会话/新读者从哪开始）
 
@@ -31,6 +31,7 @@
 | 行为规格（各模块契约） | `docs/cleanroom/spec-01..10` |
 | 版本记录 | [`CHANGELOG.md`](CHANGELOG.md) |
 | KeywordGacha 原项目（术语管线出处） | `keywordgacha/`（junction 挂载的独立 fork 仓库，不入本库） |
+| LinguaGacha 上游（调度/质检/提示词/LG 互通的借鉴出处） | `linguagacha/`（junction 挂载，pin `MANUAL_BUILD_v0.125.0`，不入本库） |
 | 给 AI 代理的工作说明 | [`AGENTS.md`](AGENTS.md)（新会话自动加载） |
 
 ## 安装

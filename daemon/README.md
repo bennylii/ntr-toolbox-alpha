@@ -56,7 +56,7 @@ node daemon/index.mjs forget    <bookKey>
 - **规则**：pre/post 替换、保留段——列表 = 全局 + 当前项目条目（标注来源）；新增默认作用当前项目，「作用域」可切全局；
 - **提示词**：**全局模板**（所有项目共用，LG 式）四槽编辑；按书覆盖仅 API/CLI 保留（高级用法，UI 不暴露）；
 - **助手**：新会话自动挂当前项目；侧栏会话按项目分组（「通用」组收无书会话）；绑书会话的系统提示注入【当前项目】，工具的 book 参数缺省即此书；
-- **设置**：全局设置（作用于所有项目）——七个区块：**连接**（端口 / 跨域白名单附加条目 / 上次同步来源）／**翻译模型池**（端点增删改，key 只写不回显、留空 = 按 id 保持原值）／**助手/术语模型池**（独立端点与并发限流；清空 = 跟随翻译池）／**翻译池调度与限流**／**助手池调度与限流**／**助手参数**（审批模式、maxSteps、工具结果截断、上下文预算）／**站点与凭据**（origin + token 直填）。站点「Daemon 连接」推送仍会整表覆盖**翻译池**（最后写入者赢），但**不再覆盖**显式配置过的助手池；
+- **设置**：全局设置（作用于所有项目）——八个区块：**连接**（端口 / 跨域白名单附加条目 / 上次同步来源）／**翻译模型池**（端点增删改，key 只写不回显、留空 = 按 id 保持原值）／**助手/术语模型池**（独立端点与并发限流；清空 = 跟随翻译池）／**翻译池调度与限流**／**助手池调度与限流**／**助手参数**（审批模式、maxSteps、工具结果截断、上下文预算）／**站点与凭据**（origin + token 直填）／**网络代理**（出网代理开关 / 地址 / 直连列表 / 直连-代理对比测试）。站点「Daemon 连接」推送仍会整表覆盖**翻译池**（最后写入者赢），但**不再覆盖**显式配置过的助手池；
 - **状态**：当前项目概要 + llm 双池统计（并发峰值/冷却/重试）、用量、RSS 采样；
 - **技能**：全局资源（`skills/` 目录，LG 式 SKILL.md 包），不随项目变化。
 
@@ -72,6 +72,17 @@ node daemon/index.mjs forget    <bookKey>
 - 日志：daemon 输出追加到 `daemon/.tray.log`（已被 `*.log` 忽略，需要时手动清）；
 - 开机自启：`Win+R` → `shell:startup` → 放入 `tray.vbs` 的快捷方式；
 - 实现是 PowerShell NotifyIcon（WinForms），无 npm 依赖、无编译步骤；测试口：`-TestSpawn`（拉起临时 db 的 daemon → 等就绪 → 杀掉）与 `-SmokeGui N`（只初始化托盘 GUI，N 秒后自退）。
+
+## 网络代理（出网）
+
+站点 `n.novelia.cc` 在墙内需要代理才能访问；daemon 的出网（站点 API、翻译池、助手/术语池）与控制台设置页「**网络代理**」区块共用一份配置：
+
+- **配置形状**：`config.proxy = { enabled, url, noProxy }`——`url` 只支持 `http://` / `https://`（可带 `user:pass@` 凭据），**不支持 SOCKS5**；`noProxy` 是逗号分隔的直连列表（默认 `127.0.0.1,localhost,::1`，也可写域名，命中本域与其子域）；
+- **保存即生效**：不重启 daemon（每次请求现读配置；这也是没有用 Node 内置 `NODE_USE_ENV_PROXY` 的原因——内置开关只在进程启动前解析环境变量且首值终身缓存）；
+- **对比测试**：设置页「测试（对比直连 / 代理）」按当前填写的值各探测一次站点 origin（各 8s 超时），直接看到「直连失败 / 代理成功」——也可直接调 `POST /proxy/test { proxy, targetUrl? }`；
+- **工作区脚本**：`workspace_run` 的沙箱子进程在 fork 时注入 `HTTP_PROXY/HTTPS_PROXY/NO_PROXY/NODE_USE_ENV_PROXY`，模型脚本自己的 fetch 与 daemon 走同一代理（代理关闭时不注入，保持原样）；
+- **不影响本机**：直连列表默认含回环地址，mock（8788/8790）、托盘 `/status`、控制台自身流量都不经代理；代理关闭时全部直连，行为与旧版一致；
+- CLI（`translate` / `run` / `check` / `agent` / `status`）读同一份配置，`status` 会打印当前代理状态。
 
 ## 调度与限流（默认单线程，适配 Gemini 逆向 / 单槽上游）
 
@@ -189,7 +200,8 @@ node daemon/index.mjs import-lg --book <key> --txt <LG结果.txt> --manifest <�
 - web 版 `POST .../translate-v2/{t}/chapter-task/{ch}` 的 `sync` 查询参数必填（缺了 404；
   `sync=true` 仅站点「同步原文」档使用，翻译链路固定 `false`）；
 - HTTPS 站点页面 fetch 本机 daemon 走 Chrome 本地网络访问（LNA/PNA）：daemon 已在 CORS 预检里回
-  `Access-Control-Allow-Private-Network: true`；浏览器侧首次可能仍需在地址栏允许本站的本地网络权限。
+  `Access-Control-Allow-Private-Network: true`；浏览器侧首次可能仍需在地址栏允许本站的本地网络权限；
+- 站点被墙（墙内直连不上 n.novelia.cc）时：先在控制台设置页「网络代理」填本机代理（如 `http://127.0.0.1:6789`）并点「测试」确认代理侧通、再跑翻译。
 
 ## 与浏览器工作区的关系
 
@@ -214,6 +226,7 @@ node daemon/processors-test.mjs         # 处理链单测（占位符/保留段/
 node daemon/prompt-test.mjs             # 提示词模板单测（默认逐字一致/回退/槽位；无需 mock）
 node daemon/glossary-io-test.mjs        # LG 互通单测（解析/分流/往返；无需 mock）
 node daemon/lg-align-test.mjs           # LG 译文对齐单测（导出行映射/解析容忍/三层校验；无需 mock）
+node daemon/proxy-test.mjs              # 出网代理单测（配置/直连匹配/绝对形式+CONNECT 回环集成；无需 mock）
 node daemon/agent-test.mjs              # Agent 单测（参数解析/裁剪/会话/压缩/决策/循环；无需 mock）
 node daemon/agent-skills-test.mjs       # 技能目录单测（frontmatter/发现/读取/逃逸；无需 mock）
 MOCK_ORIGIN=http://127.0.0.1:8790 node daemon/daemon-test.mjs   # 冒烟：全管线/跳过/续跑/控制面/调度器/质检/处理链/模板/互通/助手/设置页双池/LG导入

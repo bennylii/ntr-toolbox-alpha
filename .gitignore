@@ -49,3 +49,6 @@ daemon/exports/
 
 # KeywordGacha 原项目（junction 挂载，独立 git 仓库不入库）
 /keywordgacha/
+
+# LinguaGacha 上游参考（junction 挂载，pin MANUAL_BUILD_v0.125.0，独立 git 仓库不入库）
+/linguagacha/

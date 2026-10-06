@@ -34,7 +34,7 @@
                                                             LLM 端点（OpenAI 兼容；默认单线程逆向 Gemini）
 ```
 
-分工：**浏览器端**负责「拿站点数据 + 写站点术语表 + 把凭据喂给 daemon」；**daemon** 负责「调 LLM 干活 + 按站点契约回写 + 提供控制台/Agent」。两者对同一本书互斥（单队列 + 书锁），避免双写。
+分工：**浏览器端**负责「拿站点数据 + 写站点术语表 + 把凭据喂给 daemon」；**daemon** 负责「调 LLM 干活 + 按站点契约回写 + 提供控制台/Agent」。两者对同一本书互斥（单队列 + 书锁），避免双写。daemon 的出网（站点 API 与 LLM 端点）可经「网络代理」走本机代理——默认关闭、控制台保存即生效（§4.10）。
 
 ## 2. 进程与目录
 
@@ -113,13 +113,14 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 
 ### 4.9 控制台（`/ui`，OpenWebUI 风格）
 
-「项目」为一级容器：侧栏「当前项目」切换器全站跟随（通用 = 全局视角）；项目页卡片（进度/最近 run/队列/提案 + 导出/导入 LG 按钮）；任务/规则/提示词/助手/状态默认作用于当前项目；规则页另含「内置保护预设」选择器。提示词与技能是**全局资源**（LG 式）。设置页七个区块（连接 / 双模型池×2 / 调度×2 / 助手参数 / 站点与凭据）。
+「项目」为一级容器：侧栏「当前项目」切换器全站跟随（通用 = 全局视角）；项目页卡片（进度/最近 run/队列/提案 + 导出/导入 LG 按钮）；任务/规则/提示词/助手/状态默认作用于当前项目；规则页另含「内置保护预设」选择器。提示词与技能是**全局资源**（LG 式）。设置页八个区块（连接 / 双模型池×2 / 调度×2 / 助手参数 / 站点与凭据 / 网络代理）。
 
 ### 4.10 连接与凭据
 
 - `GET /ping`（免凭据，带版本）供探测；`POST /auth` 收 `{token, workers, origin, auto}`，只回元数据不回 token；
 - **自动同步**：油猴侧 30s glance tick 顺带做「指纹（token+workers+origin）变化才推」，页面加载即推、token 刷新 ≤30s 自愈，无变化零请求；`lastSync.mode = auto|manual` 可观测；
 - CORS：内置 `n.novelia.cc` + localhost（不可移除）+ `config.serve.origins` 附加条目；仅监听 127.0.0.1；LNA/PNA 头已应答（真实用户首次需浏览器授权一次；headless 车道需禁用 LocalNetworkAccessChecks）。
+- **出网代理**：`config.proxy = { enabled, url, noProxy }`；站点 API 与双池的 LLM 调用统一经 `daemon/proxy.mjs` 注入的 fetch（http 目标走代理绝对形式，https 目标走 CONNECT 隧道，支持 `user:pass@` 凭据）；**每次请求现读配置 → 控制台保存即生效**；直连列表默认 `127.0.0.1,localhost,::1`（mock/测试零影响），代理关闭时全部直连（与旧版一致）；不支持 SOCKS5；`POST /proxy/test` 对同一目标做「直连 vs 代理」双探测。工作区沙箱在 fork 时注入 `HTTP_PROXY/HTTPS_PROXY/NO_PROXY/NODE_USE_ENV_PROXY`，脚本出网与 daemon 同路。
 
 ### 4.11 托盘
 
@@ -132,7 +133,8 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 | `GET /ping` `/status` `/settings` `/rules` `/prompts` `/books` `/progress` `/runs` `/proposals` `/snapshots` `/warnings` `/agent/*` | 只读面（探测/状态/配置回读/列表） |
 | `POST /auth` | 凭据 + 翻译器推送（油猴自动/手动共用，带 auto 标记） |
 | `POST /run` | 派发 `translate / glossary / check / lg-import`（单队列，lg-import 校验路径白名单） |
-| `POST /settings` | llm / agent（含 workers、llm 子对象）/ origin / serve（port、origins）/ textPreserve.preset |
+| `POST /settings` | llm / agent（含 workers、llm 子对象）/ origin / serve（port、origins）/ textPreserve.preset / proxy（enabled、url、noProxy） |
+| `POST /proxy/test` | 出网代理探测：同一目标「直连 / 代理」各一次，返回状态与耗时（判断是否被墙） |
 | `POST /books` `/rules` `/prompts` `/snapshots/restore` `/proposals/close|apply` `/lg/export|upload|verify` `/agent/*` | 各域写操作 |
 
 写请求的 Origin 必须在白名单内；`/lg/verify` 与 `lg-import` 的文件路径必须在 `exports/` 或 `uploads/` 下（防任意文件读）。
@@ -150,6 +152,7 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 | 工作区 CodeAct 用文件（JSONL）跨调用 | 与 LG 契约一致；脚本无状态、可审计（changes 文件即提交意图） |
 | 沙箱网络开放 | 与 LG 一致；fs 由 `--permission` 收紧，子进程/worker 被默认拒绝 |
 | 自动同步挂 30s glance tick | 零新增定时器；指纹短路保证无变化零请求 |
+| 出网代理自研转发（而非 Node `NODE_USE_ENV_PROXY`） | 内置开关只在进程启动前解析代理环境变量、首值终身缓存，做不到「保存即生效」；自研转发挂在既有 fetchImpl 收口（site-client + scheduler 两条请求路径），配置每请求现读，且无 Node 版本门槛 |
 | cookie 通道不做 | 站点 API 只认 Bearer；真正续期的 refresh cookie 是 HttpOnly，页面读不到 |
 | UI_HTML 内嵌脚本禁反斜杠转义 | 模板字面量会吃掉 `\n` → 整页静默失效；守卫测试在 daemon-test |
 
@@ -160,6 +163,7 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 | 用户脚本引擎 | `tools/engine-test.mjs` | mock 8788 |
 | 油猴页面流 | `tools/.e2e-*.js`（inject）+ `tools/.run-suite.mjs` | mock 8788/8790 + CDP 车道 |
 | daemon 纯函数 | quality / translate / processors / prompt / glossary-io / lg-align / agent / agent-skills `-test.mjs` | 无 |
+| daemon 代理 | `daemon/proxy-test.mjs`（本地回环测试代理 + 自签证书 fixture） | 无 |
 | daemon 冒烟 | `daemon/daemon-test.mjs`（102 例：管线/调度/质检/Agent/工作区/LG 导入/连接/托盘端口） | mock 8790 |
 | 浏览器 e2e | `.e2e-agent-ui.js`（助手页）、`.e2e-lg-gui.js`（导入 GUI）、`.e2e-daemon-sync.js`（连接/自动同步） | mock 8790 + stub 7343 + CDP 车道 |
 | 真机 | TM 重装（sha256 整文件比对）→ 实站全流程 | 测试 profile + LNA 旗标 |

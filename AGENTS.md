@@ -18,6 +18,7 @@ docs/cleanroom/                行为规格 spec-01..10（全部已实施）
 docs/                          管线说明（html + png）
 skills/                        Agent 技能包（SKILL.md；daemon 运行时读取）
 keywordgacha/                  KeywordGacha 原项目（junction → C:\cache\keywordgacha；用户 fork 独立仓库，不入库）
+linguagacha/                   LinguaGacha 上游参考（junction → C:\cache\linguagacha，pin MANUAL_BUILD_v0.125.0，另有 upstream-main 分支备查；独立仓库不入库）
 daemon/                        本地 daemon（模块地图见下）
 ```
 
@@ -48,6 +49,7 @@ agent-workspace.mjs / workspace-bootstrap.mjs  CodeAct 沙箱工作区（workspa
 agent-skills.mjs                             技能目录（skills/ 包发现与读取）
 ---- 其它 ----
 tray.vbs / tray.ps1           Windows 托盘（隐藏运行 daemon）
+proxy.mjs                     出网代理（HTTP 绝对形式 + HTTPS CONNECT；站点 API/双池/沙箱统一收口，保存即生效）
 version.mjs                   daemon 版本（/ping 与 CHANGELOG/tag 对齐）
 README.md                     使用说明（命令/控制台/托盘/各专项）
 *-test.mjs                    纯函数与冒烟套件（daemon-test 为总入口）
@@ -64,6 +66,7 @@ README.md                     使用说明（命令/控制台/托盘/各专项�
 | 日常使用 / 命令 / 控制台 | `daemon/README.md`；控制台 <http://127.0.0.1:7331/ui>（托盘 `daemon/tray.vbs`） |
 | 查版本 / 发布 | `CHANGELOG.md`；发布流程见下方「交付流程」 |
 | KeywordGacha 上游（术语管线的出处，含 auto-novel 术语表导出） | `keywordgacha/`（junction 挂载的独立 fork 仓库，不入本库） |
+| LinguaGacha 上游（调度/质检/处理链/提示词/LG 互通的借鉴出处） | `linguagacha/`（junction 挂载，pin `MANUAL_BUILD_v0.125.0`——spec-06..10 引用的就是这一版；源码在 `src/` 下） |
 
 ## 常用命令
 
@@ -116,7 +119,7 @@ CDP_PORT=9334 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8789
 
 ## 硬性约定（安全 / 数据）
 
-- 外网仅走本地代理 `http://127.0.0.1:6789`。
+- 外网仅走本地代理 `http://127.0.0.1:6789`（被测 Chrome 用 `--proxy-server`；daemon 自身出网在控制台「网络代理」区块配置，默认关闭、本机回环始终直连）。
 - **绝不打开或读取用户的日常 Chrome profile / 数据**；浏览器测试只在 `chrome-test-profile/` 里做。
 - 写入类 e2e 必须拦截 `PUT .../glossary`，**绝不向线上站点写 mock/测试数据**（站点规范：不要滥用术语表）。
 - 每次测试后清理痕迹（队列任务、localStorage 键、弹层 DOM）。
