@@ -75,6 +75,13 @@ try {
     return item || null;
   }, 60000);
   check('lg-import 执行完成且上传 1 章', !!done && done.state === 'done' && done.stats && done.stats.uploaded === 1, done && JSON.stringify(done.stats));
+  // 5) 面板内进度输出：完成摘要 + 逐章结果
+  const summary = await waitFor(() => {
+    const t = panel.textContent;
+    return t.includes('上传 1 · 失败 0') ? t : null;
+  }, 15000);
+  check('面板内可见完成摘要（上传 1 · 失败 0）', !!summary, summary && summary.slice(-200));
+  check('面板内有逐章结果行（✓）', !!summary && (summary.match(/✓/g) || []).length >= 1, summary && (summary.match(/✓/g) || []).length);
   out.notes.push('清理：任务与上传文件保留在临时 daemon/目录（由外部脚本删除）');
 } catch (e) {
   out.errors.push(String((e && e.stack) || e));

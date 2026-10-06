@@ -42,3 +42,4 @@ daemon/.tmp-ws-root/
 daemon/.serve-port
 daemon/uploads/
 daemon/.tmp-*/
+daemon/exports/

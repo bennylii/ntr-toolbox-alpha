@@ -497,7 +497,39 @@ function openLgImportPanel(card, bookKey) {
     try {
       const limit = Math.max(0, Number(limitInput.value) || 0);
       const r = await post('/run', { bookKey, job: 'lg-import', options: { txtPath: state.txtPath, manifestPath: state.manifestPath, limit } });
-      toast('已入队 lg-import（#' + r.id + '）；进度看「任务」页');
+      applyBtn.disabled = true;
+      const progressBox = document.createElement('div');
+      progressBox.style.cssText = 'margin-top:6px; border-top:1px dashed var(--border); padding-top:6px';
+      progressBox.textContent = '已入队 lg-import #' + r.id + '，等待执行…';
+      box.appendChild(progressBox);
+      toast('已入队 lg-import（#' + r.id + '）');
+      const timer = setInterval(async () => {
+        try {
+          const st = await api('/status');
+          const item = (st.queue || []).find((x) => x.id === r.id);
+          if (!item) { progressBox.textContent = '队列已滚动出最近 20 条；完整结果看「任务」页最近 run。'; clearInterval(timer); return; }
+          const p = item.progress || null;
+          const head = 'lg-import #' + r.id + ' · ' + esc(item.state);
+          if (item.state === 'queued') { progressBox.innerHTML = head + '（排队中）'; return; }
+          let body = '';
+          if (p) {
+            if (p.phase === 'verify') body = esc(p.message || '校验中…');
+            else if (p.phase === 'apply') body = esc(p.message || '提交中…') + (p.failed ? ' · 失败 ' + p.failed : '');
+            else if (p.phase === 'done') body = esc(p.message || '完成');
+            else if (p.phase === 'error') body = '<span class="bad">' + esc(p.message || '失败') + '</span>';
+          }
+          let results = '';
+          if ((item.state === 'done' || item.state === 'failed') && item.stats) {
+            const s = item.stats;
+            const list = (s.results || []).map((x) =>
+              '<div>' + (x.status === 'uploaded' ? '<span class="ok">✓</span>' : '<span class="bad">✗</span>') + ' ' +
+              esc(x.title || x.chapterId) + (x.status === 'uploaded' ? '（' + x.count + ' 段）' : '：' + esc(x.error || '')) + '</div>').join('');
+            results = '<div>上传 ' + s.uploaded + ' · 失败 ' + s.failed + ' · 未过校验 ' + (s.total - s.ok) + ' · 疑似未翻 ' + s.untranslated + ' 行</div>' + list;
+          }
+          progressBox.innerHTML = '<div><b>' + head + '</b> ' + body + '</div>' + results;
+          if (item.state === 'done' || item.state === 'failed') { clearInterval(timer); refresh(); }
+        } catch (e) { progressBox.textContent = '进度查询失败：' + e.message; }
+      }, 1000);
     } catch (e) { toast(e.message, true); }
   });
 }

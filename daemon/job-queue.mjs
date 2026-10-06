@@ -9,6 +9,7 @@ export function createJobQueue({ resolveRunner, log = console, cap = 50 } = {}) 
     id: it.id, bookKey: it.bookKey, job: it.job, state: it.state,
     enqueuedAt: it.enqueuedAt, startedAt: it.startedAt || 0, finishedAt: it.finishedAt || 0,
     error: it.error || '', stats: it.stats || null, options: it.options || {},
+    progress: it.progress || null,
   });
 
   async function pump() {
@@ -23,7 +24,8 @@ export function createJobQueue({ resolveRunner, log = console, cap = 50 } = {}) 
         try {
           const runner = resolveRunner ? resolveRunner(item.job) : null;
           if (!runner) throw new Error(`${item.job} 管线未装配`);
-          const result = await runner.runBook(item.bookKey, { options: item.options });
+          // progress：runner 可在执行中持续上报（publicItem 暴露给前端轮询）；不用的 runner 忽略即可
+          const result = await runner.runBook(item.bookKey, { options: item.options, progress: (p) => { item.progress = p; } });
           item.state = 'done';
           item.stats = (result && result.stats) || null;
         } catch (e) {

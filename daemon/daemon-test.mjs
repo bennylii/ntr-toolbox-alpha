@@ -1400,6 +1400,7 @@ await t('/run lg-import：入队 → 队列执行 → 逐章提交（limit=1 只
   }
   assert.equal(item && item.state, 'done', JSON.stringify(item));
   assert.equal(item.stats.uploaded, 1, JSON.stringify(item.stats));
+  assert.ok(item.progress && item.progress.phase === 'done' && item.progress.uploaded === 1, '队列项带进度终态：' + JSON.stringify(item.progress));
   const stats = await fetch(`${MOCK}/__stats`).then((r) => r.json());
   assert.equal(stats.lastChapterUpload.chapterId, 't1', JSON.stringify(stats.lastChapterUpload));
   const runs = store.listRuns(20).filter((r) => r.job === 'lg-import' && r.bookKey === `web:mock/${LGG_BOOK}`);

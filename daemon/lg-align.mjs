@@ -151,10 +151,11 @@ export async function applyImportReport(client, book, report, { limit = 0, onPro
       await client.uploadChapter(book, c.chapterId, { glossaryId: c.glossaryId, paragraphsZh: c.paragraphsZh }, 'gpt', c.volumeId);
       uploaded += 1;
       results.push({ chapterId: c.chapterId, title: c.title || '', status: 'uploaded', count: c.count });
-      if (onProgress) onProgress(uploaded, c);
+      if (onProgress) onProgress(uploaded, c, { failed });
     } catch (e) {
       failed += 1;
       results.push({ chapterId: c.chapterId, title: c.title || '', status: 'failed', error: String((e && e.message) || e).slice(0, 200) });
+      if (onProgress) onProgress(uploaded, { ...c, failed: true }, { failed });
     }
   }
   return { uploaded, failed, pending: okTotal - uploaded - failed, results };
@@ -163,38 +164,53 @@ export async function applyImportReport(client, book, report, { limit = 0, onPro
 // 队列 runner：读文件 → 校验 → 逐章提交；run 记录落库（任务页可见）
 export function createLgImportRunner({ store, makeClient, log = console }) {
   return {
-    async runBook(bookKey, { options = {} } = {}) {
+    async runBook(bookKey, { options = {}, progress = null } = {}) {
       const { txtPath, manifestPath, limit = 0 } = options;
+      const report = (p) => { try { progress && progress(p); } catch { } };
       if (!txtPath || !manifestPath) throw Object.assign(new Error('lg-import 需要 options.txtPath 与 options.manifestPath'), { code: 'bad_options' });
       const book = store.getBook(bookKey);
       if (!book) throw new Error(`book 不存在：${bookKey}`);
       const runId = store.startRun(bookKey, 'lg-import');
       try {
+        report({ phase: 'verify', message: '读取文件并逐章校验…' });
         const lines = splitResultLines(fs.readFileSync(txtPath, 'utf8'));
         const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
         const client = makeClient(book);
-        const report = await verifyImport({
+        const verified = await verifyImport({
           resultLines: lines,
           manifest,
           getChapter: (chapterId, volumeId) => client.getChapterTask(book, chapterId, 'gpt', volumeId),
         });
-        if (report.globalError) throw new Error(report.globalError);
-        for (const c of report.chapters) {
+        if (verified.globalError) throw new Error(verified.globalError);
+        for (const c of verified.chapters) {
           if (!c.ok) log.log(`  ✗ ${c.title || c.chapterId}：${c.reason}`);
         }
-        const applied = await applyImportReport(client, book, report, {
+        const okTotal = verified.chapters.filter((c) => c.ok).length;
+        const effectiveTotal = limit > 0 ? Math.min(limit, okTotal) : okTotal;
+        report({ phase: 'apply', uploaded: 0, failed: 0, total: effectiveTotal, okTotal, untranslated: verified.untranslated, message: `校验通过 ${verified.okCount}/${verified.total} 章，开始提交…` });
+        const applied = await applyImportReport(client, book, verified, {
           limit: Math.max(0, Number(limit) || 0),
-          onProgress: (n, c) => log.log(`  已提交 ${n}：${c.title || c.chapterId}`),
+          onProgress: (n, c, extra) => {
+            const processed = n + ((extra && extra.failed) || 0);
+            log.log(`  已提交 ${n}：${c.title || c.chapterId}${c.failed ? '（失败）' : ''}`);
+            report({
+              phase: 'apply', uploaded: n, failed: (extra && extra.failed) || 0, processed, total: effectiveTotal, okTotal,
+              current: c.title || c.chapterId,
+              message: `提交中 ${processed}/${effectiveTotal}：${c.title || c.chapterId}${c.failed ? '（失败，继续）' : ''}`,
+            });
+          },
         });
         const stats = {
-          total: report.total, ok: report.okCount, untranslated: report.untranslated,
+          total: verified.total, ok: verified.okCount, untranslated: verified.untranslated,
           uploaded: applied.uploaded, failed: applied.failed, pending: applied.pending,
         };
+        report({ phase: 'done', uploaded: applied.uploaded, failed: applied.failed, total: effectiveTotal, okTotal, untranslated: verified.untranslated, message: `完成：上传 ${applied.uploaded}，失败 ${applied.failed}，未过校验 ${verified.total - verified.okCount}` });
         store.finishRun(runId, applied.uploaded === 0 && applied.failed > 0 ? 'failed' : 'done', stats);
         return {
           stats: { ...stats, results: applied.results.slice(0, 100) },
         };
       } catch (e) {
+        report({ phase: 'error', message: '失败：' + ((e && e.message) || e) });
         store.finishRun(runId, 'failed', { error: (e && e.message) || String(e) });
         throw e;
       }
