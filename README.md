@@ -30,6 +30,7 @@
 | 改 daemon 功能 | `daemon/`（模块地图见 [AGENTS.md](AGENTS.md)）→ `daemon/daemon-test.mjs` |
 | 行为规格（各模块契约） | `docs/cleanroom/spec-01..10` |
 | 版本记录 | [`CHANGELOG.md`](CHANGELOG.md) |
+| KeywordGacha 原项目（术语管线出处） | `keywordgacha/`（junction 挂载的独立 fork 仓库，不入本库） |
 | 给 AI 代理的工作说明 | [`AGENTS.md`](AGENTS.md)（新会话自动加载） |
 
 ## 安装

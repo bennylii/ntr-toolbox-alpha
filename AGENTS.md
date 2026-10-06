@@ -17,6 +17,7 @@ docs/architecture.md           ★ 架构总览（组件图/数据模型/子系�
 docs/cleanroom/                行为规格 spec-01..10（全部已实施）
 docs/                          管线说明（html + png）
 skills/                        Agent 技能包（SKILL.md；daemon 运行时读取）
+keywordgacha/                  KeywordGacha 原项目（junction → C:\cache\keywordgacha；用户 fork 独立仓库，不入库）
 daemon/                        本地 daemon（模块地图见下）
 ```
 
@@ -62,6 +63,7 @@ README.md                     使用说明（命令/控制台/托盘/各专项�
 | 找某个行为的规格 | `docs/cleanroom/spec-01..10` |
 | 日常使用 / 命令 / 控制台 | `daemon/README.md`；控制台 <http://127.0.0.1:7331/ui>（托盘 `daemon/tray.vbs`） |
 | 查版本 / 发布 | `CHANGELOG.md`；发布流程见下方「交付流程」 |
+| KeywordGacha 上游（术语管线的出处，含 auto-novel 术语表导出） | `keywordgacha/`（junction 挂载的独立 fork 仓库，不入本库） |
 
 ## 常用命令
 

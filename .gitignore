@@ -46,3 +46,6 @@ daemon/exports/
 
 # 会话本地状态（ZCode）
 .zcode/
+
+# KeywordGacha 原项目（junction 挂载，独立 git 仓库不入库）
+/keywordgacha/
