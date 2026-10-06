@@ -217,4 +217,6 @@ node daemon/agent-skills-test.mjs       # 技能目录单测（frontmatter/发�
 MOCK_ORIGIN=http://127.0.0.1:8790 node daemon/daemon-test.mjs   # 冒烟：全管线/跳过/续跑/控制面/调度器/质检/处理链/模板/互通/助手/设置页双池/LG导入
 powershell -File daemon/tray.ps1 -TestSpawn -Port 7377          # 托盘冒烟：拉起(临时db)→等就绪→杀掉；-SmokeGui N 只验 GUI 初始化
 # 助手页 e2e（浏览器车道）：mock 在 8790，daemon 在 7355（--db daemon/.tmp-agent-ui.db），见 tools/.e2e-agent-ui.js 头部跑法
+# LG 导入 GUI e2e：mock 在 8790，daemon 在 7356（--db daemon/.tmp-lggui.db，预置 mock-trans-lg4-* 书），见 tools/.e2e-lg-gui.js 头部
+# Daemon 连接 e2e：mock 8790 + tools/.run-daemon-stub.mjs（7343：/ping /auth /last /reset），见 tools/.e2e-daemon-sync.js 头部
 ```

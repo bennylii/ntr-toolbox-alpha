@@ -2,6 +2,29 @@
 
 All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 
+## 未发布（v0.8.0-alpha.2-dev）
+
+自 v0.8.0-alpha.1 之后的增量（均已合入 main，未打 tag）：
+
+### 用户脚本
+
+- 「同步 Daemon」→「**Daemon 连接**」：`/ping` 探测式同步、连接状态只读行 + 行尾在线/离线角标（30s 节流）、**凭据自动同步**（默认开：页面加载即推、token 刷新后 ≤30s 自动重推、指纹去重无变化零请求）；模块改名迁移保留 Daemon 地址设置。
+
+### daemon
+
+- **控制台项目一级化（LG 式）**：项目 = 登记的书（一级容器）；侧栏「当前项目」切换器全站跟随；「书籍」页升级为「项目」页（卡片：进度/最近 run/队列/提案 + 详情）；任务/规则/助手/状态跟随当前项目；助手会话按项目分组、绑书会话注入【当前项目】上下文；
+- **Agent 工作区（CodeAct，LG 同款）**：`workspace_run`（`--permission` 沙箱脚本执行 + `ws` API：contract/doing/read 章节）与 `workspace_apply`（`changes/**.jsonl` 变更清单 → fp 漂移检测 → 审批 → 事务提交 → 回执）；工作区数据集含 warnings；
+- **质检 v2（对齐 LG）**：`FOREIGN_CHAR_RESIDUE` 字素+书写系统分类（片段证据、拉丁短串豁免）、`SIMILARITY` 原始文本比较 + JA→ZH 残留护栏、`PUNCTUATION_MISMATCH` 标点组序列、`TEXT_PRESERVE` 实装（保留段逐位比对+证据）；警告落库 `warnings` 表 → `GET /warnings`、agent `list_warnings`、工作区 `warnings/entries.jsonl`、控制台项目详情；
+- **内置保护规则预设**：base/kag/renpy/rpgmaker/wolf 五层（对齐 LG 预设库），规则页切换（`config.textPreserve.preset`），与用户规则按 pattern 优先合并；质检按非空白片段比对（LG 语义）；
+- **LG 译文导出/导入进 GUI**：项目页「导出 LG 源文 / 导入 LG 译文」，上传结果 txt → 逐章校验报告（行号三层对齐）→ 提交通过章入队 `lg-import`（面板内实时进度）；
+- **连接配置与状态可见化**：端口持久化（`config.serve.port` + 托盘自读）、`GET /ping`、`lastSync`（origin/UA 摘要/翻译器数/`mode: auto|manual`）、跨域白名单可扩展（内置默认不可移除）、设置页「连接」区；
+- **设置页 v2**：双模型池（翻译 vs 助手/术语，独立并发限流；助手池显式后不被油猴推送覆盖）、池端点增删改（key 只写回掩码）、token 直填、助手参数（审批/maxSteps/上下文预算）；
+- **Windows 托盘**（零依赖 PowerShell NotifyIcon）：隐藏运行 daemon，菜单 = 控制台/状态/日志/重启/退出，意外退出气泡，`shell:startup` 自启。
+
+### 兼容性
+
+- 质检 v2 命中判定变化属预期（更接近 LG）；`runs` 旧数据不动；控制台设置/规则结构兼容旧配置存档（新设置自动回填、模块改名有迁移）。
+
 ## v0.8.0-alpha.1（2026-10-06）
 
 首个打点版本：Tampermonkey 用户脚本 + 本地 Node daemon 一起发布。

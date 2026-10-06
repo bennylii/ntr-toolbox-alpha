@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-[n.novelia.cc](https://n.novelia.cc) 的 Tampermonkey 用户脚本 **ntr-toolbox-alpha**：对 TheNano 的 NTR ToolBox（GreasyFork 527754，All Rights Reserved）功能行为的 **clean-room 重构**，并新增 **AI 术语表提取 / 审核 / 队列** 管线。单文件用户脚本，无构建步骤、无依赖安装。实现代码 MIT（见 README「clean-room 重构说明」）。
+[n.novelia.cc](https://n.novelia.cc) 的 Tampermonkey 用户脚本 **ntr-toolbox-alpha**：对 TheNano 的 NTR ToolBox（GreasyFork 527754，All Rights Reserved）功能行为的 **clean-room 重构**，并新增 **AI 术语表提取 / 审核 / 队列** 管线；另带一个**本地 Node daemon**（GPT 翻译 worker、控制台 GUI、Agent、LG 互通——详见 `daemon/README.md`）。单文件用户脚本 + 零依赖 daemon，无构建步骤、无依赖安装。实现代码 MIT（见 README「clean-room 重构说明」）。
 
 ## 结构
 
@@ -10,10 +10,12 @@
 ntr-toolbox-alpha.user.js      唯一源文件（改它；没有 src/）
 ntr-toolbox-alpha.dev.user.js  由 .gen-dev.mjs 生成（@version 追加 -dev、@name 加 (dev)），不要手改
 tools/                         开发/测试脚本（.e2e-*.js = 页面上下文断言套件；.probe-*.js = 小探针）
-docs/cleanroom/                各模块重构前的行为规格（spec-01..05，全部已实施）
-mock-llm/server.mjs            假 LLM + 假站点（端口 8788）
+daemon/                        本地 daemon（入口 index.mjs；控制台 ui.mjs；详见 daemon/README.md 与其内测试清单）
+docs/cleanroom/                各模块重构前的行为规格（spec-01..10，全部已实施）
+mock-llm/server.mjs            假 LLM + 假站点（端口 8788；daemon 测试用 8790）
 debug-env/                     离线站点页面替身（无网络也能开发/截图）
 docs/                          管线说明（html + png）
+CHANGELOG.md                   版本记录（发布时与 @version / daemon version.mjs 对齐）
 ```
 
 ## 常用命令
@@ -25,6 +27,12 @@ node tools/.gen-dev.mjs                      # 生成 ntr-toolbox-alpha.dev.user
 node tools/engine-test.mjs                   # GlossaryEngine 单测（需 mock 在跑）
 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8788/wenku/mock-src"   # 跑 e2e 套件
 node tools/cdp.mjs open <url> | inject | evalf <file> | shot <png> | logs   # 直接操作浏览器（CDP_PORT 环境变量换端口）
+
+# daemon（详见 daemon/README.md）：
+node daemon/index.mjs serve --port 7331      # 控制台 /ui + 控制面（或双击托盘 daemon/tray.vbs）
+PORT=8790 node mock-llm/server.mjs           # daemon 测试车道 mock（8790）
+node daemon/daemon-test.mjs                  # daemon 冒烟（需 8790 mock）
+node daemon/quality-test.mjs                 # 等纯函数套件（quality/translate/processors/prompt/glossary-io/lg-align/agent*，无需 mock）
 ```
 
 测试用 Chrome（独立 profile，绝不用日常 Chrome）：
@@ -78,6 +86,9 @@ CDP_PORT=9334 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8789
 - `GlossaryQueue` 状态在 IndexedDB（库名见源码），用例结束记得 `Q.stop()` + 清任务 + 移除 `#ntr-queue-overlay`。
 - 新设置行/按钮在「术语队列」右键设置面板，源码里 `queueSettings()` / `jobRuntime()` 是运行时覆盖入口（并发/RPM/逾时，0 = 跟随主设置）。
 - TM 的 `@match` 只覆盖真实站点域名，不含 127.0.0.1 —— mock 页上装好的 TM 脚本**不会**注入（属正常），mock 测试一律走 `cdp.mjs inject`。
+- **`daemon/ui.mjs` 的 UI_HTML 是模板字面量**：内嵌 JS 里写 `'\n'` 这类转义会被外层吃掉成真换行 → 整页脚本静默语法错误（页面渲染但毫无功能）；要么写 `\\n`、要么避免反斜杠。daemon-test 有「/ui 内嵌脚本可解析」守卫，改 UI 后必须全量跑。
+- mock 8788/8790 掉线时：engine-test 会**跳过**「请求层/编排」集成段（计数变少但 0 失败，别误判），daemon-test 则会卡住等 fetch——跑 daemon 系测试前先确认 mock 活着。
+- TM 安装/重装对话框落在扩展的 `ask.html`（targets[0]），按钮是 `<input value="更新/重新安装">`——按 **value** 匹配点击；同版本重装按钮文案是「重新安装」。
 
 ## 上游与许可
 

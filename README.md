@@ -16,7 +16,9 @@
 - **导入术语表(KWG)** — KWG 默认 `output.json` 数组 / 扁平 JSON / `原文 => 译文` 文本 / 剪贴板 / 点选或拖入文件，统一进 diff 弹层（新增/冲突/相同/仅已有）。
 - **回滚术语表** — 每次写入前自动快照（每目标保留最近 20 版）→ 选版本 → diff 预览 → 回滚。
 - **站点自检** — 启动/路由切换时检查脚本依赖的「站点挂点」是否因改版变动，变动时面板角标告警。
+- **Daemon 连接** — 把站点凭据（auth-v2 token）与 GPT 工作区翻译器推给本地 daemon：一键探测+同步；「自动同步」默认开（页面加载即推、token 刷新后 ≤30s 自动重推、指纹去重无变化零请求）；连接状态行 + 行尾在线/离线角标。
 - 翻译器小工具：添加/删除/启动翻译器、复制翻译器到 BETA 工作区、工作区翻译器自动同步、填充术语表（可自动翻页至末页）。
+- 本地 daemon（GPT 翻译 worker + 控制台 + Agent + LG 互通）见 **`daemon/README.md`**；安装后油猴会自动把凭据同步过去。
 
 ## 安装
 
@@ -25,13 +27,16 @@
 
 ## 开发
 
-源码就一个文件：**`ntr-toolbox-alpha.user.js`**（改了直接改它）。
+源码就一个文件：**`ntr-toolbox-alpha.user.js`**（改了直接改它）。本地 daemon 在 `daemon/`（详见 `daemon/README.md`）。
 
 ```sh
 node tools/.gen-dev.mjs          # 生成 ntr-toolbox-alpha.dev.user.js
 node tools/engine-test.mjs       # 引擎单测（需要 mock 在跑）
 # e2e 套件（在页面上下文里执行，返回 JSON 断言）：
 node tools/.run-suite.mjs tools/.e2e-queue-retry-btn.js "http://127.0.0.1:8788/wenku/mock-src"
+# daemon 侧测试（详见 daemon/README.md「测试」）：
+PORT=8790 node mock-llm/server.mjs
+node daemon/daemon-test.mjs      # 冒烟（全管线/质检/Agent/工作区/LG 导入/连接配置…）
 ```
 
 ### 测试环境
