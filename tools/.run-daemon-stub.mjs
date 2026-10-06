@@ -3,6 +3,7 @@
 import http from 'node:http';
 
 let last = {};
+let authCount = 0;
 const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -22,13 +23,20 @@ http.createServer(async (req, res) => {
     const chunks = [];
     for await (const c of req) chunks.push(c);
     try { last = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { last = {}; }
+    authCount += 1;
     res.writeHead(200, { ...headers, 'content-type': 'application/json' });
     res.end('{"ok":true}');
     return;
   }
   if (req.method === 'GET' && req.url === '/last') {
     res.writeHead(200, { ...headers, 'content-type': 'application/json' });
-    res.end(JSON.stringify(last));
+    res.end(JSON.stringify({ ...last, __count: authCount }));
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/reset') {
+    last = {}; authCount = 0;
+    res.writeHead(200, { ...headers, 'content-type': 'application/json' });
+    res.end('{"ok":true}');
     return;
   }
   res.writeHead(404, headers);

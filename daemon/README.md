@@ -38,7 +38,7 @@ node daemon/index.mjs forget    <bookKey>
 ### 连接（端口 / 探测 / 同步来源）
 - **端口**：设置页「连接」区改默认端口（**重启生效**）；托盘 `tray.ps1` 默认不传 `--port`（自读 config），`Wait-Ready` 跟随 `.serve-port`；显式 `-Port N` 仍可覆盖；
 - **`GET /ping`**：无需凭据，返回 `{ ok, name, port, version }`——油猴角标与外部脚本探测用（带 CORS，走同一白名单）；
-- **同步来源**：`POST /auth` 记录 `lastSync { at, origin, UA 摘要, workersCount }`（只记元数据不记 token）→ `/status` 与设置页「连接」区可见——多浏览器推送时一眼分辨是谁在生效；
+- **同步来源**：`POST /auth` 记录 `lastSync { at, origin, UA 摘要, workersCount, mode: auto|manual }`（只记元数据不记 token）→ `/status` 与设置页「连接」区可见（自动/手动）——多浏览器推送时一眼分辨是谁在生效；**油猴「Daemon 连接」开启「自动同步」（默认开）后**：页面加载即自动推送，站内 token 刷新后 ≤30s 自动重推（指纹去重，无变化零请求），不再需要手动点；daemon 报 401（need-auth）时页面开着即可自愈；
 - **跨域白名单**：内置默认 `n.novelia.cc` + `127.0.0.1/localhost`（不可移除）；设置页「连接」区可加附加条目（hostname 或 origin，即时生效）。
 
 ## 控制台（设置 GUI）

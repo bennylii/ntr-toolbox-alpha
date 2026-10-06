@@ -1375,18 +1375,26 @@ await t('/ping：无需凭据、带版本', async () => {
   assert.equal(ping.port, 7369);
   assert.ok(String(ping.version).startsWith('v0.8.'));
 });
-await t('/auth 记录 lastSync（origin/UA 摘要/workers 数）→ /status 暴露', async () => {
+await t('/auth 记录 lastSync（origin/UA 摘要/workers 数/auto 标记）→ /status 暴露', async () => {
   await fetch(`${C}/auth`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 (Windows NT) Chrome/140.0.0.0' },
     body: JSON.stringify({ token: 'tok-conn', workers: [TLW('w0', 'k0')], origin: 'https://n.novelia.cc' }),
   });
-  const status = await fetch(`${C}/status`).then((r) => r.json());
-  const ls = status.lastSync;
+  let status = await fetch(`${C}/status`).then((r) => r.json());
+  let ls = status.lastSync;
   assert.ok(ls && ls.at > 0, JSON.stringify(ls));
   assert.equal(ls.origin, 'https://n.novelia.cc');
   assert.equal(ls.ua, 'Chrome/140', JSON.stringify(ls));
   assert.equal(ls.workersCount, 1);
   assert.equal(ls.tokenSet, true);
+  assert.equal(ls.mode, 'manual', '不带 auto 的推送记 manual');
+  await fetch(`${C}/auth`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: 'tok-conn2', workers: [TLW('w0', 'k0')], origin: 'https://n.novelia.cc', auto: true }),
+  });
+  status = await fetch(`${C}/status`).then((r) => r.json());
+  ls = status.lastSync;
+  assert.equal(ls.mode, 'auto', 'auto:true 记自动同步');
   const settings = await fetch(`${C}/settings`).then((r) => r.json());
   assert.ok(settings.settings.lastSync && settings.settings.lastSync.at > 0, 'GET /settings 也带 lastSync');
 });

@@ -1896,6 +1896,61 @@
         const el = document.querySelector('[data-role="daemon-status"]');
         if (el) el.textContent = text;
     };
+    const DAEMON_FP_KEY = 'ntr-daemon-auth-fp';
+    const daemonReadToken = () => {
+        // 优先复用工具箱的 initToken 回落链（auth-v2 → auth.profile），再兜底直读
+        try {
+            const box = window._NTRToolBox;
+            if (box && typeof box.initToken === 'function') {
+                const t = box.initToken();
+                if (t) return t;
+            }
+        } catch (e) { }
+        try { return (JSON.parse(localStorage.getItem('auth-v2')) || {}).token || ''; } catch (e) { return ''; }
+    };
+    const daemonFingerprint = (token, workers) => JSON.stringify({ token, workers, origin: window.location.origin });
+    // 共用推送：manual（手动点）/ auto（30s tick 自动）同一条路径；silent 时不弹成功/失败通知
+    const daemonPushCredentials = async (cfg, { silent = false, auto = false } = {}) => {
+        const base = (getModuleSetting(cfg, 'Daemon 地址') || '').trim().replace(/\/$/, '');
+        const lnaHintOf = (e) => (e instanceof TypeError && window.location.protocol === 'https:')
+            ? '；HTTPS 页面若被浏览器拦（Failed to fetch），在地址栏允许本站的本地网络访问权限'
+            : '';
+        if (!base) {
+            daemonSetStatus(cfg, '未配置');
+            if (!silent) NotificationUtils.showError('未配置 Daemon 地址（如 http://127.0.0.1:7331）');
+            return { ok: false, error: 'no_base' };
+        }
+        const ping = await daemonProbe(base);
+        if (!ping || !ping.ok) {
+            daemonSetStatus(cfg, '离线');
+            if (window._NTRToolBox && typeof window._NTRToolBox.refreshDaemonGlance === 'function') window._NTRToolBox.refreshDaemonGlance(true);
+            if (!silent) NotificationUtils.showError(`daemon 不可达（${base}）：是否在跑？node daemon/index.mjs serve${lnaHintOf(new TypeError())}`);
+            return { ok: false, error: 'offline' };
+        }
+        const token = daemonReadToken();
+        if (!token) {
+            daemonSetStatus(cfg, `在线 ${ping.version || ''} · 未同步（读不到站内凭据，请先登录）`);
+            if (!silent) NotificationUtils.showError('读不到站点凭据（auth-v2 / auth）：请先在站点登录');
+            return { ok: false, error: 'no_token' };
+        }
+        const workers = readWorkspaceGptWorkers();
+        try {
+            const res = await fetch(`${base}/auth`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token, workers, origin: window.location.origin, auto: !!auto }),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const fp = daemonFingerprint(token, workers);
+            try { localStorage.setItem(DAEMON_FP_KEY, fp); } catch (e) { }
+            daemonSetStatus(cfg, `在线 ${ping.version || ''} · 已同步 ${new Date().toLocaleString()}`);
+            if (!silent) NotificationUtils.showSuccess(`已同步到 Daemon（${ping.version || 'daemon'}）：凭据 + ${workers.length} 个翻译器`);
+            return { ok: true, version: ping.version || '', workers: workers.length, fingerprint: fp };
+        } catch (e) {
+            if (!silent) NotificationUtils.showError(`同步失败：${(e && e.message) || e}（daemon 是否在跑？node daemon/index.mjs serve${lnaHintOf(e)}）`);
+            return { ok: false, error: String((e && e.message) || e) };
+        }
+    };
 
     const moduleDaemonSync = {
         name: 'Daemon 连接',
@@ -1903,45 +1958,12 @@
         whitelist: ['/novel', '/wenku', '/favorite', '/workspace'],
         settings: [
             newStringSetting('Daemon 地址', 'http://127.0.0.1:7331'),
+            newBooleanSetting('自动同步', true),
             { name: '连接状态', type: 'status', value: '未探测' },
             newStringSetting('bind', 'none'),
         ],
         run: async function (cfg) {
-            const base = (getModuleSetting(cfg, 'Daemon 地址') || '').trim().replace(/\/$/, '');
-            if (!base) { daemonSetStatus(cfg, '未配置'); NotificationUtils.showError('未配置 Daemon 地址（如 http://127.0.0.1:7331）'); return; }
-            const ping = await daemonProbe(base);
-            if (!ping || !ping.ok) {
-                const lnaHint = (window.location.protocol === 'https:')
-                    ? '；HTTPS 页面若被浏览器拦（Failed to fetch），在地址栏允许本站的本地网络访问权限'
-                    : '';
-                daemonSetStatus(cfg, '离线');
-                if (window._NTRToolBox && typeof window._NTRToolBox.refreshDaemonGlance === 'function') window._NTRToolBox.refreshDaemonGlance(true);
-                NotificationUtils.showError(`daemon 不可达（${base}）：是否在跑？node daemon/index.mjs serve${lnaHint}`);
-                return;
-            }
-            let token = '';
-            try { token = (JSON.parse(localStorage.getItem('auth-v2')) || {}).token || ''; } catch (e) { }
-            if (!token) {
-                daemonSetStatus(cfg, `在线 ${ping.version || ''} · 未同步（读不到 auth-v2，请先登录站点）`);
-                NotificationUtils.showError('读不到站点凭据（auth-v2）：请先在站点登录');
-                return;
-            }
-            const workers = readWorkspaceGptWorkers();
-            try {
-                const res = await fetch(`${base}/auth`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ token, workers, origin: window.location.origin }),
-                });
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                daemonSetStatus(cfg, `在线 ${ping.version || ''} · 已同步 ${new Date().toLocaleString()}`);
-                NotificationUtils.showSuccess(`已同步到 Daemon（${ping.version || 'daemon'}）：凭据 + ${workers.length} 个翻译器`);
-            } catch (e) {
-                const lnaHint = (e instanceof TypeError && window.location.protocol === 'https:')
-                    ? '；HTTPS 页面若被浏览器拦（Failed to fetch），在地址栏允许本站的本地网络访问权限'
-                    : '';
-                NotificationUtils.showError(`同步失败：${(e && e.message) || e}（daemon 是否在跑？node daemon/index.mjs serve${lnaHint}）`);
-            }
+            await daemonPushCredentials(cfg, { silent: false, auto: false });
         },
     };
 
@@ -8301,6 +8323,7 @@
         }
 
         // 「Daemon 连接」行尾角标：探测 {base}/ping，30s 节流（无常驻心跳压力）
+        // 同一 tick 顺带做「凭据自动同步」：自动同步开 + 在线 + 指纹（token+workers+origin）变化才推送
         refreshDaemonGlance(force) {
             const el = this.daemonGlanceEl;
             if (!el) return;
@@ -8321,12 +8344,33 @@
                     el.textContent = '|在线|';
                     el.classList.add('busy');
                     el.classList.remove('has');
+                    this.daemonAutoSync(mod);
                 } else {
                     el.textContent = '|离线|';
                     el.classList.remove('busy');
                     el.classList.add('has');
                 }
             }).catch(() => { });
+        }
+
+        // 自动同步：指纹不变则零网络请求；首次静默推；旧指纹变化（token 刷新）推并提示一次
+        async daemonAutoSync(mod) {
+            if (!mod || this._daemonSyncBusy) return;
+            if (getModuleSetting(mod, '自动同步') === false) return;
+            const token = daemonReadToken();
+            if (!token) return;
+            const workers = readWorkspaceGptWorkers();
+            const fp = daemonFingerprint(token, workers);
+            let prev = null;
+            try { prev = localStorage.getItem(DAEMON_FP_KEY); } catch (e) { }
+            if (prev === fp) return;
+            this._daemonSyncBusy = true;
+            try {
+                const r = await daemonPushCredentials(mod, { silent: prev === null, auto: true });
+                if (r.ok && prev !== null) NotificationUtils.showSuccess('凭据已自动更新到 Daemon');
+            } finally {
+                this._daemonSyncBusy = false;
+            }
         }
 
         // 「术语队列」行尾速览：队列（待处理）+ 运行中，1s 节流；队列有变化时由 notify() 直接推一次（分叉自有）

@@ -20,7 +20,7 @@ const setSetting = (mod, name, value) => { const s = mod.settings.find((x) => x.
 try {
   const box = window._NTRToolBox;
   const mod = (box.configuration.modules || []).find((m) => m.name === 'Daemon 连接');
-  check('模块「Daemon 连接」已注册（Daemon 地址 + 连接状态行）', !!mod && (mod.settings || []).some((s) => s.name === 'Daemon 地址') && (mod.settings || []).some((s) => s.name === '连接状态'), mod && (mod.settings || []).map((s) => s.name));
+  check('模块「Daemon 连接」已注册（地址 + 自动同步 + 连接状态行）', !!mod && ['Daemon 地址', '自动同步', '连接状态'].every((n) => (mod.settings || []).some((s) => s.name === n)), mod && (mod.settings || []).map((s) => s.name));
 
   const origAuth = localStorage.getItem('auth-v2');
   const origAddr = mod ? (mod.settings.find((s) => s.name === 'Daemon 地址') || {}).value : '';
@@ -52,7 +52,33 @@ try {
   const glance = box.daemonGlanceEl || document.querySelector('.ntr-daemon-glance');
   check('行尾 daemon 角标存在（glance 已挂）', !!glance || typeof box.refreshDaemonGlance === 'function', !!box.daemonGlanceEl);
 
+  // 4) 自动同步：指纹未变零推送 → token 变化自动重推（auto 标记）→ 再次 tick 不重复
+  setSetting(mod, 'Daemon 地址', 'http://127.0.0.1:7343');
+  setSetting(mod, '自动同步', true);
+  await fetch('http://127.0.0.1:7343/reset', { method: 'POST' });
+  toastTexts.length = 0;
+  box.refreshDaemonGlance(true);
+  await sleep(1500);
+  const c0 = await fetch('http://127.0.0.1:7343/last').then((r) => r.json());
+  check('指纹未变 → 自动 tick 零推送（去重）', c0.__count === 0, c0.__count);
+  localStorage.setItem('auth-v2', JSON.stringify({ token: 'e2e-token-auto-1' }));
+  box.refreshDaemonGlance(true);
+  let pushed = null;
+  for (let i = 0; i < 20 && !pushed; i += 1) {
+    await sleep(300);
+    const c = await fetch('http://127.0.0.1:7343/last').then((r) => r.json());
+    if (c.__count >= 1) pushed = c;
+  }
+  check('token 变化 → 自动重推（auto 标记 + 新 token）', !!pushed && pushed.token === 'e2e-token-auto-1' && pushed.auto === true, pushed);
+  check('自动更新提示出现', toastTexts.some((t) => /凭据已自动更新/.test(t)), toastTexts);
+  toastTexts.length = 0;
+  box.refreshDaemonGlance(true);
+  await sleep(1500);
+  const c2 = await fetch('http://127.0.0.1:7343/last').then((r) => r.json());
+  check('再次 tick 不重复推送（指纹已更新）', c2.__count === 1, c2.__count);
+
   // 还原种子数据
+  localStorage.removeItem('ntr-daemon-auth-fp');
   if (origAuth === null) localStorage.removeItem('auth-v2'); else localStorage.setItem('auth-v2', origAuth);
   if (mod) setSetting(mod, 'Daemon 地址', origAddr);
 } catch (e) {

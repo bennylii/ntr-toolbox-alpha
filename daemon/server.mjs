@@ -373,13 +373,14 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         if (scheduler && Array.isArray(body.workers)) scheduler.setWorkers(body.workers);   // 热更新，无需重启
         // 助手池「跟随翻译池」模式：同步镜像；显式配置过则不被推送覆盖
         if (agentScheduler && Array.isArray(body.workers) && !agentPoolExplicit(store.getConfig('agent'))) agentScheduler.setWorkers(body.workers);
-        // 同步来源可观测：只记元数据，不记 token
+        // 同步来源可观测：只记元数据，不记 token；mode 区分手动点按与油猴自动同步
         store.setConfig('lastSync', {
           at: Date.now(),
           origin: String(body.origin || ''),
           ua: uaSummary(req.headers['user-agent']),
           workersCount: Array.isArray(body.workers) ? body.workers.length : null,
           tokenSet: Boolean(body.token),
+          mode: body.auto === true ? 'auto' : 'manual',
         });
         log.log('[auth] 凭据/翻译器配置已更新');
         send(200, { ok: true, workers: Array.isArray(body.workers) ? body.workers.length : undefined });

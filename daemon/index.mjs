@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // daemon/index.mjs —— GPT 翻译 worker 运行器（站点工作区兼容；零依赖，Node >= 24）
 // 子命令：
-//   auth <token>            保存站点凭据（也可由油猴「同步 Daemon」推送）
+//   auth <token>            保存站点凭据（也可由油猴「Daemon 连接」推送/自动同步）
 //   add <novel-url>         登记一本书（/novel/{provider}/{id} 或 /wenku/{id}）
 //   run [--book key] [--concurrency 2]  跑一遍增强术语管线（提取→核实→回扫→直写/提案）
 //   check [--book key] [--codes A,B] [--limit N] [--propose] [--tsv]   质检（七码报告；propose 出提案）
@@ -195,7 +195,7 @@ async function runBooks(filterKey) {
       log.log(`==== ${book.key} 完成`, JSON.stringify(result.stats));
     } catch (e) {
       log.error(`==== ${book.key} 失败: ${(e && e.message) || e}`);
-      if (e && e.code === 'unauthorized') log.error('凭据失效：在站点页面点「同步 Daemon」，或 daemon auth <token> 重新写入');
+      if (e && e.code === 'unauthorized') log.error('凭据失效：站点页面开着会在 30s 内自动重推；或点「Daemon 连接」，或 daemon auth <token> 重新写入');
     }
   }
 }
@@ -226,7 +226,7 @@ switch (command) {
         log.log(`==== ${book.key} 完成`, JSON.stringify(r.stats));
       } catch (e) {
         log.error(`==== ${book.key} 失败: ${(e && e.message) || e}`);
-        if (e && e.code === 'unauthorized') log.error('凭据失效：在站点页面点「同步 Daemon」，或 daemon auth <token> 重新写入');
+        if (e && e.code === 'unauthorized') log.error('凭据失效：站点页面开着会在 30s 内自动重推；或点「Daemon 连接」，或 daemon auth <token> 重新写入');
       }
     }
     break;
@@ -248,7 +248,7 @@ switch (command) {
         if (flags.tsv === true && r.stats.samples.length > 0) log.log(samplesToTsv(r.stats.samples));
       } catch (e) {
         log.error(`==== ${book.key} 失败: ${(e && e.message) || e}`);
-        if (e && e.code === 'unauthorized') log.error('凭据失效：在站点页面点「同步 Daemon」，或 daemon auth <token> 重新写入');
+        if (e && e.code === 'unauthorized') log.error('凭据失效：站点页面开着会在 30s 内自动重推；或点「Daemon 连接」，或 daemon auth <token> 重新写入');
       }
     }
     break;

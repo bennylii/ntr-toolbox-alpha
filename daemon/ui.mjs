@@ -642,7 +642,8 @@ async function loadSettings() {
     const ls = (s.settings && s.settings.lastSync) || null;
     $('conn-info').textContent = '当前监听 127.0.0.1:' + (serve.port || 7331) + ' · ' +
       (ls ? '上次同步 ' + new Date(ls.at).toLocaleString() + ' · ' + (ls.origin || '?') + ' · ' + (ls.ua || '?') +
-        ' · ' + (ls.workersCount == null ? '?' : ls.workersCount) + ' 个翻译器' : '从未同步（在站点页面点「同步 Daemon」）');
+        ' · ' + (ls.workersCount == null ? '?' : ls.workersCount) + ' 个翻译器' + (ls.mode ? ' · ' + (ls.mode === 'auto' ? '自动' : '手动') : '')
+        : '从未同步（站点页面点「Daemon 连接」，或开着页面等自动同步）');
     $('cred').textContent = 'token：' + (s.settings.tokenSet ? '已同步' : '未同步') +
       ' · 翻译池 ' + ((s.settings.workers || []).length) + ' 个 · 助手池 ' +
       ((agent.workers || []).length > 0 ? (agent.workers.length + ' 个（显式）') : '跟随翻译池');
