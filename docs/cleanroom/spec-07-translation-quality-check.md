@@ -54,3 +54,11 @@
 - `warnings` 表（bookKey/chapterId/lineNo/code/detail/evidenceJson/runId/at）：每次 check **全量替换**该书落库（onHit 全量采集，不受 `--codes` 报告过滤影响）；lineNo = 该章内配对序号（1 基），整书级命中为 0。
 - 端点 `GET /warnings?book=&code=&limit=`（摘要 + 明细）；agent 只读工具 `list_warnings`；工作区数据集 `warnings/entries.jsonl`（agent 的 item-review 式流程可用）；控制台项目详情显示按码计数与前 20 条。
 - 消费方式与 LG 的差异：LG 校对结果只驻内存 + 导出前摘要 + 校对页；我们**落库**（SQLite）供端点/工具/工作区复用，重跑 check 即刷新。
+
+## 7. 内置保护规则预设（对齐 LG `builtin/text_preserve/preset`）
+
+- 库文件 `daemon/presets/text_preserve.json`：`base`（`<br>` / 空白符 / LG 资源 URI）恒用；`kag` / `renpy`（引擎命令 `{...}`/`[...]`，含 `\p{Script=…}`，编译带 `u` 旗标对齐 LG 的 `giu`）/ `rpgmaker` / `wolf`（各 18 条控制码）按 `config.textPreserve.preset` **叠加**选择；`none` = 完全关闭（含 base）；
+- 解析层 `daemon/preserve.mjs`：`effectivePreserveRules(store, bookKey, {forPrep})` = 预设（base + 所选层）与用户 `text_preserve` 规则按 **pattern 去重**（用户规则优先）；`forPrep=true` 剔除 checkOnly 项；
+- **checkOnly** 语义：空白符与 LG 资源 URI 只参与质检比对（且比对时按 LG 语义过滤空白片段），**不进翻译预处理链**（逐字符占位会污染提示词）；
+- 消费：`check-pipeline` 与 agent `quality_report` 走检查版；`processorFromStore` 走 prep 版（翻译准备即保护所选预设片段，缺失时按既有"保留段缺失"逻辑补回/告警）；
+- 对照 LG：LG 的 `build_text_preserve_rule({mode,text_type,entries})` = base +（off/custom/按 text_type 智能层）；我们等价物 = base +（none/按名叠加层）+ 用户规则常驻（用户规则不因切换预设而失效，属刻意差异）。

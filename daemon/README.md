@@ -132,11 +132,12 @@ node daemon/index.mjs forget    <bookKey>
 - 默认开关见 `daemon/presets/base.json`：资源占位符投影（URL/HTML 标签/`\N[..]` 等控制码）、标点稳定化（jp 句末 `！？` → 中文全角）、ruby 清洗默认关；
 - 硬不变量：行数不变、占位符不得残留、还原失败该行回退原文；
 - 处理链版本参与段缓存键：规则改动自动失效旧缓存；
+- **内置保护预设**（对齐 LG `builtin/text_preserve/preset`）：`base`（`<br>` 等）恒用；`kag` / `renpy` / `rpgmaker` / `wolf` 层在控制台「规则」页切换（`config.textPreserve.preset`，`none` 关闭全部）；预设条目内置只读、不占 rules 表，与用户 `text_preserve` 规则按 pattern 合并（用户优先）；空白符/URI 两项仅参与质检比对（checkOnly），不进预处理链；
 - 管理：`node daemon/index.mjs rules add --kind post_replacement --pattern '【模拟译】' --replace '【译】' [--book key] [--regex] [--cs] [--priority N]`、`rules list|rm <id>|enable <id>|disable <id>`。
 
 ## 质检（check）
 
-- **七码**（规格 `docs/cleanroom/spec-07`，v2 对齐 LinguaGacha）：`FOREIGN_CHAR_RESIDUE`（字素分割+书写系统分类，输出片段证据；短大写缩写豁免）/ `SIMILARITY`（原始文本包含或字符集 Jaccard > 0.8；JA→ZH 需残留证据护栏）/ `LINE_COUNT_MISMATCH` / `GLOSSARY`（术语未落地，scanAcceptance 语义）/ `TEXT_PRESERVE`（保留段实装：按处理链同款规则提取两侧片段逐位比对，带证据）/ `PUNCTUATION_MISMATCH`（标点组序列，顺序敏感）/ `RETRY_THRESHOLD`（章级重试 ≥2，纯提示）；
+- **七码**（规格 `docs/cleanroom/spec-07`，v2 对齐 LinguaGacha）：`FOREIGN_CHAR_RESIDUE`（字素分割+书写系统分类，输出片段证据；短大写缩写豁免）/ `SIMILARITY`（原始文本包含或字符集 Jaccard > 0.8；JA→ZH 需残留证据护栏）/ `LINE_COUNT_MISMATCH` / `GLOSSARY`（术语未落地，scanAcceptance 语义）/ `TEXT_PRESERVE`（保留段实装：按**内置保护预设 + 用户规则**提取两侧片段逐位比对，带证据；空白片段按 LG 语义过滤）/ `PUNCTUATION_MISMATCH`（标点组序列，顺序敏感）/ `RETRY_THRESHOLD`（章级重试 ≥2，纯提示）；
 - **运行**：`check` 任务（CLI / 任务页 / `/run job=check`）、agent `run_check`·`quality_report`；全部确定性启发式、无 LLM、不写站点（`--propose` 仅把样例转提案，`--tsv` 导表）；
 - **警告落库**：每次 check **全量替换**该书 `warnings` 表（章节/行号/码/细节/证据 JSON）；消费面：`GET /warnings?book=&code=&limit=`、agent 只读工具 `list_warnings`、工作区数据集 `warnings/entries.jsonl`、控制台项目详情（按码计数 + 前 20 条）。
 

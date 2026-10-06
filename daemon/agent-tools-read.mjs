@@ -1,6 +1,7 @@
 // daemon/agent-tools-read.mjs —— Agent 只读工具（A2）：书目/正文/译文/提案/快照/质检/技能
 // 依赖注入：ctx.deps = { engine, makeClient, skills, textCache }（由 index.mjs 装配；测试可给假件）
 import { checkAligned } from './quality.mjs';
+import { effectivePreserveRules } from './preserve.mjs';
 
 const cut = (text, n) => {
   const s = String(text == null ? '' : text);
@@ -177,7 +178,7 @@ export function createReadTools({ store, engine, makeClient, log = console, text
           pairs: aligned.pairs,
           glossary,
           engine,
-          rules: store.listRules(book.key),
+          rules: effectivePreserveRules(store, book.key).rules,
           translationMissing: aligned.translationMissing || 0,
           retriesByChapter,
           limit: Math.min(50, Math.max(1, Math.floor(Number(args.limit) || 20))),

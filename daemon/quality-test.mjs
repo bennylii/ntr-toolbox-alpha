@@ -73,6 +73,19 @@ t('正则规则同款语义（priority 顺序、重叠规避）', () => {
   assert.equal(preserveMisses('前{{A}}后', '前{{A}}后', rules), null);
   assert.ok(preserveMisses('前{{A}}后', '前后', rules));
 });
+t('checkOnly 非空白过滤：空白片段差异不报（LG 语义）', () => {
+  const rules = [{ kind: 'text_preserve', pattern: '\\s', regex: true, unicode: true, priority: 10 }];
+  assert.equal(preserveMisses('甲 乙', '甲乙', rules), null);
+});
+t('非空白证据：<br> 丢失时证据只含非空白片段', () => {
+  const rules = [
+    { kind: 'text_preserve', pattern: '<br>', regex: true, priority: 10 },
+    { kind: 'text_preserve', pattern: '\\s', regex: true, unicode: true, priority: 11 },
+  ];
+  const r = preserveMisses('甲<br> 乙', '甲 乙', rules);
+  assert.ok(r && r.sourceFragments.length === 1 && r.sourceFragments[0] === '<br>', JSON.stringify(r));
+  assert.equal(r.translationFragments.length, 0, JSON.stringify(r));
+});
 t('checkPair 集成：保留段丢失 → TEXT_PRESERVE 码', () => {
   const r = checkPair({ jp: '甲<br>乙', zh: '甲乙' }, { rules: PRESERVE_RULES });
   assert.ok(r.codes.includes('TEXT_PRESERVE'), JSON.stringify(r));

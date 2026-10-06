@@ -28,6 +28,9 @@ const { createAgentEvents } = await imp('agent-events.mjs');
 const { createJobQueue } = await imp('job-queue.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
 const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport, createLgImportRunner } = await imp('lg-align.mjs');
+const { effectivePreserveRules, presetRules } = await imp('preserve.mjs');
+const { processorFromStore } = await imp('processors.mjs');
+const { checkAligned } = await imp('quality.mjs');
 const { createWorkspaceTools } = await imp('agent-workspace.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
 const { startServer } = await imp('server.mjs');
@@ -283,6 +286,79 @@ await t('控制面：/run 支持 job=check', async () => {
   }
   assert.equal(state, 'done');
   server.close();
+});
+
+console.log('== 保护规则预设（对齐 LG text_preserve 库） ==');
+const PRESET_KEY = `web:mock/preset-${RUN}`;
+await t('默认 base 生效；prep 版剔除 checkOnly（空白符/URI 不进预处理链）', () => {
+  const all = effectivePreserveRules(store, PRESET_KEY);
+  assert.equal(all.preset, 'base', JSON.stringify(all.preset));
+  assert.ok(all.rules.some((r) => r.preset === 'base' && r.pattern === '<br>'), JSON.stringify(all.rules.map((r) => r.pattern)));
+  assert.ok(all.rules.some((r) => r.checkOnly), '检查版含 checkOnly 项');
+  const prep = effectivePreserveRules(store, PRESET_KEY, { forPrep: true });
+  assert.ok(prep.rules.some((r) => r.pattern === '<br>'), 'prep 保留 <br>');
+  assert.ok(!prep.rules.some((r) => r.checkOnly), 'prep 剔除 checkOnly');
+});
+await t('用户规则叠加；同 pattern 以用户规则为准', () => {
+  const userRuleId = store.addRule({ bookKey: PRESET_KEY, kind: 'text_preserve', pattern: '【用户段】', replacement: '', regex: 0, case_sensitive: 0, enabled: 1, priority: 50 });
+  const overrideId = store.addRule({ bookKey: PRESET_KEY, kind: 'text_preserve', pattern: '<br>', replacement: '', regex: 0, case_sensitive: 0, enabled: 1, priority: 50 });
+  const eff = effectivePreserveRules(store, PRESET_KEY);
+  assert.ok(eff.rules.some((r) => r.pattern === '【用户段】' && !r.preset), '用户规则并入');
+  const br = eff.rules.filter((r) => r.pattern === '<br>');
+  assert.equal(br.length, 1, '同 pattern 去重');
+  assert.ok(!br[0].preset, '用户规则覆盖预设条目');
+  store.deleteRule(userRuleId);
+  store.deleteRule(overrideId);
+});
+await t("preset:'none' → 只剩用户规则（预设全关）", () => {
+  const id = store.addRule({ bookKey: PRESET_KEY, kind: 'text_preserve', pattern: '【仅用户】', replacement: '', regex: 0, case_sensitive: 0, enabled: 1, priority: 50 });
+  store.setConfig('textPreserve', { preset: 'none' });
+  const eff = effectivePreserveRules(store, PRESET_KEY);
+  assert.equal(eff.preset, 'none');
+  assert.ok(eff.rules.every((r) => !r.preset), JSON.stringify(eff.rules));
+  assert.ok(eff.rules.some((r) => r.pattern === '【仅用户】'));
+  store.deleteRule(id);
+});
+await t('kag 层可选叠加（base + kag；含 \\p{Script} 的 unicode 规则）', () => {
+  store.setConfig('textPreserve', { preset: 'kag' });
+  const eff = effectivePreserveRules(store, PRESET_KEY);
+  assert.equal(eff.preset, 'kag');
+  assert.ok(eff.rules.some((r) => r.pattern === '<br>' && r.preset === 'base'), 'base 恒用');
+  assert.ok(eff.rules.some((r) => r.preset === 'kag' && r.unicode === true), JSON.stringify(eff.rules.filter((r) => r.preset === 'kag').map((r) => r.pattern)));
+  store.setConfig('textPreserve', { preset: 'base' });
+});
+await t('processorFromStore：所选预设进入预处理链（kag {} 命令保护、post 还原）', () => {
+  store.setConfig('textPreserve', { preset: 'kag' });
+  const proc = processorFromStore(store, PRESET_KEY);
+  const pre = proc.pre('前{=2.3}后');
+  assert.ok(pre.ctx && pre.ctx.preserves.includes('{=2.3}'), JSON.stringify(pre));
+  assert.ok(pre.text.includes('\uE100'), pre.text);
+  const post = proc.post(pre.text.replace('\uE1000\uE101', 'X'), pre.ctx);   // 模拟译文带回占位符
+  assert.ok(post.text.includes('{=2.3}'), post.text);
+  assert.equal(post.fellBack, false, JSON.stringify(post));
+  store.setConfig('textPreserve', { preset: 'base' });
+});
+await t('/settings 预设往返：合法保存、非法回退 base', async () => {
+  const srv = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline: null, checkPipeline: null, makeClient, engine, port: 7373, log: quiet });
+  const S2 = 'http://127.0.0.1:7373';
+  await fetch(`${S2}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ textPreserve: { preset: 'rpgmaker' } }) });
+  let s = await fetch(`${S2}/settings`).then((r) => r.json());
+  assert.equal(s.settings.textPreserve.preset, 'rpgmaker', JSON.stringify(s.settings.textPreserve));
+  assert.ok(s.settings.textPreserve.presets.some((p) => p.name === 'rpgmaker' && p.count === 18), JSON.stringify(s.settings.textPreserve.presets));
+  await fetch(`${S2}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ textPreserve: { preset: 'bogus' } }) });
+  s = await fetch(`${S2}/settings`).then((r) => r.json());
+  assert.equal(s.settings.textPreserve.preset, 'base', '非法值回退 base');
+  const rulesResp = await fetch(`${S2}/rules`).then((r) => r.json());
+  assert.ok(rulesResp.textPreserve && Array.isArray(rulesResp.textPreserve.presets), 'GET /rules 带预设清单');
+  srv.close();
+});
+await t('质检集成：默认预设下 <br> 丢失 → TEXT_PRESERVE（无需用户规则）', () => {
+  const rules = effectivePreserveRules(store, PRESET_KEY).rules;
+  const report = checkAligned({
+    pairs: [{ jp: '甲<br>乙', zh: '甲乙', chapterId: 'x', chapter: 'x' }],
+    glossary: {}, rules, limit: 5,
+  });
+  assert.equal(report.codes.TEXT_PRESERVE, 1, JSON.stringify(report.codes));
 });
 
 console.log('== 文本处理链（P3：规则接线） ==');

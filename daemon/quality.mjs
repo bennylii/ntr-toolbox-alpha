@@ -132,12 +132,14 @@ export function punctuationMismatch(jp, zh) {
 }
 
 // ---- TEXT_PRESERVE（v2 实装）：两侧按处理链同款规则提取受保护片段，逐位比对 ----
+// LG 语义：只比对非空白片段（空白符/资源 URI 等 checkOnly 项不参与逐位比较的证据出列）
 // 返回 null = 通过（或无规则可查）；不通过返回 {sourceFragments, translationFragments}
 export function preserveMisses(jp, zh, rules) {
   const compiled = Array.isArray(rules) ? rules.filter((r) => r && r.kind === 'text_preserve') : [];
   if (compiled.length === 0) return null;
-  const srcSegs = collectPreserveSegments(jp, compiled);
-  const dstSegs = collectPreserveSegments(zh, compiled);
+  const nonBlank = (segs) => segs.filter((s) => String(s).trim() !== '');
+  const srcSegs = nonBlank(collectPreserveSegments(jp, compiled));
+  const dstSegs = nonBlank(collectPreserveSegments(zh, compiled));
   if (srcSegs.length === 0 && dstSegs.length === 0) return null;
   const mismatch = srcSegs.length !== dstSegs.length || srcSegs.some((seg, i) => seg !== dstSegs[i]);
   return mismatch ? { sourceFragments: srcSegs, translationFragments: dstSegs } : null;

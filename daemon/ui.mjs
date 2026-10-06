@@ -241,6 +241,11 @@ export const UI_HTML = `<!doctype html>
   </div>
 
   <div class="page" id="tab-rules" data-title="规则">
+    <fieldset><legend>内置保护预设（text_preserve · 对齐 LG 预设库；base 恒用，其余按需叠加）</legend>
+      <label>预设层 <select id="preset-select"><option value="base">base</option></select></label>
+      <button class="btn ghost" id="preset-save">保存预设</button>
+      <div class="muted" id="preset-hint" style="margin-top:4px"></div>
+    </fieldset>
     <fieldset><legend>预处理/后处理规则（priority 升序执行）</legend>
       <div>
         <label>kind <select id="rule-kind"><option value="post_replacement">post_replacement</option><option value="pre_replacement">pre_replacement</option><option value="text_preserve">text_preserve</option></select></label>
@@ -727,6 +732,15 @@ $('token-save').addEventListener('click', async () => {
 async function loadRules() {
   try {
     const data = await api('/rules?book=' + encodeURIComponent(PROJECT));
+    const tp = data.textPreserve || {};
+    const counts = {};
+    (tp.presets || []).forEach((p) => { counts[p.name] = p.count; });
+    const sel = $('preset-select');
+    if (sel) {
+      sel.innerHTML = ['base', 'kag', 'renpy', 'rpgmaker', 'wolf', 'none'].map((n) =>
+        '<option value="' + n + '"' + (n === (tp.preset || 'base') ? ' selected' : '') + '>' + n + (counts[n] ? '（' + counts[n] + ' 条）' : '') + '</option>').join('');
+      $('preset-hint').textContent = '当前生效：' + (tp.preset || 'base') + '。预设条目为内置只读（不占规则表）；base 恒用，none = 完全关闭预设。';
+    }
     $('rules-table').innerHTML = '<div class="muted" style="margin-bottom:4px">展示：全局 + ' + (PROJECT ? '当前项目' : '通用视角仅全局；在侧栏选项目后可看项目覆盖') + '</div>' +
       '<table><tr><th>id</th><th>on</th><th>kind</th><th>pattern</th><th>replacement</th><th>re/cs</th><th>prio</th><th>来源</th><th></th></tr>' +
       (data.rules || []).map((r) => '<tr><td>' + r.id + '</td><td>' + (r.enabled ? '<span class="ok">✓</span>' : '—') + '</td><td>' + esc(r.kind) + '</td><td><code>' + esc(r.pattern) + '</code></td><td>' + esc(r.replacement) + '</td><td>' + (r.regex ? 're ' : '') + (r.case_sensitive ? 'cs' : '') + '</td><td>' + r.priority + '</td><td>' + (r.bookKey ? '<span class="ok">项目</span> ' + esc(r.bookKey.slice(0, 16)) : '全局') + '</td>' +
@@ -740,6 +754,13 @@ async function loadRules() {
     }));
   } catch (e) { toast(e.message, true); }
 }
+$('preset-save').addEventListener('click', async () => {
+  try {
+    await post('/settings', { textPreserve: { preset: $('preset-select').value } });
+    toast('保护预设已保存并生效');
+    loadRules();
+  } catch (e) { toast(e.message, true); }
+});
 $('rule-add').addEventListener('click', async () => {
   try {
     await post('/rules', {

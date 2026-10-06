@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { effectivePreserveRules } from './preserve.mjs';
 
 export const CHAIN_VERSION = 1;
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -63,6 +64,7 @@ const compileRules = (rules) => {
       replacement: ((raw.replacement === null || raw.replacement === undefined) ? '' : String(raw.replacement)),
       regex,
       caseSensitive,
+      unicode: raw.unicode === true || raw.unicode === 1,
       priority: Number.isFinite(Number(raw.priority)) ? Number(raw.priority) : 100,
     });
   }
@@ -70,8 +72,10 @@ const compileRules = (rules) => {
   return { list, skipped };
 };
 
+const ruleFlags = (rule) => (rule.caseSensitive ? 'g' : 'gi') + (rule.unicode ? 'u' : '');
+
 const applyReplacement = (rule, text) => {
-  if (rule.regex) return text.replace(new RegExp(rule.pattern, rule.caseSensitive ? 'g' : 'gi'), rule.replacement);
+  if (rule.regex) return text.replace(new RegExp(rule.pattern, ruleFlags(rule)), rule.replacement);
   if (rule.caseSensitive) return text.split(rule.pattern).join(rule.replacement);
   return text.replace(new RegExp(escapeRegExp(rule.pattern), 'gi'), rule.replacement);
 };
@@ -82,7 +86,7 @@ const markPreserves = (rule, text, ctx) => {
     ctx.preserves.push(m);
     return `${PRE_OPEN}${ctx.preserves.length - 1}${PRE_CLOSE}`;
   };
-  if (rule.regex) return text.replace(new RegExp(rule.pattern, rule.caseSensitive ? 'g' : 'gi'), mark);
+  if (rule.regex) return text.replace(new RegExp(rule.pattern, ruleFlags(rule)), mark);
   if (rule.caseSensitive) {
     const parts = text.split(rule.pattern);
     if (parts.length === 1) return text;
@@ -188,8 +192,13 @@ export function createProcessor({ rules = [], options = {} } = {}) {
   };
 }
 
-// 从 store 装配处理链（全局规则 + 该书规则；store 缺方法时退化为空规则）
+// 从 store 装配处理链：非保护规则用「全局 + 该书」；保护规则 = 内置预设（base + 所选层，剔除 checkOnly）+ 用户规则
 export function processorFromStore(store, bookKey, options = {}) {
-  const rules = store && typeof store.listRules === 'function' ? store.listRules(bookKey) : [];
+  const dbRules = store && typeof store.listRules === 'function' ? store.listRules(bookKey) : [];
+  let rules = dbRules;
+  try {
+    const preserve = effectivePreserveRules(store, bookKey, { forPrep: true });
+    rules = [...dbRules.filter((r) => r.kind !== 'text_preserve'), ...preserve.rules];
+  } catch { /* store 不支持预设配置时退化为纯用户规则 */ }
   return createProcessor({ rules, options });
 }

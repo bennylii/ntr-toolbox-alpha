@@ -2,6 +2,7 @@
 // 规格：docs/cleanroom/spec-07-translation-quality-check.md
 // 只读站点数据；报告落 runs.statsJson；--propose 时把样例汇总成一条提案；不自动改站点。
 import { checkAligned, QUALITY_CODES } from './quality.mjs';
+import { effectivePreserveRules } from './preserve.mjs';
 
 export function samplesToTsv(samples) {
   const rows = [['code', 'chapter', 'jp', 'zh', 'detail']];
@@ -46,8 +47,8 @@ export class CheckPipeline {
       for (const row of this.store.listChapterMeta(bookKey)) {
         if ((row.retries || 0) >= 2) retriesByChapter[row.chapterKey] = row.retries;
       }
-      // TEXT_PRESERVE 实装后需要真实规则（全局 + 本书；enabled 由 compileRules 过滤由 collectPreserveSegments 内部完成）
-      const preserveRules = this.store.listRules(bookKey).filter((r) => r.kind === 'text_preserve');
+      // TEXT_PRESERVE：内置保护预设（base + 所选层）+ 用户规则（见 preserve.mjs）
+      const preserveRules = effectivePreserveRules(this.store, bookKey).rules;
       // 警告落库：行号 = 该章内配对序号（1 基）；-1 表示整书级（如缺译标记）
       const lineNos = [];
       const perChapter = {};

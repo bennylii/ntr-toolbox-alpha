@@ -12,6 +12,7 @@ import { UI_HTML } from './ui.mjs';
 import { createJobQueue } from './job-queue.mjs';
 import { restoreSnapshot, applyProposal } from './glossary-io.mjs';
 import { exportBookSource, splitResultLines, verifyImport } from './lg-align.mjs';
+import { PRESET_NAMES, presetInfo, readTextPreserveConfig } from './preserve.mjs';
 import { VERSION } from './version.mjs';
 
 const DAEMON_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -169,6 +170,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
             workers: maskList(workers),
             lastSync: store.getConfig('lastSync') || null,
             serve: { port, ...serveConfig() },
+            textPreserve: { ...readTextPreserveConfig(store), presets: presetInfo() },
           },
         });
         return;
@@ -215,12 +217,22 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           }
           store.setConfig('serve', next);
         }
+        if (body.textPreserve && typeof body.textPreserve === 'object') {
+          const cur = store.getConfig('textPreserve') || {};
+          const raw = String(body.textPreserve.preset || '');
+          const preset = raw === 'none' || PRESET_NAMES.includes(raw) ? raw : 'base';   // 非法值回退 base
+          store.setConfig('textPreserve', { ...cur, preset });
+        }
         log.log('[settings] 设置已更新');
         send(200, { ok: true });
         return;
       }
       if (req.method === 'GET' && url.pathname === '/rules') {
-        send(200, { ok: true, rules: store.listRules(url.searchParams.get('book') || '') });
+        send(200, {
+          ok: true,
+          rules: store.listRules(url.searchParams.get('book') || ''),
+          textPreserve: { ...readTextPreserveConfig(store), presets: presetInfo() },
+        });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/rules') {
