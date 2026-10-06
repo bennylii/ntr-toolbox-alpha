@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const MOCK = process.env.MOCK_ORIGIN || 'http://127.0.0.1:8790';
@@ -1262,6 +1263,75 @@ await t('清理：工作区测试目录 + 工具元数据', () => {
   assert.equal(wsApplyTool.requiresApproval, true, 'workspace_apply 需审批');
   assert.ok(!fs.existsSync(WS_ROOT));
 });
+
+console.log('== 连接配置：/ping、lastSync、白名单、端口持久化 ==');
+const connServer = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline, scheduler: setSched, agentScheduler: setAgSched, makeClient, engine, port: 7369, log: quiet });
+const C = 'http://127.0.0.1:7369';
+await t('/ping：无需凭据、带版本', async () => {
+  const ping = await fetch(`${C}/ping`).then((r) => r.json());
+  assert.equal(ping.ok, true, JSON.stringify(ping));
+  assert.equal(ping.name, 'ntr-daemon');
+  assert.equal(ping.port, 7369);
+  assert.ok(String(ping.version).startsWith('v0.8.'));
+});
+await t('/auth 记录 lastSync（origin/UA 摘要/workers 数）→ /status 暴露', async () => {
+  await fetch(`${C}/auth`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 (Windows NT) Chrome/140.0.0.0' },
+    body: JSON.stringify({ token: 'tok-conn', workers: [TLW('w0', 'k0')], origin: 'https://n.novelia.cc' }),
+  });
+  const status = await fetch(`${C}/status`).then((r) => r.json());
+  const ls = status.lastSync;
+  assert.ok(ls && ls.at > 0, JSON.stringify(ls));
+  assert.equal(ls.origin, 'https://n.novelia.cc');
+  assert.equal(ls.ua, 'Chrome/140', JSON.stringify(ls));
+  assert.equal(ls.workersCount, 1);
+  assert.equal(ls.tokenSet, true);
+  const settings = await fetch(`${C}/settings`).then((r) => r.json());
+  assert.ok(settings.settings.lastSync && settings.settings.lastSync.at > 0, 'GET /settings 也带 lastSync');
+});
+await t('跨域白名单：内置默认保留 + serve.origins 附加生效', async () => {
+  // 未配置附加条目：其它 origin 的 POST 403
+  const deny = await fetch(`${C}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://mirror.example.com' }, body: '{}' });
+  assert.equal(deny.status, 403, String(deny.status));
+  // 预检（OPTIONS 带 Origin）在白名单外也 403
+  const pre = await fetch(`${C}/auth`, { method: 'OPTIONS', headers: { Origin: 'https://mirror.example.com', 'Access-Control-Request-Method': 'POST' } });
+  assert.equal(pre.status, 403, String(pre.status));
+  // 配置附加条目 → 立即放行；预检也过
+  await fetch(`${C}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ serve: { origins: ['mirror.example.com'] } }) });
+  const okPost = await fetch(`${C}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://mirror.example.com' }, body: '{}' });
+  assert.equal(okPost.status, 200, String(okPost.status));
+  const okPre = await fetch(`${C}/auth`, { method: 'OPTIONS', headers: { Origin: 'https://mirror.example.com', 'Access-Control-Request-Method': 'POST' } });
+  assert.equal(okPre.status, 204, String(okPre.status));
+  // 内置默认不可移除：清空附加条目后 n.novelia.cc 依旧放行
+  await fetch(`${C}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ serve: { origins: [] } }) });
+  const builtin = await fetch(`${C}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://n.novelia.cc' }, body: '{}' });
+  assert.equal(builtin.status, 200, String(builtin.status));
+});
+await t('serve 端口持久化：config.serve.port + .serve-port 落盘（子进程验证）', async () => {
+  const tmpDb = path.join(here, '.tmp-conn-test.db');
+  for (const suffix of ['', '-wal', '-shm']) { try { fs.unlinkSync(tmpDb + suffix); } catch { } }
+  const { Store: TmpStore } = await imp('store.mjs');
+  const tmpStore = new TmpStore(tmpDb);
+  tmpStore.setConfig('serve', { port: 7371 });
+  tmpStore.close();
+  const portFile = path.join(repoRoot, 'daemon', '.serve-port');
+  const prevPortFile = fs.existsSync(portFile) ? fs.readFileSync(portFile, 'utf8') : null;
+  const child = spawn(process.execPath, ['daemon/index.mjs', 'serve', '--db', tmpDb], { cwd: repoRoot, stdio: 'ignore' });
+  let ready = false;
+  for (let i = 0; i < 40 && !ready; i++) {
+    await new Promise((r) => setTimeout(r, 300));
+    try { const p = await fetch('http://127.0.0.1:7371/ping', { signal: AbortSignal.timeout(800) }).then((r) => r.json()); ready = p.ok === true && p.port === 7371; } catch { }
+  }
+  const portOnDisk = fs.existsSync(portFile) ? Number(fs.readFileSync(portFile, 'utf8').trim()) : 0;
+  try { child.kill('SIGKILL'); } catch { }
+  await new Promise((r) => setTimeout(r, 300));
+  for (const suffix of ['', '-wal', '-shm']) { try { fs.unlinkSync(tmpDb + suffix); } catch { } }
+  if (prevPortFile !== null) fs.writeFileSync(portFile, prevPortFile, 'utf8');
+  else { try { fs.unlinkSync(portFile); } catch { } }
+  assert.ok(ready, 'daemon 应起在 config.serve.port=7371');
+  assert.equal(portOnDisk, 7371, '.serve-port 已写实际端口');
+});
+await t('清理：连接配置服务器', () => { connServer.close(); });
 
 console.log(`\n通过 ${pass}，失败 ${fail}`);
 store.close();
