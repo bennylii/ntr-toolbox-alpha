@@ -14,6 +14,7 @@ import { restoreSnapshot, applyProposal } from './glossary-io.mjs';
 import { exportBookSource, splitResultLines, verifyImport } from './lg-align.mjs';
 import { PRESET_NAMES, presetInfo, readTextPreserveConfig } from './preserve.mjs';
 import { VERSION } from './version.mjs';
+import { createProxyFetch, normalizeProxyConfig, assertProxyConfig } from './proxy.mjs';
 
 const DAEMON_DIR = path.dirname(fileURLToPath(import.meta.url));
 const UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
@@ -153,6 +154,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           usage: store.usageTotals(),
           lastSync: store.getConfig('lastSync') || null,
           serve: { port, ...serveConfig() },
+          proxy: normalizeProxyConfig(store.getConfig('proxy')),
         });
         return;
       }
@@ -170,6 +172,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
             workers: maskList(workers),
             lastSync: store.getConfig('lastSync') || null,
             serve: { port, ...serveConfig() },
+            proxy: normalizeProxyConfig(store.getConfig('proxy')),
             textPreserve: { ...readTextPreserveConfig(store), presets: presetInfo() },
           },
         });
@@ -223,8 +226,41 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           const preset = raw === 'none' || PRESET_NAMES.includes(raw) ? raw : 'base';   // 非法值回退 base
           store.setConfig('textPreserve', { ...cur, preset });
         }
+        if (body.proxy && typeof body.proxy === 'object') {
+          let next;
+          try { next = assertProxyConfig(body.proxy); } catch (e) { send(400, { ok: false, error: e.message }); return; }
+          store.setConfig('proxy', next);   // 每次请求现读 → 立即生效，无需重启
+        }
         log.log('[settings] 设置已更新');
         send(200, { ok: true });
+        return;
+      }
+      // 代理探测：同一目标跑两次（直连 / 走代理），供控制台「测试」按钮判断是否被墙
+      if (req.method === 'POST' && url.pathname === '/proxy/test') {
+        const body = await readBody();
+        let cfg;
+        try { cfg = assertProxyConfig(body.proxy === undefined ? store.getConfig('proxy') : body.proxy); } catch (e) { send(400, { ok: false, error: e.message }); return; }
+        let target;
+        try { target = new URL(String(body.targetUrl || store.getConfig('origin') || 'https://n.novelia.cc')); } catch { send(400, { ok: false, error: 'targetUrl 不是合法 URL' }); return; }
+        if (target.protocol !== 'http:' && target.protocol !== 'https:') { send(400, { ok: false, error: 'targetUrl 只支持 http:// 或 https://' }); return; }
+        const probe = async (fetchImpl) => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 8000);
+          const started = Date.now();
+          try {
+            const res = await fetchImpl(target.href, { method: 'GET', signal: controller.signal, redirect: 'manual' });
+            return { ok: true, status: res.status, ms: Date.now() - started };
+          } catch (e) {
+            const aborted = e && (e.name === 'AbortError' || /abort/i.test(String(e.message || '')));
+            const cause = e && e.cause && e.cause.code ? e.cause.code : null;
+            return { ok: false, ms: Date.now() - started, error: aborted ? '超时（8s）' : (cause || String((e && e.message) || e)) };
+          } finally { clearTimeout(timer); }
+        };
+        const [direct, proxied] = await Promise.all([
+          probe((...args) => globalThis.fetch(...args)),
+          probe(createProxyFetch({ getProxy: () => cfg })),
+        ]);
+        send(200, { ok: true, target: target.href, config: cfg, direct, proxied });
         return;
       }
       if (req.method === 'GET' && url.pathname === '/rules') {

@@ -1,10 +1,12 @@
 // daemon/site-client.mjs —— 站点契约客户端（工作区兼容；与站点前端同一套接口）
 // kind: 'web'（/api/novel/...）| 'wenku'（/api/wenku/...）；401 有明确错误码（提示重新同步凭据）。
 export class SiteClient {
-  constructor({ origin, token, engine }) {
+  constructor({ origin, token, engine, fetchImpl }) {
     this.engine = engine;   // parseParallelText 等纯函数（术语管线用）
     this.origin = String(origin || '').replace(/\/$/, '');
     this.token = token || '';
+    // 出网收口：默认全局 fetch；daemon 装配时注入代理转发（daemon/proxy.mjs）
+    this.fetchImpl = typeof fetchImpl === 'function' ? fetchImpl : ((...args) => globalThis.fetch(...args));
   }
 
   setToken(token) { this.token = token || ''; }
@@ -13,7 +15,7 @@ export class SiteClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await fetch(this.origin + pathname, {
+      return await this.fetchImpl(this.origin + pathname, {
         method,
         headers: {
           ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),

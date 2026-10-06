@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { planImport, applyImport } from './glossary-io.mjs';
+import { normalizeProxyConfig } from './proxy.mjs';
 
 const FP_LEN = 4;
 const RUN_TIMEOUT_MS = 120000;
@@ -203,6 +204,17 @@ function handleChildRequest(msg, ctx, client, child) {
   return reply({ ok: false, message: `未知 ws 请求类型：${req.kind}` });
 }
 
+// 工作区脚本的出网与 daemon 一致：代理启用时把环境变量注入 fork env（Node 只在进程启动时解析这些变量，
+// 子进程启动读一次即可生效；父进程自身的请求走 daemon/proxy.mjs 的转发，互不影响）
+function proxyEnvForChild(ctx) {
+  try {
+    const raw = ctx && ctx.deps && typeof ctx.deps.getProxy === 'function' ? ctx.deps.getProxy() : null;
+    const cfg = normalizeProxyConfig(raw);
+    if (!cfg.enabled || !cfg.url) return {};
+    return { NODE_USE_ENV_PROXY: '1', HTTP_PROXY: cfg.url, HTTPS_PROXY: cfg.url, NO_PROXY: cfg.noProxy };
+  } catch { return {}; }
+}
+
 async function runScript(ctx, { root, script, client }) {
   const runId = crypto.randomBytes(6).toString('hex');
   const runDir = path.join(root, 'work', 'runs', runId);
@@ -218,7 +230,7 @@ async function runScript(ctx, { root, script, client }) {
   try {
     child = fork(scriptPath, [], {
       cwd: root,
-      env: { ...process.env, NODE_OPTIONS: '' },
+      env: { ...process.env, NODE_OPTIONS: '', ...proxyEnvForChild(ctx) },
       execArgv: [
         '--permission',
         `--allow-fs-read=${root}`,

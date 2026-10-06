@@ -41,10 +41,12 @@ const readUsage = (data) => {
 };
 
 export class LlmScheduler {
-  constructor({ engine, store = null, log = console, options = {} }) {
+  constructor({ engine, store = null, log = console, options = {}, fetchImpl }) {
     this.engine = engine;
     this.store = store;
     this.log = log;
+    // 出网收口：默认全局 fetch；daemon 装配时注入代理转发（daemon/proxy.mjs），两条请求路径共用
+    this._callFetch = typeof fetchImpl === 'function' ? fetchImpl : ((...args) => globalThis.fetch(...args));
     this.options = {
       maxInFlight: 1,            // 全局同刻在途请求数（单线程 Gemini 场景 = 1）
       rpm: 0,                    // 每分钟派发上限；0 = 不限
@@ -206,7 +208,7 @@ export class LlmScheduler {
 
   // 包装 fetch：读一份响应副本取 usage（不影响引擎读取原响应）
   _fetch = async (url, init) => {
-    const res = await fetch(url, init);
+    const res = await this._callFetch(url, init);
     this._pendingUsage = null;
     if (res.ok) {
       try { this._pendingUsage = readUsage(await res.clone().json()); } catch { /* 非 JSON 忽略 */ }
@@ -254,7 +256,7 @@ export class LlmScheduler {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(this._chatUrl(worker.endpoint), {
+      const res = await this._callFetch(this._chatUrl(worker.endpoint), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

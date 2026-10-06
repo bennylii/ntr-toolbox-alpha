@@ -238,6 +238,14 @@ export const UI_HTML = `<!doctype html>
         <span class="muted" id="cred"></span>
       </div>
     </fieldset>
+    <fieldset><legend>网络代理（出网 · 站点与模型接口统一走代理；保存后立即生效）</legend>
+      <label><input type="checkbox" id="proxy-enable"> 启用代理</label>
+      <label>代理地址 <input type="text" id="proxy-url" size="40" placeholder="http://127.0.0.1:6789"></label>
+      <label>直连列表 <input type="text" id="proxy-noproxy" size="44" placeholder="127.0.0.1,localhost,::1"></label>
+      <div><button class="btn" id="proxy-save">保存代理设置</button> <button class="btn ghost" id="proxy-test">测试（对比直连 / 代理）</button></div>
+      <div class="muted" style="margin-top:6px">站点被墙时填本机代理（只支持 http/https，不支持 SOCKS5）；直连列表内的主机不经代理（默认含回环，本机 mock / 测试不受影响）。工作区脚本出网同样走此代理。</div>
+      <div class="muted" id="proxy-info" style="margin-top:6px"></div>
+    </fieldset>
   </div>
 
   <div class="page" id="tab-rules" data-title="规则">
@@ -644,6 +652,13 @@ async function loadSettings() {
       (ls ? '上次同步 ' + new Date(ls.at).toLocaleString() + ' · ' + (ls.origin || '?') + ' · ' + (ls.ua || '?') +
         ' · ' + (ls.workersCount == null ? '?' : ls.workersCount) + ' 个翻译器' + (ls.mode ? ' · ' + (ls.mode === 'auto' ? '自动' : '手动') : '')
         : '从未同步（站点页面点「Daemon 连接」，或开着页面等自动同步）');
+    const px = (s.settings && s.settings.proxy) || {};
+    $('proxy-enable').checked = px.enabled === true;
+    $('proxy-url').value = px.url || '';
+    $('proxy-noproxy').value = px.noProxy || '127.0.0.1,localhost,::1';
+    $('proxy-info').textContent = px.enabled && px.url
+      ? ('当前：经 ' + px.url + ' 出网 · 直连 ' + (px.noProxy || '—'))
+      : '当前：全部直连（代理未启用）';
     $('cred').textContent = 'token：' + (s.settings.tokenSet ? '已同步' : '未同步') +
       ' · 翻译池 ' + ((s.settings.workers || []).length) + ' 个 · 助手池 ' +
       ((agent.workers || []).length > 0 ? (agent.workers.length + ' 个（显式）') : '跟随翻译池');
@@ -727,6 +742,28 @@ $('token-save').addEventListener('click', async () => {
     await post('/auth', { token: tok });
     $('set-token').value = '';
     toast('token 已保存'); loadSettings();
+  } catch (e) { toast(e.message, true); }
+});
+$('proxy-save').addEventListener('click', async () => {
+  try {
+    await post('/settings', { proxy: {
+      enabled: $('proxy-enable').checked,
+      url: $('proxy-url').value.trim(),
+      noProxy: $('proxy-noproxy').value.trim(),
+    } });
+    toast('代理设置已保存并生效'); loadSettings();
+  } catch (e) { toast(e.message, true); }
+});
+$('proxy-test').addEventListener('click', async () => {
+  try {
+    $('proxy-info').textContent = '测试中…（直连 / 代理，各 8s 超时）';
+    const r = await post('/proxy/test', { proxy: {
+      enabled: true,
+      url: $('proxy-url').value.trim(),
+      noProxy: $('proxy-noproxy').value.trim(),
+    } });
+    const fmt = (x) => (x && x.ok) ? ('HTTP ' + x.status + ' · ' + x.ms + 'ms') : ('失败：' + ((x && x.error) || '未知'));
+    $('proxy-info').textContent = '目标 ' + r.target + ' → 直连：' + fmt(r.direct) + ' ／ 代理：' + fmt(r.proxied);
   } catch (e) { toast(e.message, true); }
 });
 

@@ -33,6 +33,7 @@ const { processorFromStore } = await imp('processors.mjs');
 const { checkAligned } = await imp('quality.mjs');
 const { createWorkspaceTools } = await imp('agent-workspace.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
+const { createProxyFetch, DEFAULT_NO_PROXY } = await imp('proxy.mjs');
 const { startServer } = await imp('server.mjs');
 
 let pass = 0;
@@ -1236,6 +1237,60 @@ await t('助手参数：agent.llm 热更新 + maxSteps/toolResultMaxChars/approv
   assert.equal(cfg.approvalMode, 'auto');
 });
 await t('清理：设置页 v2 服务器', () => { setServer.close(); });
+
+console.log('== 网络代理（出网）：设置回读 / 非法值 / 回环直连 / 探测端点 ==');
+const pxServer = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline, scheduler: setSched, agentScheduler: setAgSched, makeClient, engine, port: 7374, log: quiet });
+const pGet = async (p) => fetch(`http://127.0.0.1:7374${p}`).then((r) => r.json());
+const pPost = async (p, body) => fetch(`http://127.0.0.1:7374${p}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
+await t('代理默认关闭；保存后 /settings 与 /status 回读一致（立即生效，无需重启）', async () => {
+  const d0 = await pGet('/settings');
+  assert.equal(d0.settings.proxy.enabled, false, JSON.stringify(d0.settings.proxy));
+  assert.equal(d0.settings.proxy.noProxy, DEFAULT_NO_PROXY);
+  const saved = await pPost('/settings', { proxy: { enabled: true, url: 'http://127.0.0.1:1', noProxy: '127.0.0.1,localhost,::1' } });
+  assert.equal(saved.ok, true, JSON.stringify(saved));
+  const s = await pGet('/settings');
+  assert.equal(s.settings.proxy.enabled, true);
+  assert.equal(s.settings.proxy.url, 'http://127.0.0.1:1');
+  const st = await pGet('/status');
+  assert.equal(st.proxy.enabled, true, JSON.stringify(st.proxy));
+});
+await t('非法代理地址（socks5）→ 400 且不落库（保留上一个合法值）', async () => {
+  const r = await pPost('/settings', { proxy: { enabled: true, url: 'socks5://127.0.0.1:1080' } });
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.match(String(r.error), /只支持 http/);
+  const s = await pGet('/settings');
+  assert.equal(s.settings.proxy.url, 'http://127.0.0.1:1', '非法保存不应改动已存配置');
+});
+await t('代理启用（指向死代理）时回环仍直连：mock 流程不受影响', async () => {
+  const proxyFetch = createProxyFetch({ getProxy: () => store.getConfig('proxy') });
+  const res = await proxyFetch(`${MOCK}/__stats`);
+  assert.equal(res.status, 200, '默认直连列表含 127.0.0.1，mock 不应被代理');
+  const body = await res.json();
+  assert.ok(Number(body.requests) >= 0, 'mock /__stats 应能正常解析：' + JSON.stringify(body).slice(0, 120));
+});
+await t('POST /proxy/test：直连成功 / 死代理失败（对比语义）', async () => {
+  const r = await pPost('/proxy/test', { proxy: { enabled: true, url: 'http://127.0.0.1:1', noProxy: '' }, targetUrl: `${MOCK}/__stats` });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.direct.ok, true, JSON.stringify(r.direct));
+  assert.equal(r.direct.status, 200);
+  assert.equal(r.proxied.ok, false, JSON.stringify(r.proxied));
+  assert.ok(r.proxied.error, '失败时应带错误原因');
+});
+await t('POST /proxy/test：代理未启用 → 两侧都直连', async () => {
+  const r = await pPost('/proxy/test', { proxy: { enabled: false, url: '' }, targetUrl: `${MOCK}/__stats` });
+  assert.equal(r.direct.ok, true, JSON.stringify(r.direct));
+  assert.equal(r.proxied.ok, true, JSON.stringify(r.proxied));
+});
+await t('POST /proxy/test：非法 targetUrl → 400', async () => {
+  const r = await pPost('/proxy/test', { targetUrl: 'ftp://example.com/x' });
+  assert.equal(r.ok, false, JSON.stringify(r));
+});
+await t('清理：恢复默认（关闭代理）并关闭服务器', async () => {
+  await pPost('/settings', { proxy: { enabled: false, url: '', noProxy: DEFAULT_NO_PROXY } });
+  const s = await pGet('/settings');
+  assert.equal(s.settings.proxy.enabled, false);
+  pxServer.close();
+});
 
 console.log('== 项目化：会话绑定项目 + 系统提示注入 ==');
 const projBook = `web:mock/${TRANS_BOOK}`;

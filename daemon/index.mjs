@@ -44,6 +44,7 @@ const { createAgentEvents } = await imp('agent-events.mjs');
 const { createJobQueue } = await imp('job-queue.mjs');
 const { templateFromStore, DEFAULT_TEMPLATE, PROMPT_SLOTS } = await imp('prompt.mjs');
 const { LlmScheduler } = await imp('scheduler.mjs');
+const { createProxyFetch, normalizeProxyConfig } = await imp('proxy.mjs');
 const { startServer } = await imp('server.mjs');
 
 const RSS_LIMIT_MB = 500;
@@ -71,9 +72,13 @@ function getWorkers() {
   return workers.map((w, i) => ({ id: w.id || `w${i}`, model: w.model, endpoint: w.endpoint, key: w.key || '' }));
 }
 
+// 出网代理：配置每次请求现读（控制台保存即生效）；站点 API 与两个模型池共用同一份配置
+const getProxy = () => store.getConfig('proxy');
+const proxyFetch = createProxyFetch({ getProxy });
+
 function makeClient(book) {
   const origin = book.origin || store.getConfig('origin') || 'https://n.novelia.cc';
-  return new SiteClient({ origin, token: store.getConfig('token') || '', engine });
+  return new SiteClient({ origin, token: store.getConfig('token') || '', engine, fetchImpl: proxyFetch });
 }
 
 // 调度器（全局并发门默认 1 = 单线程 Gemini 场景）；配置优先级：CLI 旗标 > config.llm > 默认
@@ -87,6 +92,7 @@ const pickNum = (flagVal, cfgVal, dflt) => {
 const llmConfig = store.getConfig('llm') || {};
 const scheduler = new LlmScheduler({
   engine, store, log,
+  fetchImpl: proxyFetch,
   options: {
     maxInFlight: Math.max(1, pickNum(flags['max-in-flight'], llmConfig.maxInFlight, 1)),
     rpm: pickNum(flags.rpm, llmConfig.rpm, 0),
@@ -103,6 +109,7 @@ const agentCfg0 = store.getConfig('agent') || {};
 const agentLlmCfg = agentCfg0.llm || {};
 const agentScheduler = new LlmScheduler({
   engine, store, log,
+  fetchImpl: proxyFetch,
   options: {
     maxInFlight: Math.max(1, pickNum(undefined, agentLlmCfg.maxInFlight, 1)),
     rpm: pickNum(undefined, agentLlmCfg.rpm, 0),
@@ -169,6 +176,7 @@ const agentLoop = createAgentLoop({
     deps: {
       engine,
       makeClient,
+      getProxy,
       skills: skillCatalog,
       enqueue: (payload) => jobQueue.enqueue(payload),
       queueBusy: () => jobQueue.busy(),
@@ -529,6 +537,8 @@ switch (command) {
     log.log(`llm(助手/术语池): maxInFlight=${ag.maxInFlight} workers=${ag.workers}${agExplicit.length > 0 ? `（显式 ${agExplicit.length} 个）` : '（跟随翻译池）'} 请求=${ag.requests} 在途峰值=${ag.maxObservedInFlight}`);
     const u = store.usageTotals();
     log.log(`usage: 轮次=${u.rows} 请求=${u.requests} prompt=${u.promptTokens} completion=${u.completionTokens}`);
+    const px = normalizeProxyConfig(getProxy());
+    log.log(`proxy: ${px.enabled && px.url ? `已启用 ${px.url}（直连列表 ${px.noProxy}）` : '未启用（全部直连）'}`);
     log.log('控制台: node daemon/index.mjs serve 后打开 http://127.0.0.1:7331/ui（设置/规则/提示词/任务都在页面里）');
     break;
   }
