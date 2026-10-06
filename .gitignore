@@ -43,3 +43,6 @@ daemon/.serve-port
 daemon/uploads/
 daemon/.tmp-*/
 daemon/exports/
+
+# 会话本地状态（ZCode）
+.zcode/

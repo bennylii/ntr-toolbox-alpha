@@ -4,20 +4,64 @@
 
 [n.novelia.cc](https://n.novelia.cc) 的 Tampermonkey 用户脚本 **ntr-toolbox-alpha**：对 TheNano 的 NTR ToolBox（GreasyFork 527754，All Rights Reserved）功能行为的 **clean-room 重构**，并新增 **AI 术语表提取 / 审核 / 队列** 管线；另带一个**本地 Node daemon**（GPT 翻译 worker、控制台 GUI、Agent、LG 互通——详见 `daemon/README.md`）。单文件用户脚本 + 零依赖 daemon，无构建步骤、无依赖安装。实现代码 MIT（见 README「clean-room 重构说明」）。
 
-## 结构
+## 结构（从哪找什么）
 
 ```
 ntr-toolbox-alpha.user.js      唯一源文件（改它；没有 src/）
 ntr-toolbox-alpha.dev.user.js  由 .gen-dev.mjs 生成（@version 追加 -dev、@name 加 (dev)），不要手改
-tools/                         开发/测试脚本（.e2e-*.js = 页面上下文断言套件；.probe-*.js = 小探针）
-daemon/                        本地 daemon（入口 index.mjs；控制台 ui.mjs；详见 daemon/README.md 与其内测试清单）
-docs/cleanroom/                各模块重构前的行为规格（spec-01..10，全部已实施）
-docs/architecture.md           架构总览（组件图/数据模型/子系统/设计决策/测试矩阵）
-mock-llm/server.mjs            假 LLM + 假站点（端口 8788；daemon 测试用 8790）
+CHANGELOG.md                   版本记录（发布时与 @version / daemon/version.mjs 对齐）
+mock-llm/server.mjs            假 LLM + 假站点（8788 主车道；daemon 测试用 8790）
 debug-env/                     离线站点页面替身（无网络也能开发/截图）
+tools/                         开发/测试脚本（.gen-dev/.engine-test/.run-suite/.run-daemon-stub/.probe-tm-hash-ws/.e2e-*.js/.pack-*）
+docs/architecture.md           ★ 架构总览（组件图/数据模型/子系统/设计决策/测试矩阵）——新会话先读这个
+docs/cleanroom/                行为规格 spec-01..10（全部已实施）
 docs/                          管线说明（html + png）
-CHANGELOG.md                   版本记录（发布时与 @version / daemon version.mjs 对齐）
+skills/                        Agent 技能包（SKILL.md；daemon 运行时读取）
+daemon/                        本地 daemon（模块地图见下）
 ```
+
+**daemon/ 模块地图**：
+
+```
+index.mjs                      入口/CLI（serve|translate|glossary|check|agent|export-src|import-lg|glossary-io|rules|prompt|auth|status…）
+server.mjs                     控制面 HTTP（/ui 页面 + /status /run /auth /settings /rules /prompts /lg/* /warnings /agent/* …）
+ui.mjs                         控制台页面（OpenWebUI 风格；内嵌脚本禁反斜杠转义——见已知陷阱）
+site-client.mjs                站点 API 客户端（5 条契约；Bearer 鉴权；uploadChapter 带 sakuraVersion）
+engine.mjs                     从油猴脚本加载 GlossaryEngine（与浏览器同一份实现）
+---- 管线 ----
+translate-pipeline.mjs / translate.mjs      翻译 worker（toc 档位/分段/#编号协议/行数重试/段缓存/上传）
+glossary-pipeline.mjs                        术语管线（SCAN→EXTRACT→VERIFY→指南门槛→直写/提案）
+check-pipeline.mjs / quality.mjs             质检 v2（七码判定 + warnings 落库）
+processors.mjs / presets/                    文本处理链（资源投影/保留段/替换表/标点；base 开关）
+preserve.mjs                                 内置保护预设（base/kag/renpy/rpgmaker/wolf + 用户规则合并）
+lg-align.mjs                                 LG 译文对齐（导出/校验/应用 + lg-import 队列 runner）
+---- 调度与存储 ----
+scheduler.mjs                LlmScheduler（双模型池：翻译池 vs 助手/术语池；并发门/冷却/RPM）
+job-queue.mjs                单队列 FIFO（四类任务共用；progress 通道）
+store.mjs                    SQLite（19 表：全局 config vs 其余按 bookKey 分账）
+---- Agent ----
+agent-loop.mjs / agent-session.mjs           工具循环 / 会话与审批 broker / 摘要压缩
+agent-llm.mjs / agent-events.mjs             模型调用规范化 / 事件流（SSE + 轮询回退）
+agent-tools.mjs / -read / -write / -lg       工具（doing/ask_user；只读；写入审批；LG 互操作）
+agent-workspace.mjs / workspace-bootstrap.mjs  CodeAct 沙箱工作区（workspace_run / workspace_apply）
+agent-skills.mjs                             技能目录（skills/ 包发现与读取）
+---- 其它 ----
+tray.vbs / tray.ps1           Windows 托盘（隐藏运行 daemon）
+version.mjs                   daemon 版本（/ping 与 CHANGELOG/tag 对齐）
+README.md                     使用说明（命令/控制台/托盘/各专项）
+*-test.mjs                    纯函数与冒烟套件（daemon-test 为总入口）
+```
+
+## 新会话快速上手（按任务找入口）
+
+| 要做什么 | 从哪开始 |
+|---|---|
+| 了解整体架构 / 设计决策 | `docs/architecture.md` |
+| 改油猴功能 | `ntr-toolbox-alpha.user.js` → `tools/.gen-dev.mjs` → `tools/engine-test.mjs` + 相关 `.e2e-*` |
+| 改 daemon 功能 | `daemon/index.mjs` + 对应模块 → `daemon/daemon-test.mjs`（先起 8790 mock） |
+| 找某个行为的规格 | `docs/cleanroom/spec-01..10` |
+| 日常使用 / 命令 / 控制台 | `daemon/README.md`；控制台 <http://127.0.0.1:7331/ui>（托盘 `daemon/tray.vbs`） |
+| 查版本 / 发布 | `CHANGELOG.md`；发布流程见下方「交付流程」 |
 
 ## 常用命令
 

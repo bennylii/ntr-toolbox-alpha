@@ -20,6 +20,18 @@
 - 翻译器小工具：添加/删除/启动翻译器、复制翻译器到 BETA 工作区、工作区翻译器自动同步、填充术语表（可自动翻页至末页）。
 - 本地 daemon（GPT 翻译 worker + 控制台 + Agent + LG 互通）见 **`daemon/README.md`**；安装后油猴会自动把凭据同步过去。
 
+## 目录导航（新会话/新读者从哪开始）
+
+| 想了解/做什么 | 去哪 |
+|---|---|
+| 项目整体架构与设计决策 | [`docs/architecture.md`](docs/architecture.md) |
+| 日常使用 daemon（命令/控制台/托盘/质检/LG 导入） | [`daemon/README.md`](daemon/README.md)；控制台 <http://127.0.0.1:7331/ui> |
+| 改油猴功能 | `ntr-toolbox-alpha.user.js`（唯一源文件）→ `tools/.gen-dev.mjs` → `tools/engine-test.mjs` |
+| 改 daemon 功能 | `daemon/`（模块地图见 [AGENTS.md](AGENTS.md)）→ `daemon/daemon-test.mjs` |
+| 行为规格（各模块契约） | `docs/cleanroom/spec-01..10` |
+| 版本记录 | [`CHANGELOG.md`](CHANGELOG.md) |
+| 给 AI 代理的工作说明 | [`AGENTS.md`](AGENTS.md)（新会话自动加载） |
+
 ## 安装
 
 1. 安装 Tampermonkey。
