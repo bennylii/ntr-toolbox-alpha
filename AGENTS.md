@@ -12,6 +12,7 @@ ntr-toolbox-alpha.dev.user.js  由 .gen-dev.mjs 生成（@version 追加 -dev、
 tools/                         开发/测试脚本（.e2e-*.js = 页面上下文断言套件；.probe-*.js = 小探针）
 daemon/                        本地 daemon（入口 index.mjs；控制台 ui.mjs；详见 daemon/README.md 与其内测试清单）
 docs/cleanroom/                各模块重构前的行为规格（spec-01..10，全部已实施）
+docs/architecture.md           架构总览（组件图/数据模型/子系统/设计决策/测试矩阵）
 mock-llm/server.mjs            假 LLM + 假站点（端口 8788；daemon 测试用 8790）
 debug-env/                     离线站点页面替身（无网络也能开发/截图）
 docs/                          管线说明（html + png）

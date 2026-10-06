@@ -1,5 +1,7 @@
 # daemon —— GPT 翻译 worker（站点工作区兼容）
 
+> 架构与设计决策总览见 [`docs/architecture.md`](../docs/architecture.md)（组件图/数据模型/子系统/ADR/测试矩阵）。
+
 本地常驻进程：用 Node 替代 auto-novel「GPT 工作区」的浏览器 worker——逐章翻译并回传，
 语义与站点完全一致（分段 1500 字/30 行、`#编号` 协议、术语表按命中行注入、行数不匹配重试、
 expire/normal/all 档位、`oldGlossaryId === glossaryId` 跳过），并修复工作区的内存问题：

@@ -27,7 +27,7 @@
 
 ## 开发
 
-源码就一个文件：**`ntr-toolbox-alpha.user.js`**（改了直接改它）。本地 daemon 在 `daemon/`（详见 `daemon/README.md`）。
+源码就一个文件：**`ntr-toolbox-alpha.user.js`**（改了直接改它）。本地 daemon 在 `daemon/`（详见 `daemon/README.md`；架构与设计决策总览见 `docs/architecture.md`）。
 
 ```sh
 node tools/.gen-dev.mjs          # 生成 ntr-toolbox-alpha.dev.user.js
