@@ -49,8 +49,9 @@ CDP_PORT=9334 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8789
 
 1. 跑相关 `.e2e-*` 套件（至少 queue 相关全绿），`node tools/engine-test.mjs` 也跑。
 2. `node tools/.gen-dev.mjs` 生成 dev 构建。
-3. Tampermonkey 里重装：打开 `http://127.0.0.1:8788/ntr-toolbox-alpha.dev.user.js` → 点安装按钮（测试 profile 里装的是**篡改猴测试版/Beta**）。重装后**必须刷新页面**新代码才生效。
-4. 验证装上的版本 = 本地文件：`node tools/cdp.mjs evalf tools/.probe-tm-hash.js`（比对 sha256）。
+3. Tampermonkey 里重装：打开 `http://127.0.0.1:8788/ntr-toolbox-alpha.dev.user.js` → 点安装按钮（测试 profile 里装的是**篡改猴测试版/Beta**）。重装后**必须刷新页面**新代码才生效。自动化点「更新」注意：headless 车道下安装对话框落在 TM 扩展的 `ask.html` 页（targets[0]），按钮是 `<input value="更新">`——按 **value** 匹配后 `.click()`。
+4. 验证装上的版本 = 本地文件：`node tools/.probe-tm-hash-ws.mjs`（连 TM service worker 取存储正文 sha256），与 `ntr-toolbox-alpha.dev.user.js` **整文件** sha256 比对（去掉用户脚本头再算会不一致——TM 存的是整文件）。
+5. 真机 HTTPS 页面访问本机 daemon 受 Chrome 本地网络访问（LNA）管辖：真实用户首次会看到授权提示；**headless 测试车道必须加 `--disable-features=LocalNetworkAccessChecks`** 才能自动化验证（否则 fetch 直接 Failed to fetch，daemon 侧一切正常也连不上）。
 
 ## clean-room 重构约定（已完成）
 

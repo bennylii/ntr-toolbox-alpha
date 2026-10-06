@@ -10,7 +10,7 @@ expire/normal/all 档位、`oldGlossaryId === glossaryId` 跳过），并修复�
 
 - Node ≥ 24（用内置 `node:sqlite`；实验性警告无害）；
 - 一个 OpenAI 兼容的 LLM 端点（与工作区 GPT 翻译器同源即可）；
-- 站点凭据：在站点页面点油猴模块「**同步 Daemon**」（推荐），或 `node daemon/index.mjs auth <token>`。
+- 站点凭据：在站点页面点油猴模块「**Daemon 连接**」（推荐），或 `node daemon/index.mjs auth <token>`。
 
 ## 命令
 
@@ -26,14 +26,20 @@ node daemon/index.mjs import-lg --book key --txt file --manifest file [--apply] 
 node daemon/index.mjs agent     [--book key] [--message "..."] [--session id] [--auto]   # 本地助手（工具调用）
 node daemon/index.mjs translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
 node daemon/index.mjs watch     [--interval 30]    # 常驻：定期按 expire 档补翻
-node daemon/index.mjs serve     [--port 7331]      # 控制台 /ui + 控制面 /status /runs /auth /run …（/run 单队列串行）
+node daemon/index.mjs serve     [--port N]        # 控制台 /ui + 控制面；端口 = 旗标 > config.serve.port > 7331，实际端口写 daemon/.serve-port
 node daemon/index.mjs status
 node daemon/index.mjs forget    <bookKey>
 ```
 
 全局旗标（调度器，见下节）：`--max-in-flight N`、`--rpm N`、`--transport-retries N`、`--max-prompt-chars N`、`--strict-prompt`。
 
-典型流程：`serve`（或 `watch`）常驻 → 浏览器点「同步 Daemon」推凭据与翻译器 → `add` 登记书 → `translate`。
+典型流程：`serve`（或 `watch`）常驻 → 浏览器点「Daemon 连接」推凭据与翻译器 → `add` 登记书 → `translate`。
+
+### 连接（端口 / 探测 / 同步来源）
+- **端口**：设置页「连接」区改默认端口（**重启生效**）；托盘 `tray.ps1` 默认不传 `--port`（自读 config），`Wait-Ready` 跟随 `.serve-port`；显式 `-Port N` 仍可覆盖；
+- **`GET /ping`**：无需凭据，返回 `{ ok, name, port, version }`——油猴角标与外部脚本探测用（带 CORS，走同一白名单）；
+- **同步来源**：`POST /auth` 记录 `lastSync { at, origin, UA 摘要, workersCount }`（只记元数据不记 token）→ `/status` 与设置页「连接」区可见——多浏览器推送时一眼分辨是谁在生效；
+- **跨域白名单**：内置默认 `n.novelia.cc` + `127.0.0.1/localhost`（不可移除）；设置页「连接」区可加附加条目（hostname 或 origin，即时生效）。
 
 ## 控制台（设置 GUI）
 
@@ -46,7 +52,7 @@ node daemon/index.mjs forget    <bookKey>
 - **规则**：pre/post 替换、保留段——列表 = 全局 + 当前项目条目（标注来源）；新增默认作用当前项目，「作用域」可切全局；
 - **提示词**：**全局模板**（所有项目共用，LG 式）四槽编辑；按书覆盖仅 API/CLI 保留（高级用法，UI 不暴露）；
 - **助手**：新会话自动挂当前项目；侧栏会话按项目分组（「通用」组收无书会话）；绑书会话的系统提示注入【当前项目】，工具的 book 参数缺省即此书；
-- **设置**：全局设置（作用于所有项目）——六个区块：**翻译模型池**（端点增删改，key 只写不回显、留空 = 按 id 保持原值）／**助手/术语模型池**（独立端点与并发限流；清空 = 跟随翻译池）／**翻译池调度与限流**／**助手池调度与限流**／**助手参数**（审批模式、maxSteps、工具结果截断、上下文预算）／**站点与凭据**（origin + token 直填）。站点「同步 Daemon」推送仍会整表覆盖**翻译池**（最后写入者赢），但**不再覆盖**显式配置过的助手池；
+- **设置**：全局设置（作用于所有项目）——七个区块：**连接**（端口 / 跨域白名单附加条目 / 上次同步来源）／**翻译模型池**（端点增删改，key 只写不回显、留空 = 按 id 保持原值）／**助手/术语模型池**（独立端点与并发限流；清空 = 跟随翻译池）／**翻译池调度与限流**／**助手池调度与限流**／**助手参数**（审批模式、maxSteps、工具结果截断、上下文预算）／**站点与凭据**（origin + token 直填）。站点「Daemon 连接」推送仍会整表覆盖**翻译池**（最后写入者赢），但**不再覆盖**显式配置过的助手池；
 - **状态**：当前项目概要 + llm 双池统计（并发峰值/冷却/重试）、用量、RSS 采样；
 - **技能**：全局资源（`skills/` 目录，LG 式 SKILL.md 包），不随项目变化。
 
@@ -58,6 +64,7 @@ node daemon/index.mjs forget    <bookKey>
 
 - 菜单：**打开控制台**（双击图标同效）、**状态**（书数 / 已译章数 / 队列 / RSS 气泡）、**打开日志**（`daemon/.tray.log`）、**重启 daemon**、**退出**（一并停掉托盘拉起的 daemon）；
 - 启动时若端口已有 daemon 在跑，托盘只接管显示（不持有进程，退出仅关托盘）；daemon 意外退出会弹气泡提醒；
+- 端口：默认跟随 `config.serve.port`（读 `daemon/.serve-port`）；`-Port N` 显式传参可覆盖；
 - 日志：daemon 输出追加到 `daemon/.tray.log`（已被 `*.log` 忽略，需要时手动清）；
 - 开机自启：`Win+R` → `shell:startup` → 放入 `tray.vbs` 的快捷方式；
 - 实现是 PowerShell NotifyIcon（WinForms），无 npm 依赖、无编译步骤；测试口：`-TestSpawn`（拉起临时 db 的 daemon → 等就绪 → 杀掉）与 `-SmokeGui N`（只初始化托盘 GUI，N 秒后自退）。
@@ -66,7 +73,7 @@ node daemon/index.mjs forget    <bookKey>
 
 所有 LLM 调用都经 `daemon/scheduler.mjs`（规格 `docs/cleanroom/spec-06-llm-scheduler.md`），分**两个独立池**：
 
-- **翻译池**（`config.workers` + `config.llm`）：翻译管线专用；油猴「同步 Daemon」推送与设置页编辑都写这里；
+- **翻译池**（`config.workers` + `config.llm`）：翻译管线专用；油猴「Daemon 连接」推送与设置页编辑都写这里；
 - **助手/术语池**（`config.agent.workers` + `config.agent.llm`）：助手 Agent 与术语管线用（工具调用模型），**独立的并发门/冷却/RPM，与翻译互不抢在途额度**；未显式配置时镜像翻译池，显式配置后油猴推送不再覆盖（设置页「清空」回到跟随模式）；
 
 - **全局并发门**：`--max-in-flight N`（默认 1）——同刻最多 N 个在途请求、FIFO 排队；劈半重试、提取、核实同样受管；
