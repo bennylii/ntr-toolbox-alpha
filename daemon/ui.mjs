@@ -122,7 +122,10 @@ export const UI_HTML = `<!doctype html>
     --faint: #808080;       /* 禁用/最弱 */
     --line: #808080;        /* 边框（ButtonShadow） */
     --title: #000080;       /* 标题栏 / 选中高亮（ActiveTitle） */
+    --title-a: #0a246a;     /* VB6 / Office97 经典蓝渐变：上端深蓝 */
+    --title-b: #a6caf0;     /* …下端浅蓝 */
     --title-fg: #ffffff;
+    --desk: #3a6ea5;        /* 经典蓝桌面底（Win2000 经典主题的桌面色） */
     --link: #0000ff;
     --ok: #006400; --bad: #800000; --warn: #7a5c00;
     --info: #ffffe1;        /* 经典提示条 InfoWindow */
@@ -135,7 +138,7 @@ export const UI_HTML = `<!doctype html>
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
-  body { margin: 0; font: 12px/1.5 var(--font); background: var(--face); color: var(--text); }
+  body { margin: 0; font: 12px/1.5 var(--font); background: var(--desk); color: var(--text); }
   .app { display: flex; height: 100vh; overflow: hidden; }
   a { color: var(--link); text-decoration: underline; }
   ::-webkit-scrollbar { width: 16px; height: 16px; }
@@ -146,7 +149,7 @@ export const UI_HTML = `<!doctype html>
 
   /* ---- 侧栏（灰面 + 经典反色高亮） ---- */
   .side { width: 240px; min-width: 240px; background: var(--face); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
-  .brand { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-weight: 700; font-size: 12.5px; background: var(--title); color: var(--title-fg); }
+  .brand { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-weight: 700; font-size: 12.5px; background: linear-gradient(180deg, var(--title-a) 0%, var(--title-a) 62%, var(--title-b) 100%); color: var(--title-fg); text-shadow: 0 1px 1px rgba(0,0,0,.5); }
   .brand .logo { width: 18px; height: 18px; background: var(--face); color: var(--title); display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; border: 1px solid var(--title-fg); flex: 0 0 auto; }
   .side nav { display: flex; flex-direction: column; padding: 4px; }
   .side nav button { all: unset; cursor: pointer; padding: 4px 8px; color: var(--text); font-size: 12.5px; display: flex; align-items: center; gap: 7px; }
@@ -169,12 +172,14 @@ export const UI_HTML = `<!doctype html>
   .side-foot { padding: 3px 8px; border-top: 1px solid var(--line); font-size: 11px; color: var(--text); background: var(--face); }
 
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  .topbar { display: flex; align-items: center; gap: 12px; height: var(--topbar-h); padding: 0 8px; background: var(--title); color: var(--title-fg); }
-  .topbar h1 { font-size: 12.5px; margin: 0; font-weight: 700; }
-  .topbar .hdr { margin-left: auto; font-size: 11px; color: #d8d8ff; }
-  .content { flex: 1; overflow-y: auto; padding: 10px 12px 40px; }
+  .topbar { display: flex; align-items: center; gap: 12px; height: var(--topbar-h); padding: 0 8px; background: linear-gradient(180deg, var(--title-a) 0%, var(--title-a) 62%, var(--title-b) 100%); color: var(--title-fg); }
+  .topbar h1 { font-size: 12.5px; margin: 0; font-weight: 700; text-shadow: 0 1px 1px rgba(0,0,0,.45); }
+  .topbar .hdr { margin-left: auto; font-size: 11px; color: #f0f6ff; text-shadow: 0 1px 1px rgba(0,0,0,.45); }
+  .content { flex: 1; overflow-y: auto; padding: 10px 12px 40px; background: var(--desk); }
   .page { max-width: 980px; margin: 0 auto; display: none; }
   .page.active { display: block; }
+  /* 直接落在蓝桌面上的说明行：套一层灰底，避免灰字压在蓝底上看不清 */
+  .page > .muted { background: var(--face); border: 1px solid var(--line); padding: 3px 8px; margin: 0 0 8px; }
 
   /* ---- 表单与通用控件（1px 描边 + 白底字段；无圆角） ---- */
   .proj-card { border: 1px solid var(--line); background: var(--window); padding: 6px 8px; margin: 6px 0; cursor: pointer; }
@@ -184,7 +189,7 @@ export const UI_HTML = `<!doctype html>
   .proj-actions { margin-top: 6px; display: flex; gap: 4px; flex-wrap: wrap; }
   .proj-detail { margin-top: 6px; border-top: 1px solid var(--line); padding-top: 6px; font-size: 12px; cursor: default; }
   .proj-detail table { font-size: 11.5px; }
-  fieldset { border: 1px solid var(--line); background: transparent; margin: 0 0 10px; padding: 8px 10px 10px; }
+  fieldset { border: 1px solid var(--line); background: var(--face); margin: 0 0 10px; padding: 8px 10px 10px; }
   legend { font-size: 11.5px; padding: 0 4px; background: var(--face); color: var(--text); font-weight: 700; }
   label { display: inline-flex; gap: 5px; align-items: center; margin: 3px 12px 3px 0; }
   input[type=text], input[type=number], input[type=password], textarea, select { background: var(--window); color: var(--text); border: 1px solid var(--line); padding: 2px 4px; font: inherit; }
@@ -215,7 +220,7 @@ export const UI_HTML = `<!doctype html>
   .agent-top { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   .agent-top .spacer { flex: 1; }
   .agent-title { font-size: 12px; font-weight: 700; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .chat-wrap { position: relative; flex: 1; min-height: 0; display: flex; padding: 6px 8px 0; }
+  .chat-wrap { position: relative; flex: 1; min-height: 0; display: flex; padding: 6px 8px 0; background: var(--desk); }
   .chat { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; background: var(--window); border: 1px solid var(--line); }
   .chat > * { width: 100%; max-width: var(--col); margin-left: auto; margin-right: auto; }
   .msg { display: flex; gap: 6px; }

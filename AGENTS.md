@@ -27,7 +27,7 @@ daemon/                        本地 daemon（模块地图见下）
 ```
 index.mjs                      入口/CLI（serve|translate|glossary|check|agent|export-src|import-lg|glossary-io|rules|prompt|auth|status…）
 server.mjs                     控制面 HTTP（/ui 页面 + /status /run /auth /settings /rules /prompts /lg/* /warnings /agent/* …）
-ui.mjs                         控制台页面（Windows 经典灰 + 扁平直角；图标走 Segoe MDL2 Assets；renderMarkdown 在模块作用域、经 MD_SOURCE 内联；内嵌脚本禁反斜杠转义——见已知陷阱）
+ui.mjs                         控制台页面（Windows 经典：灰面 + 蓝渐变标题栏 + 经典蓝桌面底，扁平直角；图标走 Segoe MDL2 Assets；renderMarkdown 在模块作用域、经 MD_SOURCE 内联；内嵌脚本禁反斜杠转义——见已知陷阱）
 site-client.mjs                站点 API 客户端（5 条契约；Bearer 鉴权；uploadChapter 带 sakuraVersion）
 engine.mjs                     从油猴脚本加载 GlossaryEngine（与浏览器同一份实现）
 ---- 管线 ----
