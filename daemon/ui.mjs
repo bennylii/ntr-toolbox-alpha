@@ -122,14 +122,12 @@ export const UI_HTML = `<!doctype html>
     --faint: #808080;       /* 禁用/最弱 */
     --line: #808080;        /* 边框（ButtonShadow） */
     --title: #000080;       /* 纯 navy（保留备用；高亮已统一走 --hl） */
-    --title-a: #0a246a;     /* VB6 / Office97 经典蓝渐变（窗口标题栏）：上端深蓝 */
-    --title-b: #a6caf0;     /* …下端浅蓝 */
+    --title-a: #004f4f;     /* 青蓝渐变（窗口标题栏 + 侧栏页眉）：上端深青 */
+    --title-b: #2f9d9d;     /* …下端浅青 */
     --title-fg: #ffffff;
-    --desk: #008080;        /* Win9x 青蓝：桌面底 + 侧栏底 */
+    --desk: #008080;        /* Win9x 青蓝（仅在窗口缝隙/装饰处露面，不做大面积底色） */
     --hl: #005f5f;          /* 悬停 / 选中高亮（青蓝加深，白字） */
     --hl-soft: #cfeeee;     /* 浅青：浅底高亮（表格行 hover 等） */
-    --brand-a: #006464;     /* 侧栏页眉青蓝渐变 */
-    --brand-b: #12a3a3;
     --link: #0000ff;
     --ok: #006400; --bad: #800000; --warn: #7a5c00;
     --info: #ffffe1;        /* 经典提示条 InfoWindow */
@@ -151,42 +149,42 @@ export const UI_HTML = `<!doctype html>
   ::-webkit-scrollbar-thumb:hover { background: var(--face-hi); }
   ::-webkit-scrollbar-corner { background: var(--face); }
 
-  /* ---- 侧栏（青蓝底 + 加深高亮） ---- */
-  .side { width: 240px; min-width: 240px; background: var(--desk); color: #ffffff; border-right: 1px solid var(--line); display: flex; flex-direction: column; }
-  .brand { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-weight: 700; font-size: 12.5px; background: linear-gradient(180deg, var(--brand-a) 0%, var(--brand-a) 62%, var(--brand-b) 100%); color: var(--title-fg); text-shadow: 0 1px 1px rgba(0,0,0,.5); }
-  .brand .logo { width: 18px; height: 18px; background: var(--face); color: var(--brand-a); display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; border: 1px solid var(--title-fg); flex: 0 0 auto; }
+  /* ---- 侧栏（灰底，跟经典 Windows 一样；只有选中/悬停用青蓝） ---- */
+  .side { width: 240px; min-width: 240px; background: var(--face); color: var(--text); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+  .brand { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-weight: 700; font-size: 12.5px; background: linear-gradient(180deg, var(--title-a) 0%, var(--title-a) 62%, var(--title-b) 100%); color: var(--title-fg); text-shadow: 0 1px 1px rgba(0,0,0,.5); }
+  .brand .logo { width: 18px; height: 18px; background: var(--face); color: var(--title-a); display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; border: 1px solid var(--title-fg); flex: 0 0 auto; }
   .side nav { display: flex; flex-direction: column; padding: 4px; }
-  .side nav button { all: unset; cursor: pointer; padding: 4px 8px; color: #ffffff; font-size: 12.5px; display: flex; align-items: center; gap: 7px; }
+  .side nav button { all: unset; cursor: pointer; padding: 4px 8px; color: var(--text); font-size: 12.5px; display: flex; align-items: center; gap: 7px; }
   .side nav button:hover, .side nav button.active { background: var(--hl); color: #ffffff; }
-  .side nav button:focus-visible { outline: 1px dotted #ffffff; outline-offset: -3px; }
+  .side nav button:focus-visible { outline: 1px dotted var(--text); outline-offset: -3px; }
   .side nav button .ico { width: 16px; text-align: center; font-family: "Segoe MDL2 Assets"; font-size: 13px; flex: 0 0 auto; }
-  .side .divider { height: 0; border-top: 1px solid var(--hl); border-bottom: 1px solid var(--brand-b); margin: 6px 4px; }
-  .side .side-title { padding: 2px 8px 4px; font-size: 11px; color: #cfeeee; }
-  .side .muted { color: #cfeeee; }
+  .side .divider { height: 0; border-top: 1px solid var(--line); border-bottom: 1px solid #dcdcdc; margin: 6px 4px; }
+  .side .side-title { padding: 2px 8px 4px; font-size: 11px; color: var(--muted); }
   #side-sessions { flex: 1; overflow-y: auto; padding: 0 4px 6px; }
-  .sess-row { cursor: pointer; display: flex; align-items: center; gap: 4px; padding: 3px 6px; font-size: 12px; color: #ffffff; }
+  .sess-row { cursor: pointer; display: flex; align-items: center; gap: 4px; padding: 3px 6px; font-size: 12px; color: var(--text); }
   .sess-row:hover, .sess-row.active { background: var(--hl); color: #ffffff; }
-  .sess-row .sess-when { color: #bfe4e4; font-size: 10.5px; flex: 0 0 auto; }
+  .sess-row .sess-when { color: var(--faint); font-size: 10.5px; flex: 0 0 auto; }
   .sess-row:hover .sess-when, .sess-row.active .sess-when { color: #d8f4f4; }
-  .sess-row .sess-dot { width: 6px; height: 6px; background: #7dfb7d; flex: 0 0 auto; }
+  .sess-row .sess-dot { width: 6px; height: 6px; background: #1f8b1f; flex: 0 0 auto; }
   .sess-row .sess-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sess-ops { display: none; gap: 1px; flex: 0 0 auto; }
   .sess-row:hover .sess-ops, .sess-row.active .sess-ops { display: flex; }
-  .sess-ops .icon-btn { font-size: 11px; padding: 0 4px; color: #ffffff; }
-  .sess-ops .icon-btn:hover { background: rgba(255,255,255,.18); border-color: #ffffff; color: #ffffff; }
-  .sess-group { padding: 6px 8px 2px; font-size: 11px; color: #a8dede; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .side-foot { padding: 3px 8px; border-top: 1px solid var(--hl); font-size: 11px; color: #ffffff; background: var(--desk); }
+  .sess-ops .icon-btn { font-size: 11px; padding: 0 4px; color: var(--muted); }
+  .sess-ops .icon-btn:hover { background: var(--face-hi); border-color: var(--line); color: var(--text); }
+  .sess-row:hover .sess-ops .icon-btn, .sess-row.active .sess-ops .icon-btn { color: #ffffff; }
+  .sess-group { padding: 6px 8px 2px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .side-foot { padding: 3px 8px; border-top: 1px solid var(--line); font-size: 11px; color: var(--text); background: var(--face); }
 
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   .topbar { display: flex; align-items: center; gap: 12px; height: var(--topbar-h); padding: 0 8px; background: linear-gradient(180deg, var(--title-a) 0%, var(--title-a) 62%, var(--title-b) 100%); color: var(--title-fg); }
   .topbar h1 { font-size: 12.5px; margin: 0; font-weight: 700; text-shadow: 0 1px 1px rgba(0,0,0,.45); }
   .topbar .hdr { margin-left: auto; font-size: 11px; color: #f0f6ff; text-shadow: 0 1px 1px rgba(0,0,0,.45); }
   /* 页面滚动容器；注意限定 .main > —— 助手消息正文也用 class="content"，别串味 */
-  .main > .content { flex: 1; overflow-y: auto; padding: 10px 12px 40px; background: var(--desk); }
+  .main > .content { flex: 1; overflow-y: auto; padding: 10px 12px 40px; background: var(--face); }
   .page { max-width: 980px; margin: 0 auto; display: none; }
   .page.active { display: block; }
-  /* 直接落在蓝桌面上的说明行：套一层灰底，避免灰字压在蓝底上看不清 */
-  .page > .muted { background: var(--face); border: 1px solid var(--line); padding: 3px 8px; margin: 0 0 8px; }
+  /* 页面开头直接挂的说明行：工作区已是灰底，够读，不再加背板 */
+  .page > .muted { padding: 0; margin: 0 0 8px; }
 
   /* ---- 表单与通用控件（1px 描边 + 白底字段；无圆角） ---- */
   .proj-card { border: 1px solid var(--line); background: var(--window); padding: 6px 8px; margin: 6px 0; cursor: pointer; }
@@ -227,7 +225,7 @@ export const UI_HTML = `<!doctype html>
   .agent-top { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   .agent-top .spacer { flex: 1; }
   .agent-title { font-size: 12px; font-weight: 700; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .chat-wrap { position: relative; flex: 1; min-height: 0; display: flex; padding: 6px 8px 0; background: var(--desk); }
+  .chat-wrap { position: relative; flex: 1; min-height: 0; display: flex; padding: 6px 8px 0; background: var(--face); }
   .chat { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; background: var(--window); border: 1px solid var(--line); }
   .chat > * { width: 100%; max-width: var(--col); margin-left: auto; margin-right: auto; }
   .msg { display: flex; gap: 6px; }
