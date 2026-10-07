@@ -110,233 +110,250 @@ export const UI_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NTR Daemon 控制台</title>
 <style>
-  /* ---- 主题 token（暗色，纯灰体系；亮色后续可加） ---- */
+  /* ---- 主题 token：Windows 经典灰 + 扁平直角（浅色体系；经典 Windows 没有深色） ---- */
   :root {
-    color-scheme: dark;
-    --bg: #171717; --bg2: #0d0d0d; --panel: #1f1f1f; --panel2: #2b2b2b;
-    --border: #2e2e2e; --border2: #3d3d3d;
-    --text: #ececec; --muted: #a3a3a3; --faint: #7c7c7c;
-    --accent: #3b82f6; --accent2: #2563eb;
-    --bubble: #333333;
-    --ok: #6ee7a8; --bad: #f87171; --warn: #fbbf24;
-    --radius: 14px; --radius-lg: 16px; --radius-xl: 24px;
+    color-scheme: light;
+    --face: #c0c0c0;        /* 面板/按钮面（经典 ButtonFace） */
+    --face-hi: #d4d4d4;     /* hover 提亮 */
+    --face-lo: #a8a8a8;     /* 按下加深 */
+    --window: #ffffff;      /* 字段与内容白底 */
+    --text: #000000;
+    --muted: #5a5a5a;       /* 次要文字（经典 GrayText 在正文里偏浅，折中取深一档） */
+    --faint: #808080;       /* 禁用/最弱 */
+    --line: #808080;        /* 边框（ButtonShadow） */
+    --title: #000080;       /* 标题栏 / 选中高亮（ActiveTitle） */
+    --title-fg: #ffffff;
+    --link: #0000ff;
+    --ok: #006400; --bad: #800000; --warn: #7a5c00;
+    --info: #ffffe1;        /* 经典提示条 InfoWindow */
+    --code: #f0f0f0;
+    --radius: 0; --radius-lg: 0; --radius-xl: 0;
     --col: 58rem;
+    --topbar-h: 30px;
+    --font: Tahoma, "MS Sans Serif", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    --mono: Consolas, "Courier New", monospace;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
-  body { margin: 0; font: 15px/1.6 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); }
+  body { margin: 0; font: 12px/1.5 var(--font); background: var(--face); color: var(--text); }
   .app { display: flex; height: 100vh; overflow: hidden; }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  ::-webkit-scrollbar { width: .45rem; height: .45rem; }
-  ::-webkit-scrollbar-thumb { background: rgba(130,130,130,.5); border-radius: 999px; }
-  ::-webkit-scrollbar-thumb:hover { background: rgba(170,170,170,.7); }
-  ::-webkit-scrollbar-track { background: transparent; }
+  a { color: var(--link); text-decoration: underline; }
+  ::-webkit-scrollbar { width: 16px; height: 16px; }
+  ::-webkit-scrollbar-track { background: #dfdfdf; }
+  ::-webkit-scrollbar-thumb { background: var(--face); border: 1px solid var(--line); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--face-hi); }
+  ::-webkit-scrollbar-corner { background: var(--face); }
 
-  /* ---- 侧栏 ---- */
-  .side { width: 260px; min-width: 260px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
-  .brand { display: flex; align-items: center; gap: 10px; padding: 14px 14px 10px; font-weight: 600; font-size: 14px; letter-spacing: .2px; }
-  .brand .logo { width: 26px; height: 26px; border-radius: 9px; background: linear-gradient(135deg, var(--accent), #8b5cf6); display: inline-flex; align-items: center; justify-content: center; font-size: 13px; color: #fff; }
-  .side nav { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px; }
-  .side nav button { all: unset; cursor: pointer; padding: 7px 10px; border-radius: 10px; color: var(--muted); font-size: 13.5px; display: flex; align-items: center; gap: 9px; }
-  .side nav button:hover { background: #1c1c1c; color: var(--text); }
-  .side nav button.active { background: var(--panel2); color: var(--text); }
-  .side nav button .ico { width: 18px; text-align: center; opacity: .9; }
-  .side .divider { height: 1px; background: var(--border); margin: 8px 12px; }
-  .side .side-title { padding: 2px 14px 6px; font-size: 11px; color: var(--faint); letter-spacing: .8px; }
-  #side-sessions { flex: 1; overflow-y: auto; padding: 0 8px 8px; }
-  .sess-row { all: unset; cursor: pointer; display: block; padding: 6px 10px; border-radius: 10px; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .sess-row:hover { background: #1c1c1c; color: var(--text); }
-  .sess-row.active { background: var(--panel2); color: var(--text); }
-  .sess-row .sess-when { color: var(--faint); font-size: 11px; }
-  .sess-row .sess-dot { display: inline-block; width: 6px; height: 6px; border-radius: 999px; background: var(--accent); margin-left: 6px; vertical-align: middle; }
-  .sess-row { display: flex; align-items: center; gap: 4px; }
-  .sess-row .sess-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-  .sess-ops { display: none; gap: 2px; flex: 0 0 auto; }
+  /* ---- 侧栏（灰面 + 经典反色高亮） ---- */
+  .side { width: 240px; min-width: 240px; background: var(--face); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+  .brand { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-weight: 700; font-size: 12.5px; background: var(--title); color: var(--title-fg); }
+  .brand .logo { width: 18px; height: 18px; background: var(--face); color: var(--title); display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; border: 1px solid var(--title-fg); flex: 0 0 auto; }
+  .side nav { display: flex; flex-direction: column; padding: 4px; }
+  .side nav button { all: unset; cursor: pointer; padding: 4px 8px; color: var(--text); font-size: 12.5px; display: flex; align-items: center; gap: 7px; }
+  .side nav button:hover, .side nav button.active { background: var(--title); color: var(--title-fg); }
+  .side nav button:focus-visible { outline: 1px dotted var(--text); outline-offset: -3px; }
+  .side nav button .ico { width: 16px; text-align: center; font-family: "Segoe MDL2 Assets"; font-size: 13px; flex: 0 0 auto; }
+  .side .divider { height: 0; border-top: 1px solid var(--line); border-bottom: 1px solid #dcdcdc; margin: 6px 4px; }
+  .side .side-title { padding: 2px 8px 4px; font-size: 11px; color: var(--muted); }
+  #side-sessions { flex: 1; overflow-y: auto; padding: 0 4px 6px; }
+  .sess-row { cursor: pointer; display: flex; align-items: center; gap: 4px; padding: 3px 6px; font-size: 12px; color: var(--text); }
+  .sess-row:hover, .sess-row.active { background: var(--title); color: var(--title-fg); }
+  .sess-row .sess-when { color: var(--faint); font-size: 10.5px; flex: 0 0 auto; }
+  .sess-row:hover .sess-when, .sess-row.active .sess-when { color: #d8d8ff; }
+  .sess-row .sess-dot { width: 6px; height: 6px; background: var(--ok); flex: 0 0 auto; }
+  .sess-row .sess-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess-ops { display: none; gap: 1px; flex: 0 0 auto; }
   .sess-row:hover .sess-ops, .sess-row.active .sess-ops { display: flex; }
-  .sess-ops .icon-btn { font-size: 11px; padding: 1px 5px; }
-  .sess-group { padding: 10px 10px 3px; font-size: 11px; color: var(--faint); letter-spacing: .4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .side-foot { padding: 9px 14px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--faint); }
+  .sess-ops .icon-btn { font-size: 11px; padding: 0 4px; }
+  .sess-group { padding: 6px 8px 2px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .side-foot { padding: 3px 8px; border-top: 1px solid var(--line); font-size: 11px; color: var(--text); background: var(--face); }
 
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  .topbar { display: flex; align-items: center; gap: 14px; padding: 9px 18px; border-bottom: 1px solid var(--border); background: var(--bg2); }
-  .topbar h1 { font-size: 14.5px; margin: 0; font-weight: 600; }
-  .topbar .hdr { margin-left: auto; font-size: 12px; color: var(--faint); }
-  .content { flex: 1; overflow-y: auto; padding: 18px 22px 60px; }
-  .page { max-width: 920px; margin: 0 auto; display: none; }
+  .topbar { display: flex; align-items: center; gap: 12px; height: var(--topbar-h); padding: 0 8px; background: var(--title); color: var(--title-fg); }
+  .topbar h1 { font-size: 12.5px; margin: 0; font-weight: 700; }
+  .topbar .hdr { margin-left: auto; font-size: 11px; color: #d8d8ff; }
+  .content { flex: 1; overflow-y: auto; padding: 10px 12px 40px; }
+  .page { max-width: 980px; margin: 0 auto; display: none; }
   .page.active { display: block; }
 
-  /* ---- 表单与通用控件（其它页共用） ---- */
-  .proj-card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); padding: 10px 14px; margin: 8px 0; cursor: pointer; }
-  .proj-card:hover { border-color: var(--border2); }
-  .proj-card.current { border-color: var(--accent); background: #1c1c1c; }
-  .proj-actions { margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap; }
-  .proj-detail { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 8px; font-size: 12.5px; cursor: default; }
-  .proj-detail table { font-size: 12px; }
-  fieldset { border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); margin: 0 0 14px; padding: 12px 16px 16px; }
-  legend { color: var(--muted); font-size: 12px; padding: 0 6px; }
-  label { display: inline-flex; gap: 6px; align-items: center; margin: 4px 14px 4px 0; color: var(--text); }
-  input[type=text], input[type=number], input[type=password], textarea, select { background: #131313; color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 6px 10px; font: inherit; }
-  input:focus, textarea:focus, select:focus { outline: none; border-color: #4a4a4a; box-shadow: 0 0 0 2px rgba(59,130,246,.22); }
-  input[type=number] { width: 96px; }
-  textarea { width: 100%; min-height: 90px; box-sizing: border-box; }
-  .btn { background: var(--accent2); border: 1px solid var(--accent); color: #fff; border-radius: 10px; padding: 6px 14px; cursor: pointer; font: inherit; }
-  .btn:hover { filter: brightness(1.12); }
-  .btn.ghost { background: #1c1c1c; border-color: var(--border); color: var(--text); }
-  .btn.ghost:hover { background: #242424; filter: none; }
-  .btn.danger { background: #3a1d1d; border-color: #7f3a3a; color: #ffb4b4; }
-  .btn:disabled { opacity: .45; cursor: default; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; border-bottom: 1px solid var(--border); padding: 6px 8px; vertical-align: top; }
-  th { color: var(--muted); font-weight: 500; }
-  .muted { color: var(--muted); font-size: 12px; }
+  /* ---- 表单与通用控件（1px 描边 + 白底字段；无圆角） ---- */
+  .proj-card { border: 1px solid var(--line); background: var(--window); padding: 6px 8px; margin: 6px 0; cursor: pointer; }
+  .proj-card:hover { background: #f4f4ff; }
+  .proj-card.current { border-color: var(--title); }
+  .proj-card.current > div:first-child { background: var(--title); color: var(--title-fg); margin: -6px -8px 4px; padding: 2px 8px; }
+  .proj-actions { margin-top: 6px; display: flex; gap: 4px; flex-wrap: wrap; }
+  .proj-detail { margin-top: 6px; border-top: 1px solid var(--line); padding-top: 6px; font-size: 12px; cursor: default; }
+  .proj-detail table { font-size: 11.5px; }
+  fieldset { border: 1px solid var(--line); background: transparent; margin: 0 0 10px; padding: 8px 10px 10px; }
+  legend { font-size: 11.5px; padding: 0 4px; background: var(--face); color: var(--text); font-weight: 700; }
+  label { display: inline-flex; gap: 5px; align-items: center; margin: 3px 12px 3px 0; }
+  input[type=text], input[type=number], input[type=password], textarea, select { background: var(--window); color: var(--text); border: 1px solid var(--line); padding: 2px 4px; font: inherit; }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--title); }
+  input[type=number] { width: 84px; }
+  textarea { width: 100%; min-height: 72px; }
+  .btn { background: var(--face); border: 1px solid var(--line); color: var(--text); padding: 2px 10px; min-height: 22px; cursor: pointer; font: inherit; }
+  .btn:hover { background: var(--face-hi); }
+  .btn:active { background: var(--face-lo); }
+  .btn:focus-visible { outline: 1px dotted var(--text); outline-offset: -3px; }
+  .btn.danger { color: var(--bad); }
+  .btn.primary { background: var(--title); border-color: var(--title); color: var(--title-fg); }
+  .btn.primary:hover { background: #0000a0; }
+  .btn:disabled { color: var(--faint); cursor: default; background: var(--face); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; background: var(--window); }
+  th, td { text-align: left; border: 1px solid var(--line); padding: 3px 6px; vertical-align: top; }
+  th { background: var(--face); font-weight: 700; }
+  tr:hover > td { background: #e8e8f8; }
+  .muted { color: var(--muted); font-size: 11.5px; }
+  .ico-mdl { font-family: "Segoe MDL2 Assets"; font-style: normal; }
   .ok { color: var(--ok); } .bad { color: var(--bad); }
-  code { background: #232323; padding: 1px 5px; border-radius: 6px; }
-  pre { font-family: ui-monospace, Consolas, monospace; }
+  code { background: var(--code); padding: 0 3px; font-family: var(--mono); font-size: 11.5px; }
+  pre { font-family: var(--mono); }
 
-  /* ---- 助手页（会话） ---- */
-  .agent-page { max-width: none; width: 100%; margin: 0; display: none; flex-direction: column; height: calc(100vh - 51px); }
+  /* ---- 助手页（经典会话窗口：白底工作区 + 反色高亮） ---- */
+  .agent-page { max-width: none; width: 100%; margin: 0; display: none; flex-direction: column; height: calc(100vh - var(--topbar-h)); }
   .agent-page.active { display: flex; }
-  .agent-top { display: flex; align-items: center; gap: 8px; padding: 9px 18px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .agent-top { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   .agent-top .spacer { flex: 1; }
-  .agent-title { font-size: 13.5px; color: var(--text); max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .chat-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
-  .chat { flex: 1; overflow-y: auto; padding: 20px 14px 10px; display: flex; flex-direction: column; gap: 12px; }
+  .agent-title { font-size: 12px; font-weight: 700; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-wrap { position: relative; flex: 1; min-height: 0; display: flex; padding: 6px 8px 0; }
+  .chat { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; background: var(--window); border: 1px solid var(--line); }
   .chat > * { width: 100%; max-width: var(--col); margin-left: auto; margin-right: auto; }
-  .msg { display: flex; animation: nta-fade .18s ease-out; }
-  .msg.user { justify-content: flex-end; }
-  .msg.user .bubble { background: var(--bubble); border-radius: var(--radius-xl) var(--radius-xl) 8px var(--radius-xl); padding: 9px 15px; max-width: 78%; word-break: break-word; }
-  .msg.assistant { flex-direction: column; gap: 6px; }
+  .msg { display: flex; gap: 6px; }
+  .msg.user { justify-content: flex-end; align-items: flex-start; }
+  .msg.user .bubble { background: #e8e8f8; border: 1px solid var(--line); padding: 4px 8px; max-width: 78%; word-break: break-word; }
+  .msg.assistant { flex-direction: column; gap: 4px; }
   .msg.assistant .content { word-break: break-word; }
-  .msg.system { color: var(--muted); font-size: 12.5px; white-space: pre-wrap; }
-  .edit-box { display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: 100%; }
-  .edit-box textarea { min-height: 56px; }
-  .edit-bar { display: flex; gap: 6px; justify-content: flex-end; }
-  .sess-op { font-size: 11.5px; padding: 2px 7px; }
-  .msg-meta { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--faint); min-height: 16px; }
-  .msg-actions { display: flex; gap: 2px; opacity: 0; transition: opacity .15s; }
+  .msg.system { color: var(--muted); font-size: 11.5px; white-space: pre-wrap; }
+  .edit-box { display: flex; flex-direction: column; gap: 4px; width: 100%; max-width: 100%; }
+  .edit-box textarea { min-height: 52px; }
+  .edit-bar { display: flex; gap: 4px; justify-content: flex-end; }
+  .sess-op { font-size: 11px; padding: 1px 6px; background: var(--face); }
+  .msg-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); min-height: 15px; }
+  .msg-actions { display: flex; gap: 2px; opacity: 0; }
   .msg:hover .msg-actions, .msg.assistant:last-child .msg-actions { opacity: 1; }
-  .icon-btn { all: unset; cursor: pointer; padding: 2px 7px; border-radius: 8px; font-size: 11.5px; color: var(--faint); }
-  .icon-btn:hover { background: #262626; color: var(--text); }
-  .cursor { display: inline-block; width: 2px; height: 15px; margin-left: 3px; vertical-align: text-bottom; background: #9a9a9a; animation: nta-pulse 1.1s ease-in-out infinite; }
-  @keyframes nta-pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
-  @keyframes nta-fade { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+  .icon-btn { all: unset; cursor: pointer; padding: 0 5px; font-size: 11px; color: var(--muted); border: 1px solid transparent; }
+  .icon-btn:hover { color: var(--text); border-color: var(--line); background: var(--face); }
+  .cursor { display: inline-block; width: 6px; height: 13px; margin-left: 2px; vertical-align: text-bottom; background: var(--text); animation: nta-blink 1s steps(1, end) infinite; }
+  @keyframes nta-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
 
   /* 消息内 markdown（.md 容器） */
   .md > :first-child { margin-top: 0; }
   .md > :last-child { margin-bottom: 0; }
-  .md p { margin: 0 0 8px; }
-  .md h1, .md h2, .md h3, .md h4 { margin: 12px 0 6px; font-weight: 600; line-height: 1.35; }
-  .md h1 { font-size: 19px; } .md h2 { font-size: 17px; } .md h3 { font-size: 15.5px; } .md h4 { font-size: 15px; }
-  .md ul, .md ol { margin: 6px 0; padding-left: 22px; }
-  .md li { margin: 2px 0; }
-  .md blockquote { margin: 8px 0; padding: 2px 0 2px 12px; border-left: 2px solid var(--border2); color: var(--muted); }
-  .md hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
-  .md table { width: 100%; border-collapse: collapse; font-size: 13.5px; margin: 8px 0; }
-  .md th, .md td { border: 1px solid var(--border); padding: 5px 9px; text-align: left; }
-  .md th { background: #1c1c1c; color: var(--muted); font-weight: 500; }
-  .md code { background: #2a2a2a; padding: 1px 5px; border-radius: 6px; font-size: .88em; font-family: ui-monospace, Consolas, monospace; }
-  .code-block { border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; margin: 8px 0; background: #131313; }
-  .code-head { display: flex; align-items: center; gap: 8px; padding: 5px 10px; font-size: 11.5px; color: var(--faint); border-bottom: 1px solid var(--border); }
+  .md p { margin: 0 0 6px; }
+  .md h1, .md h2, .md h3, .md h4 { margin: 10px 0 4px; font-weight: 700; line-height: 1.35; }
+  .md h1 { font-size: 16px; } .md h2 { font-size: 14.5px; } .md h3 { font-size: 13.5px; } .md h4 { font-size: 12.5px; }
+  .md ul, .md ol { margin: 4px 0; padding-left: 20px; }
+  .md li { margin: 1px 0; }
+  .md blockquote { margin: 6px 0; padding: 2px 0 2px 8px; border-left: 3px solid var(--face); color: var(--muted); }
+  .md hr { border: 0; border-top: 1px solid var(--line); margin: 8px 0; }
+  .md table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 6px 0; }
+  .md th, .md td { border: 1px solid var(--line); padding: 2px 6px; text-align: left; }
+  .md th { background: var(--face); font-weight: 700; }
+  .md code { background: var(--code); padding: 0 3px; font-size: 11.5px; font-family: var(--mono); }
+  .code-block { border: 1px solid var(--line); margin: 6px 0; background: var(--window); }
+  .code-head { display: flex; align-items: center; gap: 6px; padding: 2px 6px; font-size: 11px; background: var(--face); border-bottom: 1px solid var(--line); }
   .code-head .cp { margin-left: auto; }
-  .code-body { margin: 0; padding: 10px 12px; overflow: auto; font-size: 12.8px; line-height: 1.55; font-family: ui-monospace, Consolas, monospace; white-space: pre; }
+  .code-body { margin: 0; padding: 6px 8px; overflow: auto; font-size: 11.5px; line-height: 1.45; font-family: var(--mono); white-space: pre; }
 
   /* 工具调用卡（.tool 为 e2e 契约） */
-  .tool { border: 1px solid var(--border); border-radius: var(--radius-lg); background: #1a1a1a; overflow: hidden; }
+  .tool { border: 1px solid var(--line); background: var(--window); overflow: hidden; }
   .tool + .tool { margin-top: 3px; }
-  .tool summary { cursor: pointer; padding: 7px 12px; font-size: 12.5px; color: var(--muted); list-style: none; display: flex; align-items: center; gap: 8px; }
+  .tool summary { cursor: pointer; padding: 2px 6px; font-size: 12px; background: var(--face); list-style: none; display: flex; align-items: center; gap: 6px; }
+  .tool[open] summary { border-bottom: 1px solid var(--line); }
   .tool summary::-webkit-details-marker { display: none; }
-  .tool summary::before { content: '▸'; color: var(--faint); font-size: 10px; }
+  .tool summary::before { content: '▸'; font-size: 10px; }
   .tool[open] summary::before { content: '▾'; }
-  .tool .t-name { color: var(--text); }
-  .tool .st { font-size: 11px; } .tool .st.ok { color: var(--ok); } .tool .st.bad { color: var(--warn); } .tool .st.run { color: var(--faint); }
-  .tool .tool-body { margin: 0; padding: 0 12px 10px; font-size: 12.3px; color: var(--muted); }
-  .tool .tool-sec { margin-top: 6px; }
-  .tool .tool-sec > b { color: var(--faint); font-weight: 500; font-size: 11px; letter-spacing: .4px; }
-  .tool .tool-pre { margin: 4px 0 0; padding: 8px 10px; background: #131313; border: 1px solid var(--border); border-radius: 10px; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  .tool .t-name { font-weight: 700; }
+  .tool .st { font-size: 11px; color: var(--muted); }
+  .tool .st.ok { color: var(--ok); } .tool .st.bad { color: var(--bad); } .tool .st.run { color: var(--warn); }
+  .tool .tool-body { margin: 0; padding: 6px 8px; font-size: 11.5px; }
+  .tool .tool-sec { margin-top: 4px; }
+  .tool .tool-sec > b { font-size: 11px; color: var(--muted); font-weight: 700; }
+  .tool .tool-pre { margin: 3px 0 0; padding: 5px 6px; background: var(--window); border: 1px solid var(--line); max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 11.5px; }
   .tool .tool-sec .cp { float: right; }
 
-  /* 审批 / 追问 */
-  .decision { border: 1px solid #4a4126; border-radius: var(--radius-lg); background: #1c1913; padding: 12px 14px; margin: 8px 0; max-width: var(--col); margin-left: auto; margin-right: auto; }
-  .decision .d-title { font-weight: 600; margin-bottom: 4px; font-size: 14px; }
-  .decision .d-sub { color: var(--faint); font-size: 12px; margin-bottom: 6px; }
-  .decision pre { max-height: 220px; overflow: auto; background: #131313; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; font-size: 12px; white-space: pre-wrap; word-break: break-word; color: var(--muted); margin: 6px 0; }
-  .decision .d-row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
+  /* 审批 / 追问（经典提示条配色） */
+  .decision { border: 1px solid var(--line); background: var(--info); padding: 6px 8px; margin: 6px auto; max-width: var(--col); }
+  .decision .d-title { font-weight: 700; margin-bottom: 2px; font-size: 12.5px; }
+  .decision .d-sub { color: var(--muted); font-size: 11.5px; margin-bottom: 4px; }
+  .decision pre { max-height: 220px; overflow: auto; background: var(--window); border: 1px solid var(--line); padding: 5px 6px; font-size: 11.5px; white-space: pre-wrap; word-break: break-word; margin: 4px 0; }
+  .decision .d-row { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; align-items: center; }
   .decision input[type=text] { flex: 1; min-width: 160px; }
-  .decision .raw { border: 1px solid var(--border); border-radius: 12px; background: #131313; padding: 6px 10px; margin-top: 6px; }
-  .decision .raw summary { cursor: pointer; color: var(--faint); font-size: 11.5px; }
-  .decision .raw pre { margin: 6px 0 0; max-height: 200px; }
-  .doing { min-height: 16px; font-size: 12px; color: var(--warn); padding: 0 16px; max-width: var(--col); margin: 0 auto; width: 100%; }
+  .decision .raw { border: 1px solid var(--line); background: var(--window); padding: 4px 6px; margin-top: 4px; }
+  .decision .raw summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+  .decision .raw pre { margin: 4px 0 0; max-height: 200px; }
+  .doing { min-height: 15px; font-size: 11.5px; color: var(--warn); padding: 2px 10px; max-width: var(--col); margin: 0 auto; width: 100%; }
 
-  /* 输入区 */
-  .composer-wrap { position: relative; border-top: 1px solid var(--border); padding: 10px 14px 14px; }
-  .composer { max-width: var(--col); margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; background: #1c1c1c; border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 8px 8px 8px 14px; }
-  .composer:focus-within { border-color: #4a4a4a; box-shadow: 0 0 0 2px rgba(59,130,246,.2); }
-  .composer textarea { flex: 1; resize: none; border: 0; background: transparent; padding: 6px 0; min-height: 26px; max-height: 200px; overflow-y: auto; }
-  .composer textarea:focus { box-shadow: none; }
-  .composer .send { all: unset; cursor: pointer; flex: 0 0 auto; width: 34px; height: 34px; border-radius: 999px; background: #fff; color: #111; display: flex; align-items: center; justify-content: center; font-size: 15px; }
-  .composer .send:hover { background: #e2e2e2; }
-  .composer .send:disabled { background: #2f2f2f; color: #777; cursor: default; }
-  .scroll-bottom { position: absolute; left: 50%; transform: translateX(-50%); bottom: 10px; cursor: pointer; border: 1px solid var(--border2); background: rgba(32,32,32,.94); color: var(--text); border-radius: 999px; padding: 5px 12px; font-size: 12px; z-index: 6; }
-  .scroll-bottom:hover { background: #2e2e2e; }
+  /* 输入区（白底字段 + 灰色发送键） */
+  .composer-wrap { position: relative; border-top: 1px solid var(--line); padding: 6px 8px 8px; }
+  .composer { max-width: var(--col); margin: 0 auto; display: flex; gap: 6px; align-items: flex-end; background: var(--window); border: 1px solid var(--line); padding: 3px 3px 3px 6px; }
+  .composer:focus-within { border-color: var(--title); }
+  .composer textarea { flex: 1; resize: none; border: 0; background: transparent; padding: 3px 0; min-height: 24px; max-height: 200px; overflow-y: auto; }
+  .composer textarea:focus { border-color: transparent; }
+  .composer .send { all: unset; cursor: pointer; flex: 0 0 auto; width: 26px; height: 24px; background: var(--face); border: 1px solid var(--line); color: var(--text); display: flex; align-items: center; justify-content: center; font-size: 12px; font-family: "Segoe MDL2 Assets"; }
+  .composer .send:hover { background: var(--face-hi); }
+  .composer .send:disabled { color: var(--faint); cursor: default; background: var(--face); }
+  .scroll-bottom { position: absolute; left: 50%; transform: translateX(-50%); bottom: 8px; cursor: pointer; border: 1px solid var(--line); background: var(--face); color: var(--text); padding: 2px 10px; font: inherit; z-index: 6; }
+  .scroll-bottom:hover { background: var(--face-hi); }
 
   /* 空态 */
-  .empty-hero { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; margin-top: 7vh; animation: nta-fade .25s ease-out; }
-  .empty-hero .eh-logo { width: 46px; height: 46px; border-radius: 15px; background: linear-gradient(135deg, var(--accent), #8b5cf6); display: flex; align-items: center; justify-content: center; font-size: 20px; color: #fff; }
-  .empty-hero h2 { margin: 0; font-size: 21px; font-weight: 600; }
-  .empty-hero p { margin: 0; color: var(--muted); font-size: 13px; }
-  .suggest { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; max-width: 620px; margin-top: 6px; }
-  .sug { cursor: pointer; border: 1px solid var(--border); background: #1a1a1a; color: var(--muted); border-radius: 999px; padding: 6px 12px; font-size: 12.5px; }
-  .sug:hover { color: var(--text); border-color: var(--border2); background: #222; }
+  .empty-hero { display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; margin-top: 6vh; }
+  .empty-hero .eh-logo { width: 32px; height: 32px; background: var(--face); border: 1px solid var(--line); display: flex; align-items: center; justify-content: center; font-size: 16px; font-family: "Segoe MDL2 Assets"; }
+  .empty-hero h2 { margin: 0; font-size: 15px; font-weight: 700; }
+  .empty-hero p { margin: 0; color: var(--muted); font-size: 12px; }
+  .suggest { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; max-width: 620px; margin-top: 4px; }
+  .sug { cursor: pointer; border: 1px solid var(--line); background: var(--face); color: var(--text); padding: 2px 8px; font: inherit; font-size: 11.5px; }
+  .sug:hover { background: var(--title); color: var(--title-fg); }
 
   /* @技能 / /命令 候选（.mi/.sel 为 e2e 契约） */
-  .mention { position: absolute; bottom: 100%; left: 14px; right: 14px; max-width: var(--col); margin: 0 auto 6px; max-height: 240px; overflow: auto; background: #202020; border: 1px solid var(--border2); border-radius: var(--radius); box-shadow: 0 10px 30px rgba(0,0,0,.45); z-index: 7; }
-  .mention .mi { padding: 7px 12px; font-size: 12.5px; cursor: pointer; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .mention .mi.sel, .mention .mi:hover { background: #2f2f2f; color: var(--text); }
-  .syseditor { border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); padding: 10px 12px; margin: 8px 14px 0; max-width: var(--col); margin-left: auto; margin-right: auto; }
-  .syseditor textarea { min-height: 70px; }
-  #toast { position: fixed; right: 16px; bottom: 16px; background: #262626; border: 1px solid var(--border2); color: var(--text); padding: 8px 14px; border-radius: 12px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 60vw; z-index: 9; font-size: 13px; }
+  .mention { position: absolute; bottom: 100%; left: 8px; right: 8px; max-width: var(--col); margin: 0 auto 4px; max-height: 240px; overflow: auto; background: var(--window); border: 1px solid var(--line); z-index: 7; }
+  .mention .mi { padding: 3px 6px; font-size: 12px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mention .mi.sel, .mention .mi:hover { background: var(--title); color: var(--title-fg); }
+  .syseditor { border: 1px solid var(--line); background: var(--face); padding: 6px 8px; margin: 6px auto 0; max-width: var(--col); }
+  .syseditor textarea { min-height: 60px; }
+  #toast { position: fixed; right: 12px; bottom: 12px; background: var(--info); border: 1px solid var(--text); color: var(--text); padding: 4px 10px; opacity: 0; transition: opacity .15s; pointer-events: none; max-width: 60vw; z-index: 9; font-size: 12px; }
   #toast.show { opacity: 1; }
+  #toast.bad { color: var(--bad); font-weight: 700; }
 
   /* ---- 窄窗口自适应（半屏/小窗；超窄时侧栏只留图标） ---- */
   @media (max-width: 900px) {
-    .side { width: 200px; min-width: 200px; }
-    .side nav button { font-size: 13px; padding: 6px 9px; }
-    .content { padding: 14px 14px 40px; }
+    .side { width: 190px; min-width: 190px; }
+    .content { padding: 8px 8px 30px; }
   }
   @media (max-width: 700px) {
-    .side { width: 62px; min-width: 62px; }
-    .brand { font-size: 0; justify-content: center; padding: 12px 6px; }
-    .brand .logo { font-size: 14px; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    .side { width: 54px; min-width: 54px; }
+    .brand { justify-content: center; font-size: 0; }
+    .brand .logo { font-size: 12px; }
     .side > div[style] { display: none; }
-    .side nav button { font-size: 0; gap: 0; justify-content: center; padding: 9px 0; }
-    .side nav button .ico { font-size: 16px; width: auto; }
+    .side nav button { justify-content: center; padding: 6px 0; font-size: 0; }
+    .side nav button .ico { font-size: 14px; width: auto; }
     .side .divider, .side-title, #side-sessions, .side-foot { display: none; }
-    .agent-page { height: calc(100vh - 47px); }
-    .agent-top { padding: 8px 10px; }
+    .agent-top { padding: 4px 6px; }
     .agent-title { max-width: 100%; }
-    .chat { padding: 14px 10px 8px; }
-    .composer-wrap { padding: 8px 10px 10px; }
-    .mention { left: 10px; right: 10px; }
-    .syseditor { margin-left: 10px; margin-right: 10px; }
+    .chat-wrap { padding: 4px 6px 0; }
+    .chat { padding: 6px; }
+    .composer-wrap { padding: 4px 6px 6px; }
+    .mention { left: 6px; right: 6px; }
+    .syseditor { margin-left: 6px; margin-right: 6px; }
   }
 </style>
 </head>
 <body>
 <div class="app">
   <aside class="side">
-    <div class="brand"><span class="logo">◆</span> NTR Daemon</div>
-    <div style="padding:0 12px 6px">
+    <div class="brand"><span class="logo">N</span> NTR Daemon</div>
+    <div style="padding:4px 6px 2px">
       <select id="project-select" style="width:100%" title="当前项目：任务/规则/助手/状态默认作用于它；通用 = 全局视角"></select>
     </div>
     <nav id="side-nav">
-      <button data-tab="agent" class="active"><span class="ico">💬</span>助手</button>
-      <button data-tab="jobs"><span class="ico">🚚</span>任务</button>
-      <button data-tab="settings"><span class="ico">⚙️</span>设置</button>
-      <button data-tab="rules"><span class="ico">📏</span>规则</button>
-      <button data-tab="prompts"><span class="ico">📝</span>提示词</button>
-      <button data-tab="books"><span class="ico">📚</span>项目</button>
-      <button data-tab="status"><span class="ico">📊</span>状态</button>
+      <button data-tab="agent" data-title="助手" class="active"><span class="ico" data-icon="0xE8BD"></span>助手</button>
+      <button data-tab="jobs" data-title="任务"><span class="ico" data-icon="0xE823"></span>任务</button>
+      <button data-tab="settings" data-title="设置"><span class="ico" data-icon="0xE713"></span>设置</button>
+      <button data-tab="rules" data-title="规则"><span class="ico" data-icon="0xE71C"></span>规则</button>
+      <button data-tab="prompts" data-title="提示词"><span class="ico" data-icon="0xE8A5"></span>提示词</button>
+      <button data-tab="books" data-title="项目"><span class="ico" data-icon="0xE8F1"></span>项目</button>
+      <button data-tab="status" data-title="状态"><span class="ico" data-icon="0xE9D9"></span>状态</button>
     </nav>
     <div class="divider"></div>
     <div class="side-title">项目 / 会话</div>
@@ -372,7 +389,7 @@ export const UI_HTML = `<!doctype html>
       <div id="agent-mention" class="mention" style="display: none"></div>
       <div class="composer">
         <textarea id="agent-input" rows="1" placeholder="给助手发消息（Enter 发送，Shift+Enter 换行）"></textarea>
-        <button class="send" id="agent-send" title="发送（Enter）">↑</button>
+        <button class="send" id="agent-send" data-icon="0xE724" title="发送（Enter）"></button>
       </div>
     </div>
     <div id="agent-syseditor" class="syseditor" style="display: none">
@@ -528,9 +545,22 @@ const post = (path, body) => api(path, { method: 'POST', headers: { 'Content-Typ
 const toast = (msg, bad) => {
   const el = $('toast');
   el.textContent = msg;
-  el.style.background = bad ? '#6e2727' : '#3f6ad8';
+  el.classList.toggle('bad', !!bad);   // 提示条样式走 CSS（经典 InfoWindow 配色）
   el.classList.add('show');
   setTimeout(() => el.classList.remove('show'), 2200);
+};
+// Segoe MDL2 Assets 字形：一律用 String.fromCodePoint 生成，避免在模板字面量里写反斜杠转义
+const mdlCp = (code) => String.fromCodePoint(typeof code === 'string' && code.indexOf('0x') === 0 ? parseInt(code, 16) : code);
+const mdlIcon = (code, cls) => {
+  const span = document.createElement('span');
+  span.className = 'ico-mdl' + (cls ? ' ' + cls : '');
+  span.textContent = mdlCp(code);
+  return span;
+};
+const paintIcons = (root) => {
+  (root || document).querySelectorAll('[data-icon]').forEach((el) => {
+    if (!el.textContent) el.textContent = mdlCp(el.dataset.icon);
+  });
 };
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -567,7 +597,7 @@ async function refresh() {
     STATE.queue = q;
     renderProjectSelect();
     const hdrParts = [];
-    if (PROJECT) hdrParts.push('📚 ' + String(((STATE.books || []).find((b) => b.key === PROJECT) || {}).title || PROJECT).slice(0, 18));
+    if (PROJECT) hdrParts.push('项目 ' + String(((STATE.books || []).find((b) => b.key === PROJECT) || {}).title || PROJECT).slice(0, 18));
     hdrParts.push('队列 ' + q.filter((x) => x.state === 'running' || x.state === 'queued').length);
     hdrParts.push('在途 ' + ((status.llm && status.llm.inFlightNow) || 0) + '/' + ((status.llm && status.llm.maxInFlight) || '?'));
     hdrParts.push('workers ' + ((status.llm && status.llm.workers) || 0));
@@ -593,19 +623,37 @@ function renderJobs(status) {
 }
 function renderStatus(status) {
   const m = (status.metrics || []).slice(-3).map((x) => 'rss ' + x.rss.toFixed(1) + 'MB').join(' / ');
+  const kv = (label, value) => '<tr><th style="width:180px">' + esc(label) + '</th><td>' + esc(value) + '</td></tr>';
+  const pool = (name, s) => {
+    if (!s) return kv(name, '未装配');
+    const cooling = Object.values(s.byWorker || {}).filter((w) => (w.coolingMs || 0) > 0).length;
+    return kv(name, '并发上限 ' + (s.maxInFlight == null ? '?' : s.maxInFlight) + ' · 在途 ' + (s.inFlightNow || 0) +
+      ' · workers ' + (s.workers || 0) + ' · 请求 ' + (s.requests || 0) + ' · 冷却 ' + cooling +
+      ' · 传输重试 ' + (s.transportRetries || 0) +
+      (s.maxObservedInFlight ? ' · 峰值 ' + s.maxObservedInFlight : '') +
+      (s.lastError ? ' · 最近错误 ' + String(s.lastError).slice(0, 40) : ''));
+  };
   let pj = '';
   if (PROJECT) {
     const b = (STATE.books || []).find((x) => x.key === PROJECT) || {};
     const runs = (STATE.runs || []).filter((r) => r.bookKey === PROJECT).slice(0, 3)
       .map((r) => r.job + '/' + r.state).join('、') || '—';
-    pj = '<div>当前项目：' + esc(String(b.title || PROJECT).slice(0, 40)) + ' · 状态 ' + esc(b.state || 'idle') +
-      ' · 已译 ' + (b.progress || 0) + ' 章 · 最近 run ' + esc(runs) + '</div>';
+    pj = '<fieldset><legend>当前项目</legend><table>' +
+      kv('项目', String(b.title || PROJECT).slice(0, 40) + '（' + PROJECT + '）') +
+      kv('状态 / 已译', String(b.state || 'idle') + ' · ' + (b.progress || 0) + ' 章') +
+      kv('最近 run', runs) +
+      '</table></fieldset>';
   }
+  const u = status.usage || {};
   $('status-box').innerHTML = pj +
-    '<div>llm（翻译池）：' + esc(JSON.stringify(status.llm || {})) + '</div>' +
-    '<div>llm（助手/术语池）：' + esc(JSON.stringify(status.llmAgent || null)) + '</div>' +
-    '<div>usage：' + esc(JSON.stringify(status.usage || {})) + '</div>' +
-    '<div>metrics：' + esc(m) + '</div>';
+    '<fieldset><legend>模型池</legend><table>' +
+    pool('翻译池', status.llm) +
+    pool('助手/术语池', status.llmAgent) +
+    '</table></fieldset>' +
+    '<fieldset><legend>用量与内存</legend><table>' +
+    kv('用量', '请求 ' + (u.requests || 0) + ' · prompt ' + (u.promptTokens || 0) + ' · completion ' + (u.completionTokens || 0) + (u.rows ? ' · 轮次 ' + u.rows : '')) +
+    kv('RSS 最近采样', m || '—') +
+    '</table></fieldset>';
 }
 async function renderBooks() {
   let openByBook = {};
@@ -1135,7 +1183,7 @@ const AGENT_SUGGESTIONS = [
 ];
 function agentEmptyHero() {
   const wrap = document.createElement('div'); wrap.className = 'empty-hero';
-  const logo = document.createElement('div'); logo.className = 'eh-logo'; logo.textContent = '◆';
+  const logo = document.createElement('div'); logo.className = 'eh-logo'; logo.textContent = mdlCp('0xE8BD');
   const h = document.createElement('h2'); h.textContent = '要做什么？';
   const p = document.createElement('p'); p.textContent = '让助手查书、跑质检、整理术语表，或改规则与提示词；@技能名 可点名技能，/help 看命令。';
   const sug = document.createElement('div'); sug.className = 'suggest';
@@ -1166,7 +1214,9 @@ function agentToolCard(tc) {
   const okFlag = result ? /"ok"[\s]*:[\s]*true/.test(String(result.content || '')) : false;
   const card = document.createElement('details'); card.className = 'tool';
   const summary = document.createElement('summary');
-  const name = document.createElement('span'); name.className = 't-name'; name.textContent = '🛠 ' + tc.name;
+  const name = document.createElement('span'); name.className = 't-name';
+  name.appendChild(mdlIcon('0xE90F'));
+  name.appendChild(document.createTextNode(' ' + tc.name));
   const state = document.createElement('span'); state.className = 'st ' + (result ? (okFlag ? 'ok' : 'bad') : 'run');
   state.textContent = result ? (okFlag ? '● 完成' : '● 有异常') : '● 执行中';
   summary.appendChild(name); summary.appendChild(state);
@@ -1713,6 +1763,7 @@ $('agent-log').addEventListener('scroll', function () {
 });
 $('agent-bottom').addEventListener('click', agentScrollBottom);
 agentGrowInput();
+paintIcons();
 refresh(); loadSettings(); loadRules(); loadPrompts(); agentInit();
 </script>
 </body>
