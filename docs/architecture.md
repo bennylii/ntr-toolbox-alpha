@@ -104,6 +104,7 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 - **循环**：系统提示（含【当前项目】与技能目录）→ 模型 → 顺序派发工具 → `role:'tool'` 回填 → 至无工具调用或 `maxSteps`；支持中止/失败续聊/摘要压缩（`summaryUpTo` 切点）。
 - **工具分层**：只读（自动）/ 执行（队列）/ 写入（审批）。审批 = decision broker（预览即真实 diff；GUI 卡片/CLI y/N；`workspace_apply` 的批次预览与实际提交是同一份差异）。
 - **项目绑定**：会话绑书（控制台新会话挂当前项目）；每轮注入【当前项目】，工具 book 参数缺省即此书。
+- **会话操作**：重命名（写 title）、删除（连带 messages/decisions，内存事件桶 `agentEvents.forget`；跑轮次中 409）、重新生成与编辑重发——两者都按**截断点**重跑：重新生成保留该条用户消息、只删其后的助手/工具消息并以原文续跑（`runTurn({appendUserMessage:false})`），编辑重发删 `seq ≥ 目标` 后用新文本走正常轮次；摘要若跨过截断点则整段清掉（`resetSummaryIfBeyond`，摘要由模型生成无法重算）；`agent_decisions` 与消息无关联字段，不按消息清理。截断会让 seq 复用 → 控制台在这两类操作后整表重建消息节点。
 - **技能**：`skills/` SKILL.md 包（含隐藏前置 writing-guide / agent-charter），`read_skill` + `@点名`。
 - **工作区（CodeAct，LG 同款）**：`workspace_run {script}` 在 `--permission` 沙箱子进程执行模型脚本（fs 限工作区、禁子进程/worker，网络开放；120s 超时）；`ws` API = `contract`（数据集/变更契约）+ `doing`（进度）+ `read`（站点章节按需拉取）。数据集/变更清单是 JSONL 文件（`changes/**`），`workspace_apply {}` 解析→fp 漂移检测→审批→逐 op 提交→回执 `{status, applied, rejected, destroyed}`。变更域 v1 = rules / glossary / prompts；章节译文不走工作区。（规格 `docs/cleanroom/spec-12`）
 
@@ -112,9 +113,13 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 - **术语表**：`glossary-io` 双向 JSON（导入含引擎审计与 regex→规则分流）。
 - **译文**：`export-src`（GUI 同款）导出「一行一段」纯文本 + 对齐清单（每章 `start/count/jpSha1`）→ LinguaGacha 翻译（txt 天然保行号）→ `import-lg`/GUI「导入 LG 译文」按清单切片回章，**三层校验**（总行数 / 每章行数+空行模式 / 源 sha1）后按 §4.1-3 契约提交；GUI 里以 `lg-import` 队列任务跑，进度经队列 progress 通道实时回显。（规格 `docs/cleanroom/spec-13`）
 
-### 4.9 控制台（`/ui`，OpenWebUI 风格）
+### 4.9 控制台（`/ui`，Windows 经典灰 + 扁平直角）
 
-「项目」为一级容器：侧栏「当前项目」切换器全站跟随（通用 = 全局视角）；项目页卡片（进度/最近 run/队列/提案 + 导出/导入 LG 按钮）；任务/规则/提示词/助手/状态默认作用于当前项目；规则页另含「内置保护预设」选择器。提示词与技能是**全局资源**（LG 式）。设置页八个区块（连接 / 双模型池×2 / 调度×2 / 助手参数 / 站点与凭据 / 网络代理）。会话界面是纯前端渲染：单文件内嵌 CSS/JS + 模块作用域的极简 markdown 渲染器（`renderMarkdown` 经 `${MD_SOURCE}` toString 内联进页面——既避开模板字面量的转义陷阱，又能在 Node 侧单测），消息按 `seq` 增量 diff 更新（保住滚动位置与 `<details>` 展开态）；**没有逐字流式**（助手文本整段到达，只以 2px 光标 + 步数指示表意）；观感参数（纯灰梯度/24px 圆角/58rem 列宽）参照 OpenWebUI 自行实现，未复制其代码（其许可含品牌条款）。
+「项目」为一级容器：侧栏「当前项目」切换器全站跟随（通用 = 全局视角）；项目页卡片（进度/最近 run/队列/提案 + 导出/导入 LG 按钮）；任务/规则/提示词/助手/状态默认作用于当前项目；规则页另含「内置保护预设」选择器。提示词与技能是**全局资源**（LG 式）。设置页八个区块（连接 / 双模型池×2 / 调度×2 / 助手参数 / 站点与凭据 / 网络代理）。
+
+外观：`#c0c0c0` 面板面 + 白底工作区 + 1px `#808080` 描边 + **零圆角** + 藏青标题栏与反色高亮（导航/列表/表格行）+ 经典分组框与提示条配色（`#ffffe1`）+ 16px 方块滚动条；图标用系统自带 **Segoe MDL2 Assets** 单色字形（JS `String.fromCodePoint(0xE8BD)` 生成，不写 `\u`/CSS `content` 转义）。经典体系只有浅色，**无深色主题**。
+
+会话界面是纯前端渲染：单文件内嵌 CSS/JS + 模块作用域的极简 markdown 渲染器（`renderMarkdown` 经 `${MD_SOURCE}` toString 内联进页面——既避开模板字面量的转义陷阱，又能在 Node 侧单测），消息按 `seq` 增量 diff 更新（保住滚动位置与 `<details>` 展开态）；**没有逐字流式**（助手文本整段到达，只以闪烁光标 + 步数指示表意）；消息悬停提供 复制/编辑（内联重发）/重新生成，顶栏与侧栏提供 会话重命名/删除（见 §4.7 会话操作语义）。
 
 ### 4.10 连接与凭据
 
@@ -136,7 +141,9 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 | `POST /run` | 派发 `translate / glossary / check / lg-import`（单队列，lg-import 校验路径白名单） |
 | `POST /settings` | llm / agent（含 workers、llm 子对象）/ origin / serve（port、origins）/ textPreserve.preset / proxy（enabled、url、noProxy） |
 | `POST /proxy/test` | 出网代理探测：同一目标「直连 / 代理」各一次，返回状态与耗时（判断是否被墙） |
-| `POST /books` `/rules` `/prompts` `/snapshots/restore` `/proposals/close|apply` `/lg/export|upload|verify` `/agent/*` | 各域写操作 |
+| `POST /books` `/rules` `/prompts` `/snapshots/restore` `/proposals/close|apply` `/lg/export|upload|verify` | 各域写操作 |
+| `POST /agent/session/rename` `/agent/session/delete` | 会话重命名 / 删除（删除连带消息与决定；跑轮次中 409） |
+| `POST /agent/message/regenerate` `/agent/message/edit` | 重新生成该轮回答 / 编辑用户消息后重发（均按截断点重跑，见 §4.7） |
 
 写请求的 Origin 必须在白名单内；`/lg/verify` 与 `lg-import` 的文件路径必须在 `exports/` 或 `uploads/` 下（防任意文件读）。
 
@@ -165,8 +172,8 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 | 油猴页面流 | `tools/.e2e-*.js`（inject）+ `tools/.run-suite.mjs` | mock 8788/8790 + CDP 车道 |
 | daemon 纯函数 | quality / translate / processors / prompt / glossary-io / lg-align / agent / agent-skills `-test.mjs` | 无 |
 | daemon 代理 | `daemon/proxy-test.mjs`（本地回环测试代理 + 自签证书 fixture） | 无 |
-| daemon 冒烟 | `daemon/daemon-test.mjs`（102 例：管线/调度/质检/Agent/工作区/LG 导入/连接/托盘端口） | mock 8790 |
-| 浏览器 e2e | `.e2e-agent-ui.js`（助手页）、`.e2e-lg-gui.js`（导入 GUI）、`.e2e-daemon-sync.js`（连接/自动同步） | mock 8790 + stub 7343 + CDP 车道 |
+| daemon 冒烟 | `daemon/daemon-test.mjs`（122 例：管线/调度/质检/Agent/会话操作/工作区/LG 导入/连接/托盘端口） | mock 8790 |
+| 浏览器 e2e | `.e2e-agent-ui.js`（助手页）、`.e2e-agent-session-ops.js`（会话操作）、`.e2e-lg-gui.js`（导入 GUI）、`.e2e-daemon-sync.js`（连接/自动同步） | mock 8790 + stub 7343 + CDP 车道 |
 | 真机 | TM 重装（sha256 整文件比对）→ 实站全流程 | 测试 profile + LNA 旗标 |
 
 ## 8. 版本与发布

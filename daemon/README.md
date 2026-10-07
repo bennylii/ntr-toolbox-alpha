@@ -47,6 +47,8 @@ node daemon/index.mjs forget    <bookKey>
 
 `node daemon/index.mjs serve` 后打开 <http://127.0.0.1:7331/ui>。组织方式（LG 式）：
 
+- 外观：**Windows 经典灰 + 扁平直角**（`#c0c0c0` 面 / 白底工作区 / 1px 描边 / 零圆角 / 藏青标题栏与反色高亮 / 经典分组框与提示条配色），图标用系统自带的 Segoe MDL2 Assets 单色字形；经典体系只有浅色，**没有深色主题**；字体 Tahoma + Microsoft YaHei UI。
+
 - **项目 = 登记的书**，是一级容器：任务派发、规则覆盖、助手会话都挂在项目下；
 - 侧栏顶部「**当前项目**」切换器全站跟随（`通用` = 全局视角），选择持久化；顶栏显示当前项目；
 - **项目**页：项目卡片（标题 / 来源 / 状态 / 已译章数 / 最近 run / 队列 / open 提案），操作 = 设为当前 / 派发任务 / **导出 LG 源文** / **导入 LG 译文** / 忘记；点卡片展开详情（进度明细、规则覆盖数、绑定会话可跳助手页）；URL 登记新项目也在此页；
@@ -55,7 +57,8 @@ node daemon/index.mjs forget    <bookKey>
 - **任务**：派发 `translate / glossary / check`（档位、限章数、提案开关），书下拉默认当前项目；
 - **规则**：pre/post 替换、保留段——列表 = 全局 + 当前项目条目（标注来源）；新增默认作用当前项目，「作用域」可切全局；
 - **提示词**：**全局模板**（所有项目共用，LG 式）四槽编辑；按书覆盖仅 API/CLI 保留（高级用法，UI 不暴露）；
-- **助手**：新会话自动挂当前项目；侧栏会话按项目分组（「通用」组收无书会话）；绑书会话的系统提示注入【当前项目】，工具的 book 参数缺省即此书；对话区为 OpenWebUI 观感——markdown 渲染（代码块带语言标签与复制按钮）、每条消息的时间/token、工具调用折叠卡（状态点 + 参数/结果分区）、审批面板结构化预览、生成中光标与步数、智能跟随滚动 +「回到底部」、空态建议提示；窄窗口下侧栏自动收成图标条；
+- **助手**：新会话自动挂当前项目；侧栏会话按项目分组（「通用」组收无书会话）；绑书会话的系统提示注入【当前项目】，工具的 book 参数缺省即此书；对话区支持 markdown 渲染（代码块带语言标签与复制按钮）、每条消息的时间/token、工具调用折叠卡（状态点 + 参数/结果分区）、审批面板结构化预览、生成中光标与步数、智能跟随滚动 +「回到底部」、空态建议提示；窄窗口下侧栏自动收成图标条；
+- **会话操作**：消息悬停可「复制」「编辑」（用户消息 → 内联编辑器「保存并重发/取消」）与「重新生成」（仅末条助手消息，丢弃该轮回答后以原文重跑，用户消息保留）；顶栏与侧栏会话行可「重命名 / 删除」（删除连带该会话的消息与审批记录；跑轮次中会被拒绝）。语义：编辑/重新生成都按截断点重跑（删除 seq ≥ 截断点的消息），若历史摘要跨过截断点则整段清掉（摘要由模型生成，无法重算）；
 - **设置**：全局设置（作用于所有项目）——八个区块：**连接**（端口 / 跨域白名单附加条目 / 上次同步来源）／**翻译模型池**（端点增删改，key 只写不回显、留空 = 按 id 保持原值）／**助手/术语模型池**（独立端点与并发限流；清空 = 跟随翻译池）／**翻译池调度与限流**／**助手池调度与限流**／**助手参数**（审批模式、maxSteps、工具结果截断、上下文预算）／**站点与凭据**（origin + token 直填）／**网络代理**（出网代理开关 / 地址 / 直连列表 / 直连-代理对比测试）。站点「Daemon 连接」推送仍会整表覆盖**翻译池**（最后写入者赢），但**不再覆盖**显式配置过的助手池；
 - **状态**：当前项目概要 + llm 双池统计（并发峰值/冷却/重试）、用量、RSS 采样；
 - **技能**：全局资源（`skills/` 目录，LG 式 SKILL.md 包），不随项目变化。
@@ -232,11 +235,12 @@ node daemon/prompt-test.mjs             # 提示词模板单测（默认逐字�
 node daemon/glossary-io-test.mjs        # LG 互通单测（解析/分流/往返；无需 mock）
 node daemon/lg-align-test.mjs           # LG 译文对齐单测（导出行映射/解析容忍/三层校验；无需 mock）
 node daemon/proxy-test.mjs              # 出网代理单测（配置/直连匹配/绝对形式+CONNECT 回环集成；无需 mock）
-node daemon/agent-test.mjs              # Agent 单测（参数解析/裁剪/会话/压缩/决策/循环；无需 mock）
+node daemon/agent-test.mjs              # Agent 单测（参数解析/裁剪/会话/压缩/决策/循环/截断重跑；无需 mock）
 node daemon/agent-skills-test.mjs       # 技能目录单测（frontmatter/发现/读取/逃逸；无需 mock）
 MOCK_ORIGIN=http://127.0.0.1:8790 node daemon/daemon-test.mjs   # 冒烟：全管线/跳过/续跑/控制面/调度器/质检/处理链/模板/互通/助手/设置页双池/LG导入
 powershell -File daemon/tray.ps1 -TestSpawn -Port 7377          # 托盘冒烟：拉起(临时db)→等就绪→杀掉；-SmokeGui N 只验 GUI 初始化
 # 助手页 e2e（浏览器车道）：mock 在 8790，daemon 在 7355（--db daemon/.tmp-agent-ui.db），见 tools/.e2e-agent-ui.js 头部跑法
+# 助手页会话操作 e2e：mock 在 8790，daemon 在 7358（--db daemon/.tmp-agent-ops.db），见 tools/.e2e-agent-session-ops.js 头部
 # LG 导入 GUI e2e：mock 在 8790，daemon 在 7356（--db daemon/.tmp-lggui.db，预置 mock-trans-lg4-* 书），见 tools/.e2e-lg-gui.js 头部
 # Daemon 连接 e2e：mock 8790 + tools/.run-daemon-stub.mjs（7343：/ping /auth /last /reset），见 tools/.e2e-daemon-sync.js 头部
 ```

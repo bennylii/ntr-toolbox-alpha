@@ -27,7 +27,7 @@ daemon/                        本地 daemon（模块地图见下）
 ```
 index.mjs                      入口/CLI（serve|translate|glossary|check|agent|export-src|import-lg|glossary-io|rules|prompt|auth|status…）
 server.mjs                     控制面 HTTP（/ui 页面 + /status /run /auth /settings /rules /prompts /lg/* /warnings /agent/* …）
-ui.mjs                         控制台页面（OpenWebUI 观感；renderMarkdown 在模块作用域、经 MD_SOURCE 内联；内嵌脚本禁反斜杠转义——见已知陷阱）
+ui.mjs                         控制台页面（Windows 经典灰 + 扁平直角；图标走 Segoe MDL2 Assets；renderMarkdown 在模块作用域、经 MD_SOURCE 内联；内嵌脚本禁反斜杠转义——见已知陷阱）
 site-client.mjs                站点 API 客户端（5 条契约；Bearer 鉴权；uploadChapter 带 sakuraVersion）
 engine.mjs                     从油猴脚本加载 GlossaryEngine（与浏览器同一份实现）
 ---- 管线 ----
@@ -136,7 +136,7 @@ CDP_PORT=9334 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8789
 - `GlossaryQueue` 状态在 IndexedDB（库名见源码），用例结束记得 `Q.stop()` + 清任务 + 移除 `#ntr-queue-overlay`。
 - 新设置行/按钮在「术语队列」右键设置面板，源码里 `queueSettings()` / `jobRuntime()` 是运行时覆盖入口（并发/RPM/逾时，0 = 跟随主设置）。
 - TM 的 `@match` 只覆盖真实站点域名，不含 127.0.0.1 —— mock 页上装好的 TM 脚本**不会**注入（属正常），mock 测试一律走 `cdp.mjs inject`。
-- **`daemon/ui.mjs` 的 UI_HTML 是模板字面量**：内嵌 JS 里写 `'\n'` 这类转义会被外层吃掉成真换行 → 整页脚本静默语法错误（页面渲染但毫无功能）；要么写 `\\n`、要么避免反斜杠。需要正则转义的代码（如 markdown 渲染器）放**模块作用域**再用 `${MD_SOURCE}`（toString）内联，别写进模板正文。daemon-test 有「/ui 内嵌脚本可解析」守卫 + `renderMarkdown` 纯函数单测，改 UI 后必须全量跑。
+- **`daemon/ui.mjs` 的 UI_HTML 是模板字面量**：内嵌 JS 里写 `'\n'` 这类转义会被外层吃掉成真换行 → 整页脚本静默语法错误（页面渲染但毫无功能）；要么写 `\\n`、要么避免反斜杠。需要正则转义的代码（如 markdown 渲染器）放**模块作用域**再用 `${MD_SOURCE}`（toString）内联，别写进模板正文。图标字形用 `String.fromCodePoint(0xE8BD)` 生成（别写 `\u` 转义或 CSS `content`）；`data-icon="0x…"` 的元素由 `paintIcons()` 在启动时填充。daemon-test 有「/ui 内嵌脚本可解析」守卫 + `renderMarkdown` 纯函数单测，改 UI 后必须全量跑。
 - mock 8788/8790 掉线时：engine-test 会**跳过**「请求层/编排」集成段（计数变少但 0 失败，别误判），daemon-test 则会卡住等 fetch——跑 daemon 系测试前先确认 mock 活着。
 - TM 安装/重装对话框落在扩展的 `ask.html`（targets[0]），按钮是 `<input value="更新/重新安装">`——按 **value** 匹配点击；同版本重装按钮文案是「重新安装」。
 

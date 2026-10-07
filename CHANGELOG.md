@@ -10,10 +10,21 @@ All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 
 - **网络代理（出网）**：控制台设置页新增「网络代理」区块（第八个）——站点 API、翻译池、助手/术语池与 Agent 工作区沙箱脚本的出网统一走本机代理（HTTP 绝对形式 + HTTPS CONNECT 隧道，支持 `user:pass@` 凭据）；**保存即生效**，无需重启（未用 Node 内置 `NODE_USE_ENV_PROXY`——它只在进程启动前解析且首值缓存）；直连列表默认 `127.0.0.1,localhost,::1`（mock/测试零影响，关闭时行为与旧版一致）；「测试」按钮做「直连 / 代理」对比探测（`POST /proxy/test`）；不支持 SOCKS5。
 
+### 控制台（会话操作）
+
+- **重新生成 / 编辑重发 / 重命名 / 删除会话**（后端 + 控制台一起）：
+  - 控制面新增四个 POST 端点：`/agent/session/rename`（空标题 400）、`/agent/session/delete`（跑轮次中 409；挂起审批先按拒绝收尾）、`/agent/message/regenerate`（保留该条用户消息，只丢其后的助手/工具消息后以原文重跑）、`/agent/message/edit`（校验 seq 与角色）。
+  - 存储层新增 `deleteAgentMessagesFrom` / `deleteAgentSession`；`agent-session` 新增 `resetSummaryIfBeyond`——摘要由模型生成不可确定性重算，`summaryUpTo` 一旦跨过截断点就整段清掉（否则摘要会引用已删消息）；`runTurn` 新增 `appendUserMessage=false`（重跑不落重复用户消息）。
+  - 控制台：消息悬停「编辑」（用户消息→内联编辑器「保存并重发/取消」）与「重新生成」（仅末条助手消息）；顶栏与侧栏会话行「重命名/删除」；截断会让 seq 复用，操作后整表重建消息节点。
+  - 测试：agent-test 23/0（+5）、daemon-test 122/0（+6）、新增浏览器车道 `.e2e-agent-session-ops.js` 16/16。
+
 ### 控制台 UI
 
-- **助手会话界面重做（OpenWebUI 观感，纯前端）**：消息区 markdown 渲染（标题/列表/引用/表格/围栏代码块 + 语言标签与复制按钮、裸 URL 自动链接、仅 http(s) 成链接）、用户消息 24px 大圆角气泡右对齐 + 助手通栏、每条消息的时间与 token、工具调用折叠卡（状态点 + 参数/结果分区 + 复制）、审批面板结构化预览（原始 payload 可折叠）、「生成中」2px 光标与步数指示、智能跟随滚动 +「回到底部」、空态问候 + 建议提示、侧栏会话相对时间与运行点、窄窗口自适应（≤700px 侧栏收成图标条）；渲染改为按 `seq` 增量 diff（不再每个事件整页重绘，保住滚动位置与展开态）。
-- 实现方式：`renderMarkdown` 等纯函数定义在 `ui.mjs` 模块作用域、经 `${MD_SOURCE}` 内联进页面（避开模板字面量转义陷阱，同时可在 Node 侧单测，daemon-test 新增 7 例）；观感参数（纯灰梯度 / 24px 圆角 / 58rem 列宽 / 2px 光标）参照 OpenWebUI 自行实现，未复制其代码（其许可含品牌条款）；**后端零改动**，既有 DOM 契约（`#agent-*`、`.tool`、`.msg.system`、`.mi/.sel`、行内 display 语义、全局函数名）全部保留。
+- **全站换肤为 Windows 经典灰 + 扁平直角**：`#c0c0c0` 面板面 / 白底字段与工作区 / 1px `#808080` 描边 / **零圆角** / 藏青标题栏与反色高亮（导航、列表项、表格行 hover/选中）/ 经典分组框（legend 压线）/ 经典提示条配色（审批面板与 toast 用 `#ffffe1`）/ 16px 方块滚动条（窄屏回落 10px）；**深色主题退场**（经典 Windows 体系里不存在深色）；字体 Tahoma + Microsoft YaHei UI 12px。
+- **图标换 Segoe MDL2 Assets 单色字形**（侧栏 7 项、工具卡、发送键、空态图标）；实现上一律 `String.fromCodePoint(0xE8BD)` 生成，不写 `\u`/CSS `content` 转义——彻底绕开 `UI_HTML` 模板字面量的转义陷阱。
+- **各页重排**：任务（派发/队列/最近 run 三段分组框 + 经典网格表）、设置（八个分组框 + 行内 worker 表单）、规则（预设 + 表单 + 表格化列表）、提示词（四槽分组框）、项目（经典面板卡：当前项目带藏青标题条 + 详情表格）、状态（原 JSON 串改为「标签 + 值」属性表 + 双池 / 用量 / RSS 三段）。
+- 助手会话界面保留上一版的能力（markdown 渲染、工具折叠卡、时间/token、智能跟随滚动、空态建议、窄窗自适应），仅换外观；`renderMarkdown` 等纯函数仍在模块作用域经 `${MD_SOURCE}` 内联（可在 Node 侧单测）。
+- 既有 DOM 契约全部保留（`#agent-*`、`#agent-log .tool` / `.msg.system`、`.mi/.sel`、行内 display 语义、`data-*`、e2e-lg-gui 断言的按钮文案与文件 input 顺序）；daemon-test 的 `/ui` 结构断言同步保留。
 
 ### 工具 / 启动
 
