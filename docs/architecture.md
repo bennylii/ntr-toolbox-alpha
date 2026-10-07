@@ -1,6 +1,6 @@
 # 架构总览 —— ntr-toolbox-alpha（油猴 + 本地 daemon）
 
-> 本文是**设计架构总览**：组件、数据流、关键决策与契约速查。模块级行为规格在 `docs/cleanroom/spec-01..10`，
+> 本文是**设计架构总览**：组件、数据流、关键决策与契约速查。模块级行为规格在 `docs/cleanroom/spec-01..13`，
 > daemon 逐命令/逐页面的操作说明在 `daemon/README.md`，版本记录在 `CHANGELOG.md`。
 > 三份文档的分工：本文讲「为什么这样设计 + 怎么拼起来」，spec 讲「行为契约」，daemon/README 讲「怎么用」。
 
@@ -42,6 +42,7 @@
 - **daemon**：`daemon/index.mjs` 入口（CLI 子命令 + `serve` 常驻）；`serve` 托管控制面 HTTP、管线、Agent；托盘（`tray.vbs`/`tray.ps1`）可选拉起隐藏进程。
 - **存储**：一个 SQLite（默认 `daemon/daemon.db`，`--db` 可换）——全部状态可序列化、可续跑；文件系统只有三类产物：`exports/`（LG 导出）、`uploads/`（LG 结果上传）、`work/<sessionId>/`（Agent 工作区，已 gitignore）。
 - **mock**：`mock-llm/server.mjs` 一个进程同时模拟 LLM 上游与站点 API（8788 主车道 / 8790 daemon 车道）。
+- **KeywordGacha 原项目**：`keywordgacha/`（junction → `C:\cache\keywordgacha`，用户 fork 独立 git 仓库，已 gitignore 不入库）——术语管线提示词与轮次收敛的出处，含「分析结果 → auto-novel 术语表」导出。
 
 ## 3. 数据模型（SQLite，19 张表）
 
@@ -104,12 +105,12 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 - **工具分层**：只读（自动）/ 执行（队列）/ 写入（审批）。审批 = decision broker（预览即真实 diff；GUI 卡片/CLI y/N；`workspace_apply` 的批次预览与实际提交是同一份差异）。
 - **项目绑定**：会话绑书（控制台新会话挂当前项目）；每轮注入【当前项目】，工具 book 参数缺省即此书。
 - **技能**：`skills/` SKILL.md 包（含隐藏前置 writing-guide / agent-charter），`read_skill` + `@点名`。
-- **工作区（CodeAct，LG 同款）**：`workspace_run {script}` 在 `--permission` 沙箱子进程执行模型脚本（fs 限工作区、禁子进程/worker，网络开放；120s 超时）；`ws` API = `contract`（数据集/变更契约）+ `doing`（进度）+ `read`（站点章节按需拉取）。数据集/变更清单是 JSONL 文件（`changes/**`），`workspace_apply {}` 解析→fp 漂移检测→审批→逐 op 提交→回执 `{status, applied, rejected, destroyed}`。变更域 v1 = rules / glossary / prompts；章节译文不走工作区。
+- **工作区（CodeAct，LG 同款）**：`workspace_run {script}` 在 `--permission` 沙箱子进程执行模型脚本（fs 限工作区、禁子进程/worker，网络开放；120s 超时）；`ws` API = `contract`（数据集/变更契约）+ `doing`（进度）+ `read`（站点章节按需拉取）。数据集/变更清单是 JSONL 文件（`changes/**`），`workspace_apply {}` 解析→fp 漂移检测→审批→逐 op 提交→回执 `{status, applied, rejected, destroyed}`。变更域 v1 = rules / glossary / prompts；章节译文不走工作区。（规格 `docs/cleanroom/spec-12`）
 
 ### 4.8 LG 互通
 
 - **术语表**：`glossary-io` 双向 JSON（导入含引擎审计与 regex→规则分流）。
-- **译文**：`export-src`（GUI 同款）导出「一行一段」纯文本 + 对齐清单（每章 `start/count/jpSha1`）→ LinguaGacha 翻译（txt 天然保行号）→ `import-lg`/GUI「导入 LG 译文」按清单切片回章，**三层校验**（总行数 / 每章行数+空行模式 / 源 sha1）后按 §4.1-3 契约提交；GUI 里以 `lg-import` 队列任务跑，进度经队列 progress 通道实时回显。
+- **译文**：`export-src`（GUI 同款）导出「一行一段」纯文本 + 对齐清单（每章 `start/count/jpSha1`）→ LinguaGacha 翻译（txt 天然保行号）→ `import-lg`/GUI「导入 LG 译文」按清单切片回章，**三层校验**（总行数 / 每章行数+空行模式 / 源 sha1）后按 §4.1-3 契约提交；GUI 里以 `lg-import` 队列任务跑，进度经队列 progress 通道实时回显。（规格 `docs/cleanroom/spec-13`）
 
 ### 4.9 控制台（`/ui`，OpenWebUI 风格）
 
@@ -119,7 +120,7 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 
 - `GET /ping`（免凭据，带版本）供探测；`POST /auth` 收 `{token, workers, origin, auto}`，只回元数据不回 token；
 - **自动同步**：油猴侧 30s glance tick 顺带做「指纹（token+workers+origin）变化才推」，页面加载即推、token 刷新 ≤30s 自愈，无变化零请求；`lastSync.mode = auto|manual` 可观测；
-- CORS：内置 `n.novelia.cc` + localhost（不可移除）+ `config.serve.origins` 附加条目；仅监听 127.0.0.1；LNA/PNA 头已应答（真实用户首次需浏览器授权一次；headless 车道需禁用 LocalNetworkAccessChecks）。
+- CORS：内置 `n.novelia.cc` + localhost（不可移除）+ `config.serve.origins` 附加条目；仅监听 127.0.0.1；LNA/PNA 头已应答（真实用户首次需浏览器授权一次；headless 车道需禁用 LocalNetworkAccessChecks）。（规格 `docs/cleanroom/spec-11`）
 - **出网代理**：`config.proxy = { enabled, url, noProxy }`；站点 API 与双池的 LLM 调用统一经 `daemon/proxy.mjs` 注入的 fetch（http 目标走代理绝对形式，https 目标走 CONNECT 隧道，支持 `user:pass@` 凭据）；**每次请求现读配置 → 控制台保存即生效**；直连列表默认 `127.0.0.1,localhost,::1`（mock/测试零影响），代理关闭时全部直连（与旧版一致）；不支持 SOCKS5；`POST /proxy/test` 对同一目标做「直连 vs 代理」双探测。工作区沙箱在 fork 时注入 `HTTP_PROXY/HTTPS_PROXY/NO_PROXY/NODE_USE_ENV_PROXY`，脚本出网与 daemon 同路。
 
 ### 4.11 托盘

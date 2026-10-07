@@ -14,7 +14,7 @@ mock-llm/server.mjs            假 LLM + 假站点（8788 主车道；daemon 测
 debug-env/                     离线站点页面替身（无网络也能开发/截图）
 tools/                         开发/测试脚本（.gen-dev/.engine-test/.run-suite/.run-daemon-stub/.probe-tm-hash-ws/.e2e-*.js/.pack-*）
 docs/architecture.md           ★ 架构总览（组件图/数据模型/子系统/设计决策/测试矩阵）——新会话先读这个
-docs/cleanroom/                行为规格 spec-01..10（全部已实施）
+docs/cleanroom/                行为规格 spec-01..13（全部已实施）
 docs/                          管线说明（html + png）
 skills/                        Agent 技能包（SKILL.md；daemon 运行时读取）
 keywordgacha/                  KeywordGacha 原项目（junction → C:\cache\keywordgacha；用户 fork 独立仓库，不入库）
@@ -62,7 +62,7 @@ README.md                     使用说明（命令/控制台/托盘/各专项�
 | 了解整体架构 / 设计决策 | `docs/architecture.md` |
 | 改油猴功能 | `ntr-toolbox-alpha.user.js` → `tools/.gen-dev.mjs` → `tools/engine-test.mjs` + 相关 `.e2e-*` |
 | 改 daemon 功能 | `daemon/index.mjs` + 对应模块 → `daemon/daemon-test.mjs`（先起 8790 mock） |
-| 找某个行为的规格 | `docs/cleanroom/spec-01..10` |
+| 找某个行为的规格 | `docs/cleanroom/spec-01..13` |
 | 日常使用 / 命令 / 控制台 | `daemon/README.md`；控制台 <http://127.0.0.1:7331/ui>（托盘 `daemon/tray.vbs`） |
 | 查版本 / 发布 | `CHANGELOG.md`；发布流程见下方「交付流程」 |
 | KeywordGacha 上游（术语管线的出处，含 auto-novel 术语表导出） | `keywordgacha/`（junction 挂载的独立 fork 仓库，不入本库） |

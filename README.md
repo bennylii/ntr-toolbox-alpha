@@ -28,7 +28,7 @@
 | 日常使用 daemon（命令/控制台/托盘/质检/LG 导入） | [`daemon/README.md`](daemon/README.md)；控制台 <http://127.0.0.1:7331/ui> |
 | 改油猴功能 | `ntr-toolbox-alpha.user.js`（唯一源文件）→ `tools/.gen-dev.mjs` → `tools/engine-test.mjs` |
 | 改 daemon 功能 | `daemon/`（模块地图见 [AGENTS.md](AGENTS.md)）→ `daemon/daemon-test.mjs` |
-| 行为规格（各模块契约） | `docs/cleanroom/spec-01..10` |
+| 行为规格（各模块契约） | `docs/cleanroom/spec-01..13` |
 | 版本记录 | [`CHANGELOG.md`](CHANGELOG.md) |
 | KeywordGacha 原项目（术语管线出处） | `keywordgacha/`（junction 挂载的独立 fork 仓库，不入本库） |
 | LinguaGacha 上游（调度/质检/提示词/LG 互通的借鉴出处） | `linguagacha/`（junction 挂载，pin `MANUAL_BUILD_v0.125.0`，不入本库） |
