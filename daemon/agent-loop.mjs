@@ -71,7 +71,8 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
   }
 
   // 一轮对话。返回 { ok, content?, steps?, error? }；异常不抛出（除 aborted 以外都转成结果）
-  async function runTurn(sessionId, userText, { signal, onEvent, approvalMode, pinnedSkills } = {}) {
+  // appendUserMessage=false：不落新的用户消息，直接以传入文本续跑（重新生成用）
+  async function runTurn(sessionId, userText, { signal, onEvent, approvalMode, pinnedSkills, appendUserMessage = true } = {}) {
     const session = store.getAgentSession(sessionId);
     if (!session) throw new Error(`会话不存在：${sessionId}`);
     const controller = new AbortController();
@@ -92,8 +93,10 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
       registry,
     };
     store.touchAgentSession(sessionId, { state: 'running' });
-    store.appendAgentMessage({ sessionId, role: 'user', content: String(userText == null ? '' : userText) });
-    emit({ type: 'user_message', text: String(userText == null ? '' : userText) });
+    if (appendUserMessage) {
+      store.appendAgentMessage({ sessionId, role: 'user', content: String(userText == null ? '' : userText) });
+      emit({ type: 'user_message', text: String(userText == null ? '' : userText) });
+    }
     let steps = 0;
     try {
       for (;;) {

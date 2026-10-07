@@ -150,6 +150,11 @@ export const UI_HTML = `<!doctype html>
   .sess-row.active { background: var(--panel2); color: var(--text); }
   .sess-row .sess-when { color: var(--faint); font-size: 11px; }
   .sess-row .sess-dot { display: inline-block; width: 6px; height: 6px; border-radius: 999px; background: var(--accent); margin-left: 6px; vertical-align: middle; }
+  .sess-row { display: flex; align-items: center; gap: 4px; }
+  .sess-row .sess-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .sess-ops { display: none; gap: 2px; flex: 0 0 auto; }
+  .sess-row:hover .sess-ops, .sess-row.active .sess-ops { display: flex; }
+  .sess-ops .icon-btn { font-size: 11px; padding: 1px 5px; }
   .sess-group { padding: 10px 10px 3px; font-size: 11px; color: var(--faint); letter-spacing: .4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .side-foot { padding: 9px 14px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--faint); }
 
@@ -204,6 +209,10 @@ export const UI_HTML = `<!doctype html>
   .msg.assistant { flex-direction: column; gap: 6px; }
   .msg.assistant .content { word-break: break-word; }
   .msg.system { color: var(--muted); font-size: 12.5px; white-space: pre-wrap; }
+  .edit-box { display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: 100%; }
+  .edit-box textarea { min-height: 56px; }
+  .edit-bar { display: flex; gap: 6px; justify-content: flex-end; }
+  .sess-op { font-size: 11.5px; padding: 2px 7px; }
   .msg-meta { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--faint); min-height: 16px; }
   .msg-actions { display: flex; gap: 2px; opacity: 0; transition: opacity .15s; }
   .msg:hover .msg-actions, .msg.assistant:last-child .msg-actions { opacity: 1; }
@@ -346,6 +355,8 @@ export const UI_HTML = `<!doctype html>
       <button class="btn ghost" id="agent-new">＋ 新会话</button>
       <label><input type="checkbox" id="agent-auto"> 自动批准写入</label>
       <span class="agent-title" id="agent-title"></span>
+      <button class="icon-btn sess-op" id="agent-rename" title="重命名当前会话">重命名</button>
+      <button class="icon-btn sess-op" id="agent-delete" title="删除当前会话">删除</button>
       <span class="spacer"></span>
       <span class="muted" id="agent-status"></span>
       <button class="btn ghost" id="agent-sys">系统指令</button>
@@ -1179,6 +1190,11 @@ function agentMsgSig(m) {
 function agentBuildMsg(m) {
   if (m.role === 'user') {
     const row = document.createElement('div'); row.className = 'msg user';
+    const acts = document.createElement('div'); acts.className = 'msg-actions';
+    const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'icon-btn'; edit.textContent = '编辑';
+    edit.addEventListener('click', function () { agentStartEdit(m, row); });
+    acts.appendChild(edit);
+    row.appendChild(acts);
     const bubble = document.createElement('div'); bubble.className = 'bubble md';
     bubble.innerHTML = renderMarkdown(m.content || '');
     row.appendChild(bubble);
@@ -1195,6 +1211,13 @@ function agentBuildMsg(m) {
     const cp = document.createElement('button'); cp.type = 'button'; cp.className = 'icon-btn'; cp.textContent = '复制';
     cp.dataset.copy = String(m.content || '');
     acts.appendChild(cp);
+    const lastAssistant = (AGENT.messages || []).filter(function (x) { return x.role === 'assistant'; }).pop();
+    if (lastAssistant && lastAssistant.seq === m.seq) {
+      const redo = document.createElement('button'); redo.type = 'button'; redo.className = 'icon-btn'; redo.textContent = '重新生成';
+      redo.title = '丢弃这一轮的回答重跑（用户消息保留）';
+      redo.addEventListener('click', agentRegenerate);
+      acts.appendChild(redo);
+    }
     meta.appendChild(acts);
     row.appendChild(meta);
     if (m.content) { const content = document.createElement('div'); content.className = 'content md'; content.innerHTML = renderMarkdown(m.content); row.appendChild(content); }
@@ -1202,6 +1225,71 @@ function agentBuildMsg(m) {
     return row;
   }
   return agentLine('msg system', '工具结果：' + String(m.content || '').slice(0, 200));
+}
+// 编辑用户消息：气泡换成内联编辑器，保存即截断重发
+function agentStartEdit(m, row) {
+  if (AGENT.running) { toast('该会话正在跑一轮，先停止再编辑', true); return; }
+  row.innerHTML = '';
+  const box = document.createElement('div'); box.className = 'edit-box';
+  const ta = document.createElement('textarea'); ta.value = String(m.content || '');
+  const bar = document.createElement('div'); bar.className = 'edit-bar';
+  const save = document.createElement('button'); save.type = 'button'; save.className = 'btn'; save.textContent = '保存并重发';
+  const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'btn ghost'; cancel.textContent = '取消';
+  save.addEventListener('click', async function () {
+    const text = ta.value.trim();
+    if (text === '') { toast('内容不能为空', true); return; }
+    try {
+      await post('/agent/message/edit', { session: AGENT.session, seq: m.seq, message: text, approvalMode: $('agent-auto').checked ? 'auto' : 'manual' });
+      renderAgentMessages(true);   // 截断会复用 seq：整表重建，避免节点 key 冲突
+      agentRefresh();
+    } catch (e) { toast(e.message, true); }
+  });
+  cancel.addEventListener('click', function () { renderAgentMessages(true); });
+  bar.appendChild(save); bar.appendChild(cancel);
+  box.appendChild(ta); box.appendChild(bar);
+  row.appendChild(box);
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+async function agentRegenerate() {
+  if (!AGENT.session || AGENT.running) return;
+  try {
+    await post('/agent/message/regenerate', { session: AGENT.session, approvalMode: $('agent-auto').checked ? 'auto' : 'manual' });
+    renderAgentMessages(true);
+    toast('已重新生成');
+    agentRefresh();
+  } catch (e) { toast(e.message, true); }
+}
+async function agentRenameSession(sid) {
+  const target = sid || AGENT.session;
+  if (!target) { toast('先选择会话', true); return; }
+  if (AGENT.running && target === AGENT.session) { toast('该会话正在跑一轮，先停止再重命名', true); return; }
+  const cur = (lastSessions.find(function (x) { return x.id === target; }) || {}).title || '';
+  const input = prompt('会话标题', cur);
+  if (input == null) return;
+  const title = input.trim();
+  if (title === '') { toast('标题不能为空', true); return; }
+  try { await post('/agent/session/rename', { session: target, title: title }); toast('已重命名'); await agentInit(); }
+  catch (e) { toast(e.message, true); }
+}
+async function agentDeleteSession(sid) {
+  const target = sid || AGENT.session;
+  if (!target) { toast('先选择会话', true); return; }
+  if (AGENT.running && target === AGENT.session) { toast('该会话正在跑一轮，先停止再删除', true); return; }
+  const name = (lastSessions.find(function (x) { return x.id === target; }) || {}).title || target.slice(0, 8);
+  if (!confirm('删除会话「' + name + '」？该会话的消息与审批记录都会从本地 daemon 删除（站点数据不动）。')) return;
+  try {
+    await post('/agent/session/delete', { session: target });
+    if (AGENT.session === target) {
+      AGENT.session = '';
+      localStorage.removeItem('ntr-daemon-agent-session');
+      AGENT.messages = []; AGENT.pending = null; AGENT.localCount = 0;
+      agentSyncTitle();
+      renderAgentMessages(true); renderAgentDecision();
+    }
+    toast('已删除会话');
+    await agentInit();
+  } catch (e) { toast(e.message, true); }
 }
 // 按 seq 做增量 diff：只重建内容变化的消息（保住滚动位置、<details> 展开态与悬停按钮）
 function renderAgentMessages(reset) {
@@ -1392,14 +1480,24 @@ function renderAgentSessions(list) {
     html += groups[g].map(function (x) {
       const when = agentRelTime(x.updatedAt);
       return '<div class="sess-row' + (x.id === AGENT.session ? ' active' : '') + '" data-sid="' + esc(x.id) + '" title="' + esc(String(x.title || x.id)) + '">' +
-        esc(String(x.title || x.id).slice(0, 22)) +
-        (when ? ' <span class="sess-when">' + esc(when) + '</span>' : '') +
-        (x.running ? '<span class="sess-dot"></span>' : '') + '</div>';
+        '<span class="sess-name">' + esc(String(x.title || x.id).slice(0, 22)) + '</span>' +
+        (when ? '<span class="sess-when">' + esc(when) + '</span>' : '') +
+        (x.running ? '<span class="sess-dot"></span>' : '') +
+        '<span class="sess-ops">' +
+        '<button type="button" class="icon-btn" data-srename="' + esc(x.id) + '" title="重命名">改</button>' +
+        '<button type="button" class="icon-btn" data-sdel="' + esc(x.id) + '" title="删除会话">删</button>' +
+        '</span></div>';
     }).join('');
   });
   box.innerHTML = html || '<div class="muted" style="padding:4px 12px">无会话</div>';
   box.querySelectorAll('[data-sid]').forEach(function (rowEl) {
     rowEl.addEventListener('click', function () { agentSetSession(rowEl.dataset.sid); });
+  });
+  box.querySelectorAll('[data-srename]').forEach(function (el) {
+    el.addEventListener('click', function (e) { e.stopPropagation(); agentRenameSession(el.dataset.srename); });
+  });
+  box.querySelectorAll('[data-sdel]').forEach(function (el) {
+    el.addEventListener('click', function (e) { e.stopPropagation(); agentDeleteSession(el.dataset.sdel); });
   });
 }
 async function agentInit() {
@@ -1583,8 +1681,9 @@ async function agentCommand(text) {
     agentLocalLine('未知命令 /' + cmd + '；/help 查看命令表', 'bad');
   }
 }
-$('agent-sys').addEventListener('click', async function () {
-  const panel = $('agent-syseditor');
+$('agent-rename').addEventListener('click', function () { agentRenameSession(''); });
+$('agent-delete').addEventListener('click', function () { agentDeleteSession(''); });
+$('agent-sys').addEventListener('click', async function () {  const panel = $('agent-syseditor');
   if (panel.style.display === 'block') { panel.style.display = 'none'; return; }
   if (!AGENT.session) { toast('先新建会话'); return; }
   try {

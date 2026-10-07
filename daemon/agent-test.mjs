@@ -8,7 +8,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const imp = (name) => import(pathToFileURL(path.join(here, name)).href);
 const { Store } = await imp('store.mjs');
 const { parseToolArguments, trimToBudget } = await imp('agent-llm.mjs');
-const { createAgentSession, DEFAULT_AGENT_SYSTEM } = await imp('agent-session.mjs');
+const { createAgentSession, DEFAULT_AGENT_SYSTEM, resetSummaryIfBeyond } = await imp('agent-session.mjs');
 const { createAgentLoop } = await imp('agent-loop.mjs');
 const { doingTool, askUserTool } = await imp('agent-tools.mjs');
 
@@ -312,6 +312,62 @@ await t('ask_user：提问事件 → 回答回填工具结果', async () => {
   assert.equal(r.ok, true);
   const toolRow = store.listAgentMessages(ses).find((x) => x.role === 'tool');
   assert.ok(toolRow.content.includes('"selected":"b"'), toolRow.content);
+});
+
+console.log('== Agent：会话截断/重跑原语（重新生成与编辑重发的地基） ==');
+await t('appendUserMessage:false → 不落重复用户消息，直接以既有历史续跑', async () => {
+  const { ses, loop } = mkLoop({ script: [text('第一版回复'), text('第二版回复')] });
+  const r1 = await loop.runTurn(ses, '原始问题', {});
+  assert.equal(r1.ok, true);
+  assert.deepEqual(store.listAgentMessages(ses).map((x) => x.role), ['user', 'assistant']);
+  const userSeq = store.listAgentMessages(ses)[0].seq;
+  assert.equal(store.deleteAgentMessagesFrom(ses, userSeq + 1), 1, '只丢该轮助手/工具消息（保留用户消息）');
+  const r2 = await loop.runTurn(ses, '原始问题', { appendUserMessage: false });
+  assert.equal(r2.ok, true);
+  const rows = store.listAgentMessages(ses);
+  assert.deepEqual(rows.map((x) => x.role), ['user', 'assistant'], '重跑不再落重复的用户消息');
+  assert.equal(rows[0].content, '原始问题');
+  assert.equal(rows[1].content, '第二版回复');
+  assert.equal(rows.filter((x) => x.role === 'user').length, 1);
+});
+await t('resetSummaryIfBeyond：跨过截断点才清摘要（摘要正文引用被删消息）', () => {
+  const ses = store.createAgentSession({ title: 'sum' });
+  store.appendAgentMessage({ sessionId: ses, role: 'user', content: 'a' });
+  store.appendAgentMessage({ sessionId: ses, role: 'assistant', content: 'b' });
+  store.setAgentSummary(ses, { summary: '摘要', summaryUpTo: 1 });
+  assert.equal(resetSummaryIfBeyond(store, ses, 2), false, '截断点在摘要覆盖之外 → 保留');
+  assert.equal(store.getAgentSession(ses).summary, '摘要');
+  assert.equal(resetSummaryIfBeyond(store, ses, 1), true, '截断点落在摘要覆盖内 → 清空');
+  assert.equal(store.getAgentSession(ses).summary, '');
+  assert.equal(store.getAgentSession(ses).summaryUpTo, 0);
+  assert.equal(resetSummaryIfBeyond(store, ses, 1), false, '已清空后再调用不重复动作');
+});
+await t('deleteAgentMessagesFrom：含边界 seq 起全部删除、越界不误删', () => {
+  const ses = store.createAgentSession({ title: 'trunc' });
+  for (const role of ['user', 'assistant', 'tool', 'assistant']) store.appendAgentMessage({ sessionId: ses, role, content: role });
+  assert.equal(store.deleteAgentMessagesFrom(ses, 3), 2);
+  assert.deepEqual(store.listAgentMessages(ses).map((x) => x.seq), [1, 2]);
+  assert.equal(store.deleteAgentMessagesFrom(ses, 99), 0);
+});
+await t('deleteAgentSession：会话/消息/决定三连清，且不再出现在列表', () => {
+  const ses = store.createAgentSession({ title: 'del' });
+  store.appendAgentMessage({ sessionId: ses, role: 'user', content: 'x' });
+  store.createAgentDecision({ sessionId: ses, kind: 'write', payload: { tool: 't' } });
+  assert.equal(store.deleteAgentSession(ses), true);
+  assert.equal(store.getAgentSession(ses), null);
+  assert.equal(store.listAgentMessages(ses).length, 0);
+  assert.equal(store.listAgentDecisions(ses).length, 0);
+  assert.ok(!store.listAgentSessions(100).some((s) => s.id === ses));
+  assert.equal(store.deleteAgentSession(ses), false, '重复删除返回 false');
+});
+await t('agent-events.forget：丢弃该会话的事件历史与 revision', async () => {
+  const { createAgentEvents } = await imp('agent-events.mjs');
+  const bus = createAgentEvents({});
+  bus.publish('s1', { type: 'x' });
+  assert.equal(bus.since('s1', 0).length, 1);
+  bus.forget('s1');
+  assert.equal(bus.since('s1', 0).length, 0);
+  assert.equal(bus.revision('s1'), 0);
 });
 
 console.log(`\n通过 ${pass}，失败 ${fail}`);

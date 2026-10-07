@@ -1014,6 +1014,73 @@ await t('系统指令：保存 → 下一轮系统提示携带【用户系统指
   } finally { server.close(); }
 });
 
+console.log('== Agent 会话操作：重命名 / 删除 / 重新生成 / 编辑重发 ==');
+const opsServer = await mkAgentServer(7375, '', [doingTool]);
+const opsSnap = (sid) => agentFetch(7375, `/agent/snapshot?session=${encodeURIComponent(sid)}`);
+const opsTurn = async (sid, message) => {
+  await agentFetch(7375, '/agent/message', { session: sid, message, approvalMode: 'auto' });
+  await pollUntil(async () => { const s = await opsSnap(sid); return !s.running && s.messages.some((m) => m.role === 'assistant'); });
+};
+await t('重命名：POST /agent/session/rename → /agent/config 回读新标题；空标题 400', async () => {
+  const { sessionId } = await agentFetch(7375, '/agent/session', { title: '旧名' });
+  const r = await agentFetch(7375, '/agent/session/rename', { session: sessionId, title: '新名字' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.title, '新名字');
+  const cfg = await agentFetch(7375, '/agent/config');
+  assert.equal((cfg.sessions || []).find((x) => x.id === sessionId).title, '新名字');
+  const bad = await agentFetch(7375, '/agent/session/rename', { session: sessionId, title: '   ' });
+  assert.equal(bad.ok, false, JSON.stringify(bad));
+});
+await t('编辑重发：截断到该条（其后全删）并用新文本重跑', async () => {
+  const { sessionId } = await agentFetch(7375, '/agent/session', { title: 'edit' });
+  await opsTurn(sessionId, '第一问');
+  await opsTurn(sessionId, '第二问');
+  const snap0 = await opsSnap(sessionId);
+  const first = snap0.messages.find((m) => m.role === 'user');
+  const r = await agentFetch(7375, '/agent/message/edit', { session: sessionId, seq: first.seq, message: '改写后的问题' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(r.dropped >= 4, '应截断其后全部消息：' + JSON.stringify(r));
+  await pollUntil(async () => { const s = await opsSnap(sessionId); return !s.running && s.messages.some((m) => m.content === '改写后的问题'); });
+  const snap1 = await opsSnap(sessionId);
+  assert.deepEqual(snap1.messages.filter((m) => m.role === 'user').map((m) => m.content), ['改写后的问题']);
+  assert.equal(snap1.messages.filter((m) => m.role === 'assistant').length, 1, '新一轮只剩一条助手回复');
+});
+await t('编辑重发：非 user 消息 / 非法 seq → 400', async () => {
+  const { sessionId } = await agentFetch(7375, '/agent/session', { title: 'edit-bad' });
+  await opsTurn(sessionId, '问题');
+  const snap = await opsSnap(sessionId);
+  const assistant = snap.messages.find((m) => m.role === 'assistant');
+  const r1 = await agentFetch(7375, '/agent/message/edit', { session: sessionId, seq: assistant.seq, message: 'x' });
+  assert.equal(r1.ok, false, JSON.stringify(r1));
+  const r2 = await agentFetch(7375, '/agent/message/edit', { session: sessionId, seq: 0, message: 'x' });
+  assert.equal(r2.ok, false, JSON.stringify(r2));
+});
+await t('重新生成：用户消息不重复、该轮助手回复被重新生成', async () => {
+  const { sessionId } = await agentFetch(7375, '/agent/session', { title: 'regen' });
+  await opsTurn(sessionId, '唯一问题');
+  const r = await agentFetch(7375, '/agent/message/regenerate', { session: sessionId });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(r.dropped >= 1, '应丢弃该轮的助手/工具消息：' + JSON.stringify(r));
+  await pollUntil(async () => { const s = await opsSnap(sessionId); return !s.running && s.messages.some((m) => m.role === 'assistant'); });
+  const snap = await opsSnap(sessionId);
+  const users = snap.messages.filter((m) => m.role === 'user');
+  assert.equal(users.length, 1, '用户消息不重复：' + JSON.stringify(snap.messages.map((m) => m.role)));
+  assert.equal(users[0].content, '唯一问题');
+});
+await t('删除会话：messages/decisions 一并清掉，会话列表不再列出；重复删除失败', async () => {
+  const { sessionId } = await agentFetch(7375, '/agent/session', { title: 'to-delete' });
+  await opsTurn(sessionId, '待删');
+  const del = await agentFetch(7375, '/agent/session/delete', { session: sessionId });
+  assert.equal(del.ok, true, JSON.stringify(del));
+  const cfg = await agentFetch(7375, '/agent/config');
+  assert.ok(!(cfg.sessions || []).some((x) => x.id === sessionId), '已从会话列表消失');
+  assert.equal(store.listAgentMessages(sessionId).length, 0);
+  assert.equal(store.listAgentDecisions(sessionId).length, 0);
+  const again = await agentFetch(7375, '/agent/session/delete', { session: sessionId });
+  assert.equal(again.ok, false, JSON.stringify(again));
+});
+await t('清理：会话操作服务器', () => { opsServer.server.close(); });
+
 console.log('== 控制面 ==');
 await t('server：/status 有书与进度、/auth 更新凭据', async () => {
   const server = await startServer({ store, pipeline: mkPipeline({}), port: 7342, log: { log: () => { }, error: () => { } } });

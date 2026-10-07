@@ -12,6 +12,17 @@ export const DEFAULT_AGENT_SYSTEM = `你是 NTR Daemon 的本地助手，帮助�
 
 const SUMMARY_SYSTEM = '你是对话历史压缩器。把对话历史压缩成要点式摘要，保留：用户目标、已确认的事实与数字、已完成的操作与结果、未决事项。只输出摘要正文，不要客套。';
 
+// 截断/重跑前调用：摘要正文由模型生成（不可确定性重算），一旦 summaryUpTo 跨过截断点，
+// 摘要就会引用即将被删的消息 → 整段清掉并回零；没跨过则保持不动。
+export function resetSummaryIfBeyond(store, sessionId, boundarySeq) {
+  const session = store.getAgentSession(sessionId);
+  if (!session) return false;
+  const upTo = Number(session.summaryUpTo) || 0;
+  if (upTo === 0 || upTo < Number(boundarySeq)) return false;
+  store.setAgentSummary(sessionId, { summary: '', summaryUpTo: 0 });
+  return true;
+}
+
 export function createAgentSession({ store, chat, log = console, options = {} }) {
   const opt = {
     compactThresholdTokens: 120000,   // 超过则压缩（估算值）

@@ -15,6 +15,7 @@ import { exportBookSource, splitResultLines, verifyImport } from './lg-align.mjs
 import { PRESET_NAMES, presetInfo, readTextPreserveConfig } from './preserve.mjs';
 import { VERSION } from './version.mjs';
 import { createProxyFetch, normalizeProxyConfig, assertProxyConfig } from './proxy.mjs';
+import { resetSummaryIfBeyond } from './agent-session.mjs';
 
 const DAEMON_DIR = path.dirname(fileURLToPath(import.meta.url));
 const UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
@@ -77,6 +78,15 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
 
   // 助手池显式配置 = config.agent.workers 非空；空/缺省 = 跟随翻译池（/auth 推送镜像过去）
   const agentPoolExplicit = (cfgAgent) => Array.isArray(cfgAgent && cfgAgent.workers) && cfgAgent.workers.length > 0;
+
+  // @技能点名：解析文本里的技能；未知名返回错误与可用清单（发送/重发/编辑共用）
+  const agentMentions = (text) => {
+    const s = String(text == null ? '' : text);
+    if (!s.includes('@') || !agentLoop || !agentLoop.skills) return { skills: [] };
+    const m = agentLoop.skills.mentions(s);
+    if (m.unknown.length > 0) return { error: `未知技能：${m.unknown.join('、')}`, knownSkills: agentLoop.skills.list().map((x) => x.name) };
+    return { skills: m.skills };
+  };
 
   // worker 列表合并：GET 永远只回掩码 key；客户端保存时 key 留空（或仍是掩码）= 沿用同 id 既有明文 key
   const maskMergeWorkers = (incoming, existing) => {
@@ -538,8 +548,33 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
       }
       if (req.method === 'POST' && url.pathname === '/agent/session') {
         const body = await readBody();
-        const id = store.createAgentSession({ bookKey: String(body.bookKey || ''), title: String(body.title || 'agent') });
-        send(200, { ok: true, sessionId: id });
+        const sid = store.createAgentSession({ bookKey: String(body.bookKey || ''), title: String(body.title || 'agent').slice(0, 60) });
+        send(200, { ok: true, sessionId: sid });
+        return;
+      }
+      // 会话重命名（写 title 走 touchAgentSession，无独立 store 方法）
+      if (req.method === 'POST' && url.pathname === '/agent/session/rename') {
+        const body = await readBody();
+        const sid = String(body.session || '');
+        if (!sid || !store.getAgentSession(sid)) { send(404, { ok: false, error: '会话不存在' }); return; }
+        const title = String(body.title == null ? '' : body.title).trim().slice(0, 60);
+        if (title === '') { send(400, { ok: false, error: '标题不能为空' }); return; }
+        store.touchAgentSession(sid, { title });
+        send(200, { ok: true, title });
+        return;
+      }
+      // 删除会话：连带消息/决定；正在跑一轮则拒绝；挂起的决定先按拒绝收尾
+      if (req.method === 'POST' && url.pathname === '/agent/session/delete') {
+        const body = await readBody();
+        const sid = String(body.session || '');
+        if (!sid || !store.getAgentSession(sid)) { send(404, { ok: false, error: '会话不存在' }); return; }
+        if (agentLoop && agentLoop.running(sid)) { send(409, { ok: false, error: '该会话正在跑一轮（先停止再删除）' }); return; }
+        const pending = store.getPendingAgentDecision(sid);
+        if (pending) store.resolveAgentDecision(pending.id, 'rejected', { via: 'session_delete' });
+        if (agentEvents && agentEvents.forget) agentEvents.forget(sid);
+        store.deleteAgentSession(sid);
+        log.log(`[agent] 已删除会话 ${sid.slice(0, 8)}`);
+        send(200, { ok: true });
         return;
       }
       if (req.method === 'GET' && url.pathname === '/agent/snapshot') {
@@ -566,15 +601,9 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         if (!sessionId) sessionId = store.createAgentSession({ bookKey: String(body.bookKey || ''), title: text.slice(0, 40) });
         if (!store.getAgentSession(sessionId)) { send(404, { ok: false, error: '会话不存在' }); return; }
         if (agentLoop.running(sessionId)) { send(409, { ok: false, error: '该会话上一轮还在进行（可先停止）' }); return; }
-        let pinnedSkills = [];
-        if (text.includes('@') && agentLoop.skills) {
-          const m = agentLoop.skills.mentions(text);
-          pinnedSkills = m.skills;
-          if (m.unknown.length > 0) {
-            send(400, { ok: false, error: `未知技能：${m.unknown.join('、')}`, knownSkills: agentLoop.skills.list().map((x) => x.name) });
-            return;
-          }
-        }
+        const m = agentMentions(text);
+        if (m.error) { send(400, { ok: false, error: m.error, knownSkills: m.knownSkills }); return; }
+        const pinnedSkills = m.skills;
         const onEvent = (ev) => { if (agentEvents) agentEvents.publish(sessionId, ev); };
         agentLoop.runTurn(sessionId, text, {
           onEvent,
@@ -583,6 +612,61 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         }).then((result) => onEvent({ type: 'turn_end', ok: result.ok, error: result.error || '', steps: result.steps || 0 }))
           .catch((e) => onEvent({ type: 'turn_end', ok: false, error: String((e && e.message) || e) }));
         send(202, { ok: true, accepted: true, sessionId });
+        return;
+      }
+      // 重新生成：回退到最后一条用户消息处截断，删掉该轮全部消息后以原文重跑（不落重复的用户消息）
+      if (req.method === 'POST' && url.pathname === '/agent/message/regenerate') {
+        if (!agentLoop) { send(400, { ok: false, error: 'agent 未装配' }); return; }
+        const body = await readBody();
+        const sid = String(body.session || '');
+        if (!store.getAgentSession(sid)) { send(404, { ok: false, error: '会话不存在' }); return; }
+        if (agentLoop.running(sid)) { send(409, { ok: false, error: '该会话上一轮还在进行（可先停止）' }); return; }
+        const rows = store.listAgentMessages(sid);
+        let anchor = -1;
+        for (let i = rows.length - 1; i >= 0; i -= 1) { if (rows[i].role === 'user') { anchor = i; break; } }
+        if (anchor < 0) { send(400, { ok: false, error: '没有可重跑的轮次（会话里没有用户消息）' }); return; }
+        const text = String(rows[anchor].content || '');
+        // 保留这条用户消息本身，只丢弃它之后的助手/工具消息（否则界面上会"只有答案没有问题"）
+        const fromSeq = (Number(rows[anchor].seq) || 0) + 1;
+        const m = agentMentions(text);
+        if (m.error) { send(400, { ok: false, error: m.error, knownSkills: m.knownSkills }); return; }
+        resetSummaryIfBeyond(store, sid, fromSeq);
+        const dropped = store.deleteAgentMessagesFrom(sid, fromSeq);
+        const onEvent = (ev) => { if (agentEvents) agentEvents.publish(sid, ev); };
+        agentLoop.runTurn(sid, text, { onEvent, appendUserMessage: false, pinnedSkills: m.skills })
+          .then((result) => onEvent({ type: 'turn_end', ok: result.ok, error: result.error || '', steps: result.steps || 0 }))
+          .catch((e) => onEvent({ type: 'turn_end', ok: false, error: String((e && e.message) || e) }));
+        log.log(`[agent] 重新生成：丢弃 seq ≥ ${fromSeq} 的 ${dropped} 条消息`);
+        send(202, { ok: true, accepted: true, sessionId: sid, dropped });
+        return;
+      }
+      // 编辑某条用户消息后重发：截断到该条（含）并用新文本重跑
+      if (req.method === 'POST' && url.pathname === '/agent/message/edit') {
+        if (!agentLoop) { send(400, { ok: false, error: 'agent 未装配' }); return; }
+        const body = await readBody();
+        const sid = String(body.session || '');
+        if (!store.getAgentSession(sid)) { send(404, { ok: false, error: '会话不存在' }); return; }
+        if (agentLoop.running(sid)) { send(409, { ok: false, error: '该会话上一轮还在进行（可先停止）' }); return; }
+        const text = String(body.message == null ? '' : body.message).trim();
+        if (text === '') { send(400, { ok: false, error: '缺少 message' }); return; }
+        const seq = Number(body.seq);
+        if (!Number.isInteger(seq) || seq <= 0) { send(400, { ok: false, error: 'seq 非法（需为正整数）' }); return; }
+        const row = store.listAgentMessages(sid).find((x) => Number(x.seq) === seq);
+        if (!row) { send(400, { ok: false, error: `消息不存在：seq=${seq}` }); return; }
+        if (row.role !== 'user') { send(400, { ok: false, error: '只能编辑用户消息' }); return; }
+        const m = agentMentions(text);
+        if (m.error) { send(400, { ok: false, error: m.error, knownSkills: m.knownSkills }); return; }
+        resetSummaryIfBeyond(store, sid, seq);
+        const dropped = store.deleteAgentMessagesFrom(sid, seq);
+        const onEvent = (ev) => { if (agentEvents) agentEvents.publish(sid, ev); };
+        agentLoop.runTurn(sid, text, {
+          onEvent,
+          pinnedSkills: m.skills,
+          approvalMode: body.approvalMode === 'auto' || body.approvalMode === 'manual' ? body.approvalMode : undefined,
+        }).then((result) => onEvent({ type: 'turn_end', ok: result.ok, error: result.error || '', steps: result.steps || 0 }))
+          .catch((e) => onEvent({ type: 'turn_end', ok: false, error: String((e && e.message) || e) }));
+        log.log(`[agent] 编辑重发：seq ${seq} 起丢弃 ${dropped} 条消息`);
+        send(202, { ok: true, accepted: true, sessionId: sid, dropped });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/agent/decision') {

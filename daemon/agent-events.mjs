@@ -27,5 +27,9 @@ export function createAgentEvents({ historyLimit = 500 } = {}) {
       return bucket(sessionId).events.filter((e) => e.rev > (Number(rev) || 0));
     },
     revision: (sessionId) => bucket(sessionId).rev,
+    // 会话被删除时丢历史（避免极端情况下 id 复用时重放旧事件）
+    forget(sessionId) {
+      sessions.delete(String(sessionId || ''));
+    },
   };
 }
