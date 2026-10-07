@@ -180,7 +180,9 @@ export const UI_HTML = `<!doctype html>
   .topbar h1 { font-size: 12.5px; margin: 0; font-weight: 700; text-shadow: 0 1px 1px rgba(0,0,0,.45); }
   .topbar .hdr { margin-left: auto; font-size: 11px; color: #f0f6ff; text-shadow: 0 1px 1px rgba(0,0,0,.45); }
   /* 页面滚动容器；注意限定 .main > —— 助手消息正文也用 class="content"，别串味 */
-  .main > .content { flex: 1; overflow-y: auto; padding: 10px 12px 40px; background: var(--face); }
+  .main > .content { flex: 1; overflow-y: auto; padding: 10px 12px 40px; background: var(--face); scrollbar-gutter: stable; }
+  /* 助手页：内容区让开内边距、滚动条与滚动条占位，交给助手页自己填满 */
+  .main > .content.agent-active { padding: 0; overflow: hidden; scrollbar-gutter: auto; }
   .page { max-width: 980px; margin: 0 auto; display: none; }
   .page.active { display: block; }
   /* 页面开头直接挂的说明行：工作区已是灰底，够读，不再加背板 */
@@ -220,7 +222,7 @@ export const UI_HTML = `<!doctype html>
   pre { font-family: var(--mono); }
 
   /* ---- 助手页（经典会话窗口：白底工作区 + 反色高亮） ---- */
-  .agent-page { max-width: none; width: 100%; margin: 0; display: none; flex-direction: column; height: calc(100vh - var(--topbar-h)); }
+  .agent-page { max-width: none; width: 100%; margin: 0; display: none; flex-direction: column; height: 100%; }
   .agent-page.active { display: flex; }
   .agent-top { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   .agent-top .spacer { flex: 1; }
@@ -578,9 +580,16 @@ document.querySelectorAll('#side-nav button').forEach((btn) => btn.addEventListe
   document.querySelectorAll('#side-nav button').forEach((b) => b.classList.toggle('active', b === btn));
   document.querySelectorAll('.page').forEach((s) => s.classList.toggle('active', s.id === 'tab-' + btn.dataset.tab));
   $('page-title').textContent = btn.dataset.title || btn.textContent.trim();
+  setContentMode(btn.dataset.tab);
   if (btn.dataset.tab === 'agent') { agentInit(); return; }
   refresh();
 }));
+// 助手页要精确填满内容区（自己管滚动），靠这个类把内容区的内边距与滚动条让开；
+// 否则 100vh 硬算的高度会多出内边距那 50px → 冒竖直滚动条、右侧留白不对称、输入区被推到视口外
+function setContentMode(tab) {
+  const box = document.querySelector('.main > .content');
+  if (box) box.classList.toggle('agent-active', tab === 'agent');
+}
 
 let STATE = { books: [], runs: [], queue: [] };
 let PROJECT = localStorage.getItem('ntr-daemon-project') || '';
@@ -1774,6 +1783,7 @@ $('agent-log').addEventListener('scroll', function () {
 $('agent-bottom').addEventListener('click', agentScrollBottom);
 agentGrowInput();
 paintIcons();
+setContentMode('agent');
 refresh(); loadSettings(); loadRules(); loadPrompts(); agentInit();
 </script>
 </body>
