@@ -1497,7 +1497,7 @@ await t('serve 端口持久化：config.serve.port + .serve-port 落盘（子进
 });
 await t('清理：连接配置服务器', () => { connServer.close(); });
 
-const { UI_HTML } = await imp('ui.mjs');
+const { UI_HTML, renderMarkdown } = await imp('ui.mjs');
 console.log('== LG 导入 GUI：/lg/export、/lg/upload、/lg/verify、/run lg-import ==');
 await t('/ui 内嵌脚本可解析（防 UI_HTML 模板字面量转义回归）', () => {
   const html = UI_HTML;
@@ -1505,6 +1505,47 @@ await t('/ui 内嵌脚本可解析（防 UI_HTML 模板字面量转义回归）'
   assert.ok(body.length > 1000, '脚本体存在');
   // 注意：模板字面量里写 '\n' 会被外层吃掉成真换行 → 内嵌脚本语法错误（页面静默失效）
   new Function(body);
+});
+console.log('== 控制台助手页：markdown 渲染（纯函数，块级/行内/安全） ==');
+await t('转义：模型输出里的原始 HTML 一律不生效', () => {
+  const html = renderMarkdown('<img src=x onerror=alert(1)> 与 <script>b</script>');
+  assert.ok(!html.includes('<img') && !html.includes('<script'), html);
+  assert.ok(html.includes('&lt;img'), html);
+});
+await t('围栏代码块：语言标签 + 复制按钮 + 内容转义', () => {
+  const html = renderMarkdown('```js\nconst a = "<b>";\n```');
+  assert.ok(html.includes('class="code-block"') && html.includes('>js<'), html);
+  assert.ok(html.includes('data-copy'), html);
+  assert.ok(html.includes('&lt;b&gt;'), html);
+});
+await t('未闭合围栏按已解析部分渲染（不吞后续内容）', () => {
+  const html = renderMarkdown('```py\nprint(1)');
+  assert.ok(html.includes('class="code-body"') && html.includes('print(1)'), html);
+});
+await t('表格 / 列表 / 引用 / 标题 / 分割线', () => {
+  const html = renderMarkdown('| a | b |\n|---|---|\n| 1 | 2 |\n\n- x\n- y\n\n> q\n\n## h\n\n---');
+  assert.ok(html.includes('<table>') && html.includes('<th>a</th>') && html.includes('<td>1</td>'), html);
+  assert.ok(html.includes('<ul><li>x</li><li>y</li></ul>'), html);
+  assert.ok(html.includes('<blockquote>'), html);
+  assert.ok(html.includes('<h2>h</h2>') && html.includes('<hr>'), html);
+});
+await t('链接白名单：只有 http(s) 变链接，其它只留文字', () => {
+  const ok = renderMarkdown('见 [站点](https://n.novelia.cc/)');
+  assert.ok(ok.includes('<a href="https://n.novelia.cc/"') && ok.includes('rel="noopener"'), ok);
+  const bad = renderMarkdown('[坏](javascript:alert(1))');
+  assert.ok(!bad.includes('javascript:'), bad);
+  assert.ok(bad.includes('坏'), bad);
+});
+await t('行内：粗体/斜体/行内代码；裸 URL 自动链接且不吞尾标点', () => {
+  const html = renderMarkdown('**粗** *斜* `x<y` 见 https://example.com/a 。');
+  assert.ok(html.includes('<strong>粗</strong>') && html.includes('<em>斜</em>') && html.includes('x&lt;y'), html);
+  assert.ok(html.includes('<a href="https://example.com/a"') && html.includes('https://example.com/a</a> 。'), html);
+});
+await t('/ui 新结构标记：回到底部、空态容器、内联 markdown 实现、消息 class 契约', () => {
+  assert.ok(UI_HTML.includes('id="agent-bottom"'), '回到底部按钮');
+  assert.ok(UI_HTML.includes('class="composer"') && UI_HTML.includes('id="agent-input"'), '输入区');
+  assert.ok(UI_HTML.includes('function renderMarkdown'), 'markdown 实现已内联进页面');
+  assert.ok(UI_HTML.includes("'msg assistant'") && UI_HTML.includes("'tool'") && UI_HTML.includes("'msg system'"), '消息/工具卡 class 契约');
 });const LGG_BOOK = `mock-trans-lg3-${RUN}`;
 store.upsertBook({ key: `web:mock/${LGG_BOOK}`, kind: 'web', providerId: 'mock', novelId: LGG_BOOK, origin: MOCK, title: 'LG GUI 测试' });
 const lgTmp = { exportsDir: path.join(here, '.tmp-lg-exports'), uploadsDir: path.join(here, '.tmp-lg-uploads') };

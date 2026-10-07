@@ -10,6 +10,11 @@ All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 
 - **网络代理（出网）**：控制台设置页新增「网络代理」区块（第八个）——站点 API、翻译池、助手/术语池与 Agent 工作区沙箱脚本的出网统一走本机代理（HTTP 绝对形式 + HTTPS CONNECT 隧道，支持 `user:pass@` 凭据）；**保存即生效**，无需重启（未用 Node 内置 `NODE_USE_ENV_PROXY`——它只在进程启动前解析且首值缓存）；直连列表默认 `127.0.0.1,localhost,::1`（mock/测试零影响，关闭时行为与旧版一致）；「测试」按钮做「直连 / 代理」对比探测（`POST /proxy/test`）；不支持 SOCKS5。
 
+### 控制台 UI
+
+- **助手会话界面重做（OpenWebUI 观感，纯前端）**：消息区 markdown 渲染（标题/列表/引用/表格/围栏代码块 + 语言标签与复制按钮、裸 URL 自动链接、仅 http(s) 成链接）、用户消息 24px 大圆角气泡右对齐 + 助手通栏、每条消息的时间与 token、工具调用折叠卡（状态点 + 参数/结果分区 + 复制）、审批面板结构化预览（原始 payload 可折叠）、「生成中」2px 光标与步数指示、智能跟随滚动 +「回到底部」、空态问候 + 建议提示、侧栏会话相对时间与运行点、窄窗口自适应（≤700px 侧栏收成图标条）；渲染改为按 `seq` 增量 diff（不再每个事件整页重绘，保住滚动位置与展开态）。
+- 实现方式：`renderMarkdown` 等纯函数定义在 `ui.mjs` 模块作用域、经 `${MD_SOURCE}` 内联进页面（避开模板字面量转义陷阱，同时可在 Node 侧单测，daemon-test 新增 7 例）；观感参数（纯灰梯度 / 24px 圆角 / 58rem 列宽 / 2px 光标）参照 OpenWebUI 自行实现，未复制其代码（其许可含品牌条款）；**后端零改动**，既有 DOM 契约（`#agent-*`、`.tool`、`.msg.system`、`.mi/.sel`、行内 display 语义、全局函数名）全部保留。
+
 ### 工具 / 启动
 
 - **启动方式去 vbs、全 PowerShell**：新增仓库根 **`daemon.cmd`**（双击 = 启动：端口没有 daemon 就拉起托盘并等就绪后打开控制台；已在跑只开控制台；另支持 `restart|stop|status|console [端口]`——restart 按端口定位进程，用于换新代码）与 **`daemon/tray.cmd`**（只要托盘），逻辑在 `daemon/launch.ps1` / `tray.ps1`；删除 `daemon/tray.vbs`（双击 .ps1 会被记事本截胡，所以保留一个 .cmd 双击壳）。
