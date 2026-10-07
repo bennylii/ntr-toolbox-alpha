@@ -10,6 +10,11 @@ All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 
 - **网络代理（出网）**：控制台设置页新增「网络代理」区块（第八个）——站点 API、翻译池、助手/术语池与 Agent 工作区沙箱脚本的出网统一走本机代理（HTTP 绝对形式 + HTTPS CONNECT 隧道，支持 `user:pass@` 凭据）；**保存即生效**，无需重启（未用 Node 内置 `NODE_USE_ENV_PROXY`——它只在进程启动前解析且首值缓存）；直连列表默认 `127.0.0.1,localhost,::1`（mock/测试零影响，关闭时行为与旧版一致）；「测试」按钮做「直连 / 代理」对比探测（`POST /proxy/test`）；不支持 SOCKS5。
 
+### 工具 / 启动
+
+- **启动方式去 vbs、全 PowerShell**：新增仓库根 **`daemon.cmd`**（双击 = 启动：端口没有 daemon 就拉起托盘并等就绪后打开控制台；已在跑只开控制台；另支持 `restart|stop|status|console [端口]`——restart 按端口定位进程，用于换新代码）与 **`daemon/tray.cmd`**（只要托盘），逻辑在 `daemon/launch.ps1` / `tray.ps1`；删除 `daemon/tray.vbs`（双击 .ps1 会被记事本截胡，所以保留一个 .cmd 双击壳）。
+- 顺带修掉托盘日志的老问题：日志改为按端口分文件 `daemon/.tray-<端口>.log`——原先共用 `.tray.log` 时 cmd 的 `>>` 独占文件句柄，会导致「已有实例在跑时，另一个端口的实例静默起不来」。
+
 ### 文档 / 仓库
 
 - LinguaGacha 上游源码 junction 挂载到仓库根（`linguagacha/` → `C:\cache\linguagacha`，pin `MANUAL_BUILD_v0.125.0`——spec-06..10 的借鉴出处，另留 `upstream-main` 分支备查；独立仓库不入库）：AGENTS 结构与上手表、README 导航表补行。

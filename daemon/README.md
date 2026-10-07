@@ -62,15 +62,20 @@ node daemon/index.mjs forget    <bookKey>
 
 安全：跨域仅放行 `n.novelia.cc` 与 `127.0.0.1/localhost`（其它 Origin 的写请求与预检直接 403）；服务只监听 127.0.0.1。
 
-### 托盘（Windows，零依赖）
+### 启动 / 托盘（Windows，零依赖，全 PowerShell）
 
-不想留一个终端窗口时，双击 **`daemon\tray.vbs`**（或 `powershell -NoProfile -ExecutionPolicy Bypass -File daemon\tray.ps1`）：托盘区出现蓝色 **N** 图标，daemon 以隐藏进程跑在它手下，控制台照常 <http://127.0.0.1:7331/ui>。
+**一键入口**（双击即用，无 vbs）：
 
-- 菜单：**打开控制台**（双击图标同效）、**状态**（书数 / 已译章数 / 队列 / RSS 气泡）、**打开日志**（`daemon/.tray.log`）、**重启 daemon**、**退出**（一并停掉托盘拉起的 daemon）；
+- 仓库根 **`daemon.cmd`**：双击 = 启动（端口没有 daemon 就拉起托盘并等就绪，然后打开控制台；已在跑则只打开控制台）；也支持 `daemon.cmd restart|stop|status|console [端口]`——`restart` 按端口定位进程后重启（用于换新代码），`status` 打印书数/已译/队列与网络代理状态；
+- **`daemon\tray.cmd`**：只要托盘（静默，无窗口），可选端口参数 `tray.cmd 7331`。
+
+实现都是 PowerShell：`daemon/launch.ps1`（启动/重启/停止/状态）+ `daemon/tray.ps1`（托盘本体）。不想留终端窗口时用它们；托盘区出现蓝色 **N** 图标，daemon 以隐藏进程跑在它手下，控制台照常 <http://127.0.0.1:7331/ui>。
+
+- 菜单：**打开控制台**（双击图标同效）、**状态**（书数 / 已译章数 / 队列 / RSS 气泡）、**打开日志**（`daemon/.tray-<端口>.log`）、**重启 daemon**、**退出**（一并停掉托盘拉起的 daemon）；
 - 启动时若端口已有 daemon 在跑，托盘只接管显示（不持有进程，退出仅关托盘）；daemon 意外退出会弹气泡提醒；
 - 端口：默认跟随 `config.serve.port`（读 `daemon/.serve-port`）；`-Port N` 显式传参可覆盖；
-- 日志：daemon 输出追加到 `daemon/.tray.log`（已被 `*.log` 忽略，需要时手动清）；
-- 开机自启：`Win+R` → `shell:startup` → 放入 `tray.vbs` 的快捷方式；
+- 日志：daemon 输出追加到 `daemon/.tray-<端口>.log`（按端口分文件——cmd 的 `>>` 会独占文件句柄，共用一份会让「另一个端口」的实例起不来；已被 `*.log` 忽略，需要时手动清）；
+- 开机自启：`Win+R` → `shell:startup` → 放入 **`daemon\tray.cmd`** 的快捷方式；
 - 实现是 PowerShell NotifyIcon（WinForms），无 npm 依赖、无编译步骤；测试口：`-TestSpawn`（拉起临时 db 的 daemon → 等就绪 → 杀掉）与 `-SmokeGui N`（只初始化托盘 GUI，N 秒后自退）。
 
 ## 网络代理（出网）

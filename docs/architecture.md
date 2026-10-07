@@ -39,7 +39,7 @@
 ## 2. 进程与目录
 
 - **油猴**：`ntr-toolbox-alpha.user.js` 单文件；dev 构建由 `tools/.gen-dev.mjs` 生成。
-- **daemon**：`daemon/index.mjs` 入口（CLI 子命令 + `serve` 常驻）；`serve` 托管控制面 HTTP、管线、Agent；托盘（`tray.vbs`/`tray.ps1`）可选拉起隐藏进程。
+- **daemon**：`daemon/index.mjs` 入口（CLI 子命令 + `serve` 常驻）；`serve` 托管控制面 HTTP、管线、Agent；启动入口 = 仓库根 `daemon.cmd`（一键：start/restart/stop/status）或 `daemon/tray.cmd`，实现全在 PowerShell（`launch.ps1` / `tray.ps1`），可选拉起隐藏进程。
 - **存储**：一个 SQLite（默认 `daemon/daemon.db`，`--db` 可换）——全部状态可序列化、可续跑；文件系统只有三类产物：`exports/`（LG 导出）、`uploads/`（LG 结果上传）、`work/<sessionId>/`（Agent 工作区，已 gitignore）。
 - **mock**：`mock-llm/server.mjs` 一个进程同时模拟 LLM 上游与站点 API（8788 主车道 / 8790 daemon 车道）。
 - **KeywordGacha 原项目**：`keywordgacha/`（junction → `C:\cache\keywordgacha`，用户 fork 独立 git 仓库，已 gitignore 不入库）——术语管线提示词与轮次收敛的出处，含「分析结果 → auto-novel 术语表」导出。
@@ -125,7 +125,7 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 
 ### 4.11 托盘
 
-`tray.vbs` → `tray.ps1`（PowerShell NotifyIcon，零依赖）：隐藏拉起 daemon（端口自读 `config.serve.port`/`.serve-port`），菜单 = 控制台/状态/日志/重启/退出，意外退出气泡提醒。
+`daemon.cmd` / `tray.cmd` → `launch.ps1` / `tray.ps1`（PowerShell NotifyIcon，零依赖）：一键启动/重启（按端口定位进程）/停止/状态；托盘隐藏拉起 daemon（端口自读 `config.serve.port`/`.serve-port`），菜单 = 控制台/状态/日志/重启/退出，意外退出气泡提醒；日志按端口分文件（`.tray-<端口>.log`）。
 
 ## 5. 控制面 API 速查
 

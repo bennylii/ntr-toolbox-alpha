@@ -1,10 +1,10 @@
 ﻿# daemon/tray.ps1 —— Windows 托盘（零依赖：PowerShell NotifyIcon 托管隐藏的 node daemon）
 # 用法：
-#   双击 daemon\tray.vbs（无窗口启动）；或
+#   双击 daemon\tray.cmd（无窗口启动）；或
 #   powershell -NoProfile -ExecutionPolicy Bypass -File daemon\tray.ps1 [-Port 7331]
 # 菜单：打开控制台（双击图标同效）/ 状态 / 打开日志 / 重启 daemon / 退出
 # 启动时若端口已有 daemon 在跑则「接管显示」（不持有进程，退出只关托盘）；
-# 否则拉起隐藏 node 子进程，stdout/stderr 追加到 daemon\.tray.log。
+# 否则拉起隐藏 node 子进程，stdout/stderr 追加到 daemon\.tray-<端口>.log。
 # 测试口（无 GUI）：
 #   powershell -File daemon\tray.ps1 -TestSpawn -Port 7377   # 拉起(临时db)→等就绪→打印 TEST OK→杀掉
 #   powershell -File daemon\tray.ps1 -SmokeGui 3             # 只初始化托盘 GUI，3 秒后自动退出（不杀已连 daemon）
@@ -15,7 +15,6 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$logFile = Join-Path $repoRoot 'daemon\.tray.log'
 $PortExplicit = ($Port -ge 1)
 
 # 实际端口探测：显式 -Port 优先；否则读 daemon 写的 .serve-port（serve 启动即落盘），缺省 7331
@@ -29,6 +28,10 @@ function Get-ServePort {
 }
 if (-not $PortExplicit) { $Port = Get-ServePort }
 $base = "http://127.0.0.1:$Port"
+# 日志按端口分文件：cmd 的 >> 会独占文件句柄，共用 .tray.log 会让「另一个端口的实例」起不来
+$logFile = Join-Path $repoRoot "daemon\.tray-$Port.log"
+$legacyLogFile = Join-Path $repoRoot 'daemon\.tray.log'
+if (-not (Test-Path $logFile) -and (Test-Path $legacyLogFile)) { Copy-Item $legacyLogFile $logFile -ErrorAction SilentlyContinue }
 
 function Get-Status {
   try { Invoke-RestMethod -Uri "$base/status" -TimeoutSec 2 } catch { $null }
@@ -68,14 +71,17 @@ function Stop-DaemonChild($proc) {
 if ($TestSpawn) {
   if (Get-Status) { Write-Output 'TEST SKIP: port already serving'; exit 0 }
   $tmpDb = 'daemon/.tmp-tray-test.db'
+  $portFile = Join-Path $repoRoot 'daemon\.serve-port'
+  $prevPort = if (Test-Path $portFile) { (Get-Content $portFile -Raw).Trim() } else { $null }   # 测完还原，别把真实端口带偏
   $proc = Start-DaemonChild "--db $tmpDb"
   $ok = Wait-Ready
   $books = -1
   if ($ok) { $s = Get-Status; $books = @($s.books).Count }
   Stop-DaemonChild $proc
+  if ($prevPort) { Set-Content -Path $portFile -Value $prevPort -NoNewline } else { Remove-Item $portFile -ErrorAction SilentlyContinue }
   foreach ($suffix in @('', '-wal', '-shm')) { Remove-Item ($tmpDb + $suffix) -ErrorAction SilentlyContinue }
   if ($ok) { Write-Output "TEST OK: books=$books"; exit 0 }
-  Write-Output 'TEST FAIL: daemon not ready in 20s (see daemon\.tray.log)'
+  Write-Output "TEST FAIL: daemon not ready in 20s (see daemon\.tray-$Port.log)"
   exit 1
 }
 
@@ -133,7 +139,8 @@ $itemStatus.add_Click({
 $itemLog = New-Object System.Windows.Forms.ToolStripMenuItem ('打开日志')
 $itemLog.add_Click({
   if (Test-Path $logFile) { Start-Process notepad.exe $logFile }
-  else { Balloon 'ntr daemon' '暂无日志（daemon\.tray.log 还没生成）' }
+  elseif (Test-Path $legacyLogFile) { Start-Process notepad.exe $legacyLogFile }
+  else { Balloon 'ntr daemon' '暂无日志（daemon\.tray-<端口>.log 还没生成）' }
 })
 [void]$menu.Items.Add($itemLog)
 
@@ -181,7 +188,7 @@ if (Get-Status) {
 } else {
   $state.Proc = Start-DaemonChild ''
   if (Wait-Ready) { Balloon 'ntr daemon' "daemon 已启动（端口 $Port），控制台 http://127.0.0.1:$Port/ui" }
-  else { Balloon 'ntr daemon' 'daemon 启动 20s 未就绪，详见 daemon\.tray.log' ([System.Windows.Forms.ToolTipIcon]::Error) }
+  else { Balloon 'ntr daemon' "daemon 启动 20s 未就绪，详见 daemon\.tray-$Port.log" ([System.Windows.Forms.ToolTipIcon]::Error) }
 }
 
 if ($SmokeGui -gt 0) {

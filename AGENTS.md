@@ -48,7 +48,7 @@ agent-tools.mjs / -read / -write / -lg       工具（doing/ask_user；只读；
 agent-workspace.mjs / workspace-bootstrap.mjs  CodeAct 沙箱工作区（workspace_run / workspace_apply）
 agent-skills.mjs                             技能目录（skills/ 包发现与读取）
 ---- 其它 ----
-tray.vbs / tray.ps1           Windows 托盘（隐藏运行 daemon）
+daemon.cmd（仓库根）/ daemon/tray.cmd   Windows 双击入口：一键启动/重启/停止/状态（逻辑在 launch.ps1 + tray.ps1，无 vbs）
 proxy.mjs                     出网代理（HTTP 绝对形式 + HTTPS CONNECT；站点 API/双池/沙箱统一收口，保存即生效）
 version.mjs                   daemon 版本（/ping 与 CHANGELOG/tag 对齐）
 README.md                     使用说明（命令/控制台/托盘/各专项）
@@ -63,7 +63,7 @@ README.md                     使用说明（命令/控制台/托盘/各专项�
 | 改油猴功能 | `ntr-toolbox-alpha.user.js` → `tools/.gen-dev.mjs` → `tools/engine-test.mjs` + 相关 `.e2e-*` |
 | 改 daemon 功能 | `daemon/index.mjs` + 对应模块 → `daemon/daemon-test.mjs`（先起 8790 mock） |
 | 找某个行为的规格 | `docs/cleanroom/spec-01..13` |
-| 日常使用 / 命令 / 控制台 | `daemon/README.md`；控制台 <http://127.0.0.1:7331/ui>（托盘 `daemon/tray.vbs`） |
+| 日常使用 / 命令 / 控制台 | `daemon/README.md`；控制台 <http://127.0.0.1:7331/ui>；双击仓库根 `daemon.cmd` 一键启动（`daemon.cmd restart` 换代码），或 `daemon/tray.cmd` 只起托盘 |
 | 查版本 / 发布 | `CHANGELOG.md`；发布流程见下方「交付流程」 |
 | KeywordGacha 上游（术语管线的出处，含 auto-novel 术语表导出） | `keywordgacha/`（junction 挂载的独立 fork 仓库，不入本库） |
 | LinguaGacha 上游（调度/质检/处理链/提示词/LG 互通的借鉴出处） | `linguagacha/`（junction 挂载，pin `MANUAL_BUILD_v0.125.0`——spec-06..10 引用的就是这一版；源码在 `src/` 下） |
@@ -79,7 +79,7 @@ node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8788/wenku/mock-sr
 node tools/cdp.mjs open <url> | inject | evalf <file> | shot <png> | logs   # 直接操作浏览器（CDP_PORT 环境变量换端口）
 
 # daemon（详见 daemon/README.md）：
-node daemon/index.mjs serve --port 7331      # 控制台 /ui + 控制面（或双击托盘 daemon/tray.vbs）
+node daemon/index.mjs serve --port 7331      # 控制台 /ui + 控制面（或双击仓库根 daemon.cmd / daemon\tray.cmd）
 PORT=8790 node mock-llm/server.mjs           # daemon 测试车道 mock（8790）
 node daemon/daemon-test.mjs                  # daemon 冒烟（需 8790 mock）
 node daemon/quality-test.mjs                 # 等纯函数套件（quality/translate/processors/prompt/glossary-io/lg-align/agent*，无需 mock）
