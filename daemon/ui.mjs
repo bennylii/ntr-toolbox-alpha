@@ -121,11 +121,15 @@ export const UI_HTML = `<!doctype html>
     --muted: #5a5a5a;       /* 次要文字（经典 GrayText 在正文里偏浅，折中取深一档） */
     --faint: #808080;       /* 禁用/最弱 */
     --line: #808080;        /* 边框（ButtonShadow） */
-    --title: #000080;       /* 标题栏 / 选中高亮（ActiveTitle） */
-    --title-a: #0a246a;     /* VB6 / Office97 经典蓝渐变：上端深蓝 */
+    --title: #000080;       /* 纯 navy（保留备用；高亮已统一走 --hl） */
+    --title-a: #0a246a;     /* VB6 / Office97 经典蓝渐变（窗口标题栏）：上端深蓝 */
     --title-b: #a6caf0;     /* …下端浅蓝 */
     --title-fg: #ffffff;
-    --desk: #3a6ea5;        /* 经典蓝桌面底（Win2000 经典主题的桌面色） */
+    --desk: #008080;        /* Win9x 青蓝：桌面底 + 侧栏底 */
+    --hl: #005f5f;          /* 悬停 / 选中高亮（青蓝加深，白字） */
+    --hl-soft: #cfeeee;     /* 浅青：浅底高亮（表格行 hover 等） */
+    --brand-a: #006464;     /* 侧栏页眉青蓝渐变 */
+    --brand-b: #12a3a3;
     --link: #0000ff;
     --ok: #006400; --bad: #800000; --warn: #7a5c00;
     --info: #ffffe1;        /* 经典提示条 InfoWindow */
@@ -147,35 +151,38 @@ export const UI_HTML = `<!doctype html>
   ::-webkit-scrollbar-thumb:hover { background: var(--face-hi); }
   ::-webkit-scrollbar-corner { background: var(--face); }
 
-  /* ---- 侧栏（灰面 + 经典反色高亮） ---- */
-  .side { width: 240px; min-width: 240px; background: var(--face); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
-  .brand { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-weight: 700; font-size: 12.5px; background: linear-gradient(180deg, var(--title-a) 0%, var(--title-a) 62%, var(--title-b) 100%); color: var(--title-fg); text-shadow: 0 1px 1px rgba(0,0,0,.5); }
-  .brand .logo { width: 18px; height: 18px; background: var(--face); color: var(--title); display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; border: 1px solid var(--title-fg); flex: 0 0 auto; }
+  /* ---- 侧栏（青蓝底 + 加深高亮） ---- */
+  .side { width: 240px; min-width: 240px; background: var(--desk); color: #ffffff; border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+  .brand { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-weight: 700; font-size: 12.5px; background: linear-gradient(180deg, var(--brand-a) 0%, var(--brand-a) 62%, var(--brand-b) 100%); color: var(--title-fg); text-shadow: 0 1px 1px rgba(0,0,0,.5); }
+  .brand .logo { width: 18px; height: 18px; background: var(--face); color: var(--brand-a); display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; border: 1px solid var(--title-fg); flex: 0 0 auto; }
   .side nav { display: flex; flex-direction: column; padding: 4px; }
-  .side nav button { all: unset; cursor: pointer; padding: 4px 8px; color: var(--text); font-size: 12.5px; display: flex; align-items: center; gap: 7px; }
-  .side nav button:hover, .side nav button.active { background: var(--title); color: var(--title-fg); }
-  .side nav button:focus-visible { outline: 1px dotted var(--text); outline-offset: -3px; }
+  .side nav button { all: unset; cursor: pointer; padding: 4px 8px; color: #ffffff; font-size: 12.5px; display: flex; align-items: center; gap: 7px; }
+  .side nav button:hover, .side nav button.active { background: var(--hl); color: #ffffff; }
+  .side nav button:focus-visible { outline: 1px dotted #ffffff; outline-offset: -3px; }
   .side nav button .ico { width: 16px; text-align: center; font-family: "Segoe MDL2 Assets"; font-size: 13px; flex: 0 0 auto; }
-  .side .divider { height: 0; border-top: 1px solid var(--line); border-bottom: 1px solid #dcdcdc; margin: 6px 4px; }
-  .side .side-title { padding: 2px 8px 4px; font-size: 11px; color: var(--muted); }
+  .side .divider { height: 0; border-top: 1px solid var(--hl); border-bottom: 1px solid var(--brand-b); margin: 6px 4px; }
+  .side .side-title { padding: 2px 8px 4px; font-size: 11px; color: #cfeeee; }
+  .side .muted { color: #cfeeee; }
   #side-sessions { flex: 1; overflow-y: auto; padding: 0 4px 6px; }
-  .sess-row { cursor: pointer; display: flex; align-items: center; gap: 4px; padding: 3px 6px; font-size: 12px; color: var(--text); }
-  .sess-row:hover, .sess-row.active { background: var(--title); color: var(--title-fg); }
-  .sess-row .sess-when { color: var(--faint); font-size: 10.5px; flex: 0 0 auto; }
-  .sess-row:hover .sess-when, .sess-row.active .sess-when { color: #d8d8ff; }
-  .sess-row .sess-dot { width: 6px; height: 6px; background: var(--ok); flex: 0 0 auto; }
+  .sess-row { cursor: pointer; display: flex; align-items: center; gap: 4px; padding: 3px 6px; font-size: 12px; color: #ffffff; }
+  .sess-row:hover, .sess-row.active { background: var(--hl); color: #ffffff; }
+  .sess-row .sess-when { color: #bfe4e4; font-size: 10.5px; flex: 0 0 auto; }
+  .sess-row:hover .sess-when, .sess-row.active .sess-when { color: #d8f4f4; }
+  .sess-row .sess-dot { width: 6px; height: 6px; background: #7dfb7d; flex: 0 0 auto; }
   .sess-row .sess-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sess-ops { display: none; gap: 1px; flex: 0 0 auto; }
   .sess-row:hover .sess-ops, .sess-row.active .sess-ops { display: flex; }
-  .sess-ops .icon-btn { font-size: 11px; padding: 0 4px; }
-  .sess-group { padding: 6px 8px 2px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .side-foot { padding: 3px 8px; border-top: 1px solid var(--line); font-size: 11px; color: var(--text); background: var(--face); }
+  .sess-ops .icon-btn { font-size: 11px; padding: 0 4px; color: #ffffff; }
+  .sess-ops .icon-btn:hover { background: rgba(255,255,255,.18); border-color: #ffffff; color: #ffffff; }
+  .sess-group { padding: 6px 8px 2px; font-size: 11px; color: #a8dede; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .side-foot { padding: 3px 8px; border-top: 1px solid var(--hl); font-size: 11px; color: #ffffff; background: var(--desk); }
 
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   .topbar { display: flex; align-items: center; gap: 12px; height: var(--topbar-h); padding: 0 8px; background: linear-gradient(180deg, var(--title-a) 0%, var(--title-a) 62%, var(--title-b) 100%); color: var(--title-fg); }
   .topbar h1 { font-size: 12.5px; margin: 0; font-weight: 700; text-shadow: 0 1px 1px rgba(0,0,0,.45); }
   .topbar .hdr { margin-left: auto; font-size: 11px; color: #f0f6ff; text-shadow: 0 1px 1px rgba(0,0,0,.45); }
-  .content { flex: 1; overflow-y: auto; padding: 10px 12px 40px; background: var(--desk); }
+  /* 页面滚动容器；注意限定 .main > —— 助手消息正文也用 class="content"，别串味 */
+  .main > .content { flex: 1; overflow-y: auto; padding: 10px 12px 40px; background: var(--desk); }
   .page { max-width: 980px; margin: 0 auto; display: none; }
   .page.active { display: block; }
   /* 直接落在蓝桌面上的说明行：套一层灰底，避免灰字压在蓝底上看不清 */
@@ -183,9 +190,9 @@ export const UI_HTML = `<!doctype html>
 
   /* ---- 表单与通用控件（1px 描边 + 白底字段；无圆角） ---- */
   .proj-card { border: 1px solid var(--line); background: var(--window); padding: 6px 8px; margin: 6px 0; cursor: pointer; }
-  .proj-card:hover { background: #f4f4ff; }
-  .proj-card.current { border-color: var(--title); }
-  .proj-card.current > div:first-child { background: var(--title); color: var(--title-fg); margin: -6px -8px 4px; padding: 2px 8px; }
+  .proj-card:hover { background: #e6f6f6; }
+  .proj-card.current { border-color: var(--hl); }
+  .proj-card.current > div:first-child { background: var(--hl); color: var(--title-fg); margin: -6px -8px 4px; padding: 2px 8px; }
   .proj-actions { margin-top: 6px; display: flex; gap: 4px; flex-wrap: wrap; }
   .proj-detail { margin-top: 6px; border-top: 1px solid var(--line); padding-top: 6px; font-size: 12px; cursor: default; }
   .proj-detail table { font-size: 11.5px; }
@@ -193,7 +200,7 @@ export const UI_HTML = `<!doctype html>
   legend { font-size: 11.5px; padding: 0 4px; background: var(--face); color: var(--text); font-weight: 700; }
   label { display: inline-flex; gap: 5px; align-items: center; margin: 3px 12px 3px 0; }
   input[type=text], input[type=number], input[type=password], textarea, select { background: var(--window); color: var(--text); border: 1px solid var(--line); padding: 2px 4px; font: inherit; }
-  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--title); }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--hl); }
   input[type=number] { width: 84px; }
   textarea { width: 100%; min-height: 72px; }
   .btn { background: var(--face); border: 1px solid var(--line); color: var(--text); padding: 2px 10px; min-height: 22px; cursor: pointer; font: inherit; }
@@ -201,13 +208,13 @@ export const UI_HTML = `<!doctype html>
   .btn:active { background: var(--face-lo); }
   .btn:focus-visible { outline: 1px dotted var(--text); outline-offset: -3px; }
   .btn.danger { color: var(--bad); }
-  .btn.primary { background: var(--title); border-color: var(--title); color: var(--title-fg); }
-  .btn.primary:hover { background: #0000a0; }
+  .btn.primary { background: var(--hl); border-color: var(--hl); color: var(--title-fg); }
+  .btn.primary:hover { background: #007a7a; }
   .btn:disabled { color: var(--faint); cursor: default; background: var(--face); }
   table { width: 100%; border-collapse: collapse; font-size: 12px; background: var(--window); }
   th, td { text-align: left; border: 1px solid var(--line); padding: 3px 6px; vertical-align: top; }
   th { background: var(--face); font-weight: 700; }
-  tr:hover > td { background: #e8e8f8; }
+  tr:hover > td { background: var(--hl-soft); }
   .muted { color: var(--muted); font-size: 11.5px; }
   .ico-mdl { font-family: "Segoe MDL2 Assets"; font-style: normal; }
   .ok { color: var(--ok); } .bad { color: var(--bad); }
@@ -225,7 +232,7 @@ export const UI_HTML = `<!doctype html>
   .chat > * { width: 100%; max-width: var(--col); margin-left: auto; margin-right: auto; }
   .msg { display: flex; gap: 6px; }
   .msg.user { justify-content: flex-end; align-items: flex-start; }
-  .msg.user .bubble { background: #e8e8f8; border: 1px solid var(--line); padding: 4px 8px; max-width: 78%; word-break: break-word; }
+  .msg.user .bubble { background: #d6efef; border: 1px solid var(--line); padding: 4px 8px; max-width: 78%; word-break: break-word; }
   .msg.assistant { flex-direction: column; gap: 4px; }
   .msg.assistant .content { word-break: break-word; }
   .msg.system { color: var(--muted); font-size: 11.5px; white-space: pre-wrap; }
@@ -292,7 +299,7 @@ export const UI_HTML = `<!doctype html>
   /* 输入区（白底字段 + 灰色发送键） */
   .composer-wrap { position: relative; border-top: 1px solid var(--line); padding: 6px 8px 8px; }
   .composer { max-width: var(--col); margin: 0 auto; display: flex; gap: 6px; align-items: flex-end; background: var(--window); border: 1px solid var(--line); padding: 3px 3px 3px 6px; }
-  .composer:focus-within { border-color: var(--title); }
+  .composer:focus-within { border-color: var(--hl); }
   .composer textarea { flex: 1; resize: none; border: 0; background: transparent; padding: 3px 0; min-height: 24px; max-height: 200px; overflow-y: auto; }
   .composer textarea:focus { border-color: transparent; }
   .composer .send { all: unset; cursor: pointer; flex: 0 0 auto; width: 26px; height: 24px; background: var(--face); border: 1px solid var(--line); color: var(--text); display: flex; align-items: center; justify-content: center; font-size: 12px; font-family: "Segoe MDL2 Assets"; }
@@ -308,12 +315,12 @@ export const UI_HTML = `<!doctype html>
   .empty-hero p { margin: 0; color: var(--muted); font-size: 12px; }
   .suggest { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; max-width: 620px; margin-top: 4px; }
   .sug { cursor: pointer; border: 1px solid var(--line); background: var(--face); color: var(--text); padding: 2px 8px; font: inherit; font-size: 11.5px; }
-  .sug:hover { background: var(--title); color: var(--title-fg); }
+  .sug:hover { background: var(--hl); color: var(--title-fg); }
 
   /* @技能 / /命令 候选（.mi/.sel 为 e2e 契约） */
   .mention { position: absolute; bottom: 100%; left: 8px; right: 8px; max-width: var(--col); margin: 0 auto 4px; max-height: 240px; overflow: auto; background: var(--window); border: 1px solid var(--line); z-index: 7; }
   .mention .mi { padding: 3px 6px; font-size: 12px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .mention .mi.sel, .mention .mi:hover { background: var(--title); color: var(--title-fg); }
+  .mention .mi.sel, .mention .mi:hover { background: var(--hl); color: var(--title-fg); }
   .syseditor { border: 1px solid var(--line); background: var(--face); padding: 6px 8px; margin: 6px auto 0; max-width: var(--col); }
   .syseditor textarea { min-height: 60px; }
   #toast { position: fixed; right: 12px; bottom: 12px; background: var(--info); border: 1px solid var(--text); color: var(--text); padding: 4px 10px; opacity: 0; transition: opacity .15s; pointer-events: none; max-width: 60vw; z-index: 9; font-size: 12px; }
@@ -323,7 +330,7 @@ export const UI_HTML = `<!doctype html>
   /* ---- 窄窗口自适应（半屏/小窗；超窄时侧栏只留图标） ---- */
   @media (max-width: 900px) {
     .side { width: 190px; min-width: 190px; }
-    .content { padding: 8px 8px 30px; }
+    .main > .content { padding: 8px 8px 30px; }
   }
   @media (max-width: 700px) {
     ::-webkit-scrollbar { width: 10px; height: 10px; }
