@@ -122,12 +122,12 @@ export const UI_HTML = `<!doctype html>
     --faint: #808080;       /* 禁用/最弱 */
     --line: #808080;        /* 边框（ButtonShadow） */
     --title: #000080;       /* 纯 navy（保留备用；高亮已统一走 --hl） */
-    --title-a: #004f4f;     /* 青蓝渐变（窗口标题栏 + 侧栏页眉）：上端深青 */
-    --title-b: #2f9d9d;     /* …下端浅青 */
+    --title-a: #0a246a;     /* VB6 / Office97 经典蓝渐变（窗口标题栏 + 侧栏页眉）：上端深蓝 */
+    --title-b: #a6caf0;     /* …下端浅蓝 */
     --title-fg: #ffffff;
-    --desk: #008080;        /* Win9x 青蓝（仅在窗口缝隙/装饰处露面，不做大面积底色） */
-    --hl: #005f5f;          /* 悬停 / 选中高亮（青蓝加深，白字） */
-    --hl-soft: #cfeeee;     /* 浅青：浅底高亮（表格行 hover 等） */
+    --desk: #3a6ea5;        /* 经典蓝（只做装饰性底/缝隙用，不做大面积底色） */
+    --hl: #000080;          /* 悬停 / 选中高亮（经典 ActiveTitle 藏青，白字） */
+    --hl-soft: #d6e2f5;     /* 浅蓝：浅底高亮（表格行 hover 等） */
     --link: #0000ff;
     --ok: #006400; --bad: #800000; --warn: #7a5c00;
     --info: #ffffe1;        /* 经典提示条 InfoWindow */
@@ -164,8 +164,9 @@ export const UI_HTML = `<!doctype html>
   .sess-row { cursor: pointer; display: flex; align-items: center; gap: 4px; padding: 3px 6px; font-size: 12px; color: var(--text); }
   .sess-row:hover, .sess-row.active { background: var(--hl); color: #ffffff; }
   .sess-row .sess-when { color: var(--faint); font-size: 10.5px; flex: 0 0 auto; }
-  .sess-row:hover .sess-when, .sess-row.active .sess-when { color: #d8f4f4; }
-  .sess-row .sess-dot { width: 6px; height: 6px; background: #1f8b1f; flex: 0 0 auto; }
+  .sess-row:hover .sess-when, .sess-row.active .sess-when { color: #c8d4f0; }
+  .sess-row .sess-dot { width: 6px; height: 6px; background: #0000c8; flex: 0 0 auto; }
+  .sess-row:hover .sess-dot, .sess-row.active .sess-dot { background: #9ad0ff; }
   .sess-row .sess-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sess-ops { display: none; gap: 1px; flex: 0 0 auto; }
   .sess-row:hover .sess-ops, .sess-row.active .sess-ops { display: flex; }
@@ -191,7 +192,7 @@ export const UI_HTML = `<!doctype html>
 
   /* ---- 表单与通用控件（1px 描边 + 白底字段；无圆角） ---- */
   .proj-card { border: 1px solid var(--line); background: var(--window); padding: 6px 8px; margin: 6px 0; cursor: pointer; }
-  .proj-card:hover { background: #e6f6f6; }
+  .proj-card:hover { background: #eef2fc; }
   .proj-card.current { border-color: var(--hl); }
   .proj-card.current > div:first-child { background: var(--hl); color: var(--title-fg); margin: -6px -8px 4px; padding: 2px 8px; }
   .proj-actions { margin-top: 6px; display: flex; gap: 4px; flex-wrap: wrap; }
@@ -235,7 +236,7 @@ export const UI_HTML = `<!doctype html>
   .chat > * { width: 100%; max-width: var(--col); margin-left: auto; margin-right: auto; }
   .msg { display: flex; gap: 6px; }
   .msg.user { justify-content: flex-end; align-items: flex-start; }
-  .msg.user .bubble { background: #d6efef; border: 1px solid var(--line); padding: 4px 8px; max-width: 78%; word-break: break-word; }
+  .msg.user .bubble { background: #dbe4f8; border: 1px solid var(--line); padding: 4px 8px; max-width: 78%; word-break: break-word; }
   .msg.assistant { flex-direction: column; gap: 4px; }
   .msg.assistant .content { word-break: break-word; }
   .msg.system { color: var(--muted); font-size: 11.5px; white-space: pre-wrap; }
