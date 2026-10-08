@@ -179,8 +179,9 @@ export const UI_HTML = `<!doctype html>
   .topbar { display: flex; align-items: center; gap: 12px; height: var(--topbar-h); padding: 0 8px; background: linear-gradient(180deg, var(--title-a) 0%, var(--title-a) 62%, var(--title-b) 100%); color: var(--title-fg); }
   .topbar h1 { font-size: 12.5px; margin: 0; font-weight: 700; text-shadow: 0 1px 1px rgba(0,0,0,.45); }
   .topbar .hdr { margin-left: auto; font-size: 11px; color: #f0f6ff; text-shadow: 0 1px 1px rgba(0,0,0,.45); }
-  /* 页面滚动容器；注意限定 .main > —— 助手消息正文也用 class="content"，别串味 */
-  .main > .content { flex: 1; overflow-y: auto; padding: 10px 12px 40px; background: var(--face); scrollbar-gutter: stable; }
+  /* 页面滚动容器；注意限定 .main > —— 助手消息正文也用 class="content"，别串味。
+     both-edges：滚动条两侧对称预留，980px 的页面列在有无滚动条时都相对窗口居中（否则右边多 16px 死区、页面左偏 8px） */
+  .main > .content { flex: 1; overflow-y: auto; padding: 10px 12px 40px; background: var(--face); scrollbar-gutter: stable both-edges; }
   /* 助手页：内容区让开内边距、滚动条与滚动条占位，交给助手页自己填满 */
   .main > .content.agent-active { padding: 0; overflow: hidden; scrollbar-gutter: auto; }
   .page { max-width: 980px; margin: 0 auto; display: none; }
@@ -228,7 +229,9 @@ export const UI_HTML = `<!doctype html>
   .agent-top .spacer { flex: 1; }
   .agent-title { font-size: 12px; font-weight: 700; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chat-wrap { position: relative; flex: 1; min-height: 0; display: flex; padding: 6px 8px 0; background: var(--face); }
-  .chat { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; background: var(--window); border: 1px solid var(--line); }
+  /* both-edges：聊天区滚动条两侧对称预留，消息列才与窗口外的输入框/进度/审批面板永久对齐
+     （否则滚动条一出现，居中的 928px 消息列就左移半个滚动条宽，输入框相对它右凸 8px） */
+  .chat { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; background: var(--window); border: 1px solid var(--line); scrollbar-gutter: stable both-edges; }
   .chat > * { width: 100%; max-width: var(--col); margin-left: auto; margin-right: auto; }
   .msg { display: flex; gap: 6px; }
   .msg.user { justify-content: flex-end; align-items: flex-start; }
