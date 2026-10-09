@@ -45,6 +45,7 @@ All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 
 ### 工具 / 启动
 
+- **托盘不再叠加**（修掉「反复重启后托盘出现两个 7331 实例」）：`daemon.cmd start` 只在没有托盘时拉起（daemon 没跑但有残留托盘时先清理再拉，保证唯一）；`restart` 先清旧托盘再换新 daemon；`stop` 连托盘一起收。四种边界实测：在跑时 start 不新增、restart 后仍 1 个、stop 后托盘归零、干净 start 恰好 1 托盘 + 1 daemon。
 - **启动方式去 vbs、全 PowerShell**：新增仓库根 **`daemon.cmd`**（双击 = 启动：端口没有 daemon 就拉起托盘并等就绪后打开控制台；已在跑只开控制台；另支持 `restart|stop|status|console [端口]`——restart 按端口定位进程，用于换新代码）与 **`daemon/tray.cmd`**（只要托盘），逻辑在 `daemon/launch.ps1` / `tray.ps1`；删除 `daemon/tray.vbs`（双击 .ps1 会被记事本截胡，所以保留一个 .cmd 双击壳）。
 - 顺带修掉托盘日志的老问题：日志改为按端口分文件 `daemon/.tray-<端口>.log`——原先共用 `.tray.log` 时 cmd 的 `>>` 独占文件句柄，会导致「已有实例在跑时，另一个端口的实例静默起不来」。
 

@@ -72,6 +72,7 @@ node daemon/index.mjs forget    <bookKey>
 
 - 仓库根 **`daemon.cmd`**：双击 = 启动（端口没有 daemon 就拉起托盘并等就绪，然后打开控制台；已在跑则只打开控制台）；也支持 `daemon.cmd restart|stop|status|console [端口]`——`restart` 按端口定位进程后重启（用于换新代码），`status` 打印书数/已译/队列与网络代理状态；
 - **`daemon\tray.cmd`**：只要托盘（静默，无窗口），可选端口参数 `tray.cmd 7331`。
+- **托盘唯一（不叠加）**：`start` 只在没有托盘时拉起（daemon 没跑但有残留托盘时，先清掉再拉一个，保证最后一个托盘一定管着新 daemon）；`restart` 先清旧托盘再换新 daemon；`stop` 连托盘一起收。所以反复 `daemon.cmd restart` 不会出现「托盘里两个 7331 实例」。
 
 实现都是 PowerShell：`daemon/launch.ps1`（启动/重启/停止/状态）+ `daemon/tray.ps1`（托盘本体）。不想留终端窗口时用它们；托盘区出现蓝色 **N** 图标，daemon 以隐藏进程跑在它手下，控制台照常 <http://127.0.0.1:7331/ui>。
 

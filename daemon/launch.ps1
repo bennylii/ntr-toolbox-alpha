@@ -60,6 +60,23 @@ function Start-Tray([int]$p) {
   ) | Out-Null
 }
 
+# 已有的托盘进程（避免重复拉起：start 发现已有托盘就不再拉；restart 先全部清掉再拉一个）
+function Get-TrayPids {
+  try {
+    return @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
+      Where-Object { $_.CommandLine -like '*tray.ps1*' } |
+      ForEach-Object { [int]$_.ProcessId })
+  } catch { return @() }
+}
+
+function Stop-Trays {
+  $killed = 0
+  foreach ($tpid in (Get-TrayPids)) {
+    try { Stop-Process -Id $tpid -Force; $killed += 1 } catch { }
+  }
+  return $killed
+}
+
 function Open-Console([int]$p) {
   $url = "http://127.0.0.1:$p/ui"
   if ($NoBrowser) { Write-Output "控制台：$url"; return }
@@ -87,13 +104,19 @@ switch ($Action) {
   }
   'console' { Open-Console $port; exit 0 }
   'stop' {
+    $killedTrays = Stop-Trays
     $procId = Get-DaemonPid $port
-    if ($procId -eq 0) { Write-Output "端口 $port 上没有 daemon 在跑"; exit 0 }
+    if ($procId -eq 0) {
+      if ($killedTrays -gt 0) { Write-Output "托盘已清理 ×$killedTrays（端口 $port 上没有 daemon 在跑）"; exit 0 }
+      Write-Output "端口 $port 上没有 daemon 在跑"; exit 0
+    }
     & cmd /c taskkill /PID $procId /T /F | Out-Null
-    Write-Output "已停止 daemon（端口 $port，PID $procId）"
+    Write-Output "已停止 daemon（端口 $port，PID $procId）$(if ($killedTrays -gt 0) { "与托盘 ×$killedTrays" })"
     exit 0
   }
   'restart' {
+    $killedTrays = Stop-Trays   # 旧托盘绑的是旧 daemon：先清掉，避免托盘越重越多
+    if ($killedTrays -gt 0) { Write-Output "已清理旧托盘 ×$killedTrays" }
     $procId = Get-DaemonPid $port
     if ($procId -ne 0) {
       & cmd /c taskkill /PID $procId /T /F | Out-Null
@@ -111,7 +134,14 @@ switch ($Action) {
       Open-Console $port
       exit 0
     }
-    Start-Tray $port
+    if ((Get-TrayPids).Count -eq 0) {
+      Start-Tray $port
+    } else {
+      # 有残留托盘但 daemon 没起来：托盘不会自己重启，清掉重拉一个，保证最后一个托盘一定管着新 daemon
+      $killed = Stop-Trays
+      Write-Output "已有托盘在跑但 daemon 未运行：清理旧托盘 ×$killed 后重新拉起"
+      Start-Tray $port
+    }
     if (Wait-Ready $port) { Write-Output "daemon 已启动（端口 $port）"; Open-Console $port; exit 0 }
     Write-Output "daemon 30s 未就绪，详见 daemon\.tray-$port.log"
     exit 1
