@@ -41,7 +41,7 @@ node daemon/index.mjs forget    <bookKey>
 - **端口**：设置页「连接」区改默认端口（**重启生效**）；托盘 `tray.ps1` 默认不传 `--port`（自读 config），`Wait-Ready` 跟随 `.serve-port`；显式 `-Port N` 仍可覆盖；
 - **`GET /ping`**：无需凭据，返回 `{ ok, name, port, version }`——油猴角标与外部脚本探测用（带 CORS，走同一白名单）；
 - **同步来源**：`POST /auth` 记录 `lastSync { at, origin, UA 摘要, workersCount, mode: auto|manual }`（只记元数据不记 token）→ `/status` 与设置页「连接」区可见（自动/手动）——多浏览器推送时一眼分辨是谁在生效；**油猴「Daemon 连接」开启「自动同步」（默认开）后**：页面加载即自动推送，站内 token 刷新后 ≤5s 自动重推（指纹去重，无变化零请求），不再需要手动点；daemon 报 401（need-auth）时页面开着即可自愈；
-- **从站点同步（控制台按钮）**：设置页「站点与凭据」的「从站点同步」→ `POST /auth/request` 置一条同步请求（5 分钟过期）→ 油猴在 ≤5s 的 daemon 探测里从 `/ping.pendingAuth` 看到标志，**绕过指纹去重**立即推一次凭据 → daemon 收到 `/auth` 清位；按钮会在 35s 内等推送到达并回报结果（前提：站点页面开着且已登录——token 只在站点页面 localStorage 里）；
+- **从站点同步（控制台按钮）**：设置页「站点与凭据」的「从站点同步」→ `POST /auth/request` 置一条同步请求（5 分钟过期）→ 油猴在 ≤5s 的 daemon 探测里从 `/ping.pendingAuth` 看到标志，**绕过指纹去重**立即推一次凭据 → daemon 收到 `/auth` 清位；按钮会在 35s 内等推送到达并回报结果（前提：站点页面开着且已登录——token 只在站点页面 localStorage 里；**日常浏览器里的用户脚本也要更新到含此功能的版本并刷新页面**，测试 profile 里装的不算）；
 - **跨域白名单**：内置默认 `n.novelia.cc` + `127.0.0.1/localhost`（不可移除）；设置页「连接」区可加附加条目（hostname 或 origin，即时生效）。
 
 ## 控制台（设置 GUI）

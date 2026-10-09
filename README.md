@@ -37,7 +37,11 @@
 ## 安装
 
 1. 安装 Tampermonkey。
-2. 安装 `ntr-toolbox-alpha.user.js`（或 `ntr-toolbox-alpha.dev.user.js`，开发构建：`@version` 带 `-dev` 后缀、无更新 URL）。
+2. 装脚本，三选一：
+   - 直接装仓库里的 `ntr-toolbox-alpha.user.js`（正式构建）；
+   - 走本地 mock 装（**需先起 mock**：`node mock-llm/server.mjs`）：浏览 <http://127.0.0.1:8788/ntr-toolbox-alpha.user.js>（mock 会把主文件的 `@updateURL/@downloadURL` 就地注释，防止装完被自动更新顶掉）；
+   - 开发构建：`node tools/.gen-dev.mjs` 生成后装 <http://127.0.0.1:8788/ntr-toolbox-alpha.dev.user.js>（`@version` 带 `-dev` 后缀、无更新地址）。
+3. 脚本头**没有** `@updateURL/@downloadURL` → **Tampermonkey 不会自动更新**：拿到新代码要重新打开对应 URL 装一次，并在站点页面**刷新**后才生效（测试 profile 里重装 ≠ 你日常浏览器里也更新了，两边各自要装）。
 
 ## 开发
 
