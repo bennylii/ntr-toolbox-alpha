@@ -8322,13 +8322,13 @@
             }, 10);
         }
 
-        // 「Daemon 连接」行尾角标：探测 {base}/ping，30s 节流（无常驻心跳压力）
-        // 同一 tick 顺带做「凭据自动同步」：自动同步开 + 在线 + 指纹（token+workers+origin）变化才推送
+        // 「Daemon 连接」行尾角标：探测 {base}/ping，5s 节流（本机回环、免凭据，代价可忽略）
+        // 同一 tick 顺带做「凭据自动同步」：自动同步开 + 在线 +（指纹变化 或 控制台请求了同步）才推送
         refreshDaemonGlance(force) {
             const el = this.daemonGlanceEl;
             if (!el) return;
             const now = Date.now();
-            if (!force && now - (this._lastDaemonPing || 0) < 30000) return;
+            if (!force && now - (this._lastDaemonPing || 0) < 5000) return;
             this._lastDaemonPing = now;
             const mod = this.configuration.modules.find((m) => m.name === 'Daemon 连接');
             const base = mod ? (getModuleSetting(mod, 'Daemon 地址') || '').trim().replace(/\/$/, '') : '';
@@ -8344,7 +8344,7 @@
                     el.textContent = '|在线|';
                     el.classList.add('busy');
                     el.classList.remove('has');
-                    this.daemonAutoSync(mod);
+                    this.daemonAutoSync(mod, { force: ping.pendingAuth === true });
                 } else {
                     el.textContent = '|离线|';
                     el.classList.remove('busy');
@@ -8353,8 +8353,9 @@
             }).catch(() => { });
         }
 
-        // 自动同步：指纹不变则零网络请求；首次静默推；旧指纹变化（token 刷新）推并提示一次
-        async daemonAutoSync(mod) {
+        // 同步：指纹不变则零网络请求；首次静默推；旧指纹变化（token 刷新）推并提示一次；
+        // force（控制台「从站点同步」请求 → /ping 的 pendingAuth）绕过指纹去重，成功/失败都给可见提示
+        async daemonAutoSync(mod, { force = false } = {}) {
             if (!mod || this._daemonSyncBusy) return;
             if (getModuleSetting(mod, '自动同步') === false) return;
             const token = daemonReadToken();
@@ -8363,11 +8364,16 @@
             const fp = daemonFingerprint(token, workers);
             let prev = null;
             try { prev = localStorage.getItem(DAEMON_FP_KEY); } catch (e) { }
-            if (prev === fp) return;
+            if (!force && prev === fp) return;
             this._daemonSyncBusy = true;
             try {
-                const r = await daemonPushCredentials(mod, { silent: prev === null, auto: true });
-                if (r.ok && prev !== null) NotificationUtils.showSuccess('凭据已自动更新到 Daemon');
+                const r = await daemonPushCredentials(mod, { silent: true, auto: true });
+                if (r.ok) {
+                    if (force) NotificationUtils.showSuccess(`已按控制台请求同步凭据（${r.version || 'daemon'} · ${r.workers} 个翻译器）`);
+                    else if (prev !== null) NotificationUtils.showSuccess('凭据已自动更新到 Daemon');
+                } else if (force) {
+                    NotificationUtils.showError(`同步失败：${r.error || '未知错误'}`);
+                }
             } finally {
                 this._daemonSyncBusy = false;
             }

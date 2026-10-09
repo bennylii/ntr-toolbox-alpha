@@ -104,6 +104,14 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
   const serveConfig = () => store.getConfig('serve') || {};
   const extraOrigins = () => (Array.isArray(serveConfig().origins) ? serveConfig().origins : []);
 
+  // 「从站点同步」请求标志：控制台置位 → 油猴在 /ping 里看到 → 推一次凭据（/auth 清位）；5 分钟过期防陈旧请求
+  const AUTH_REQUEST_TTL_MS = 5 * 60 * 1000;
+  const authRequestFresh = () => {
+    const r = store.getConfig('authRequest');
+    if (!r || !r.at) return null;
+    return (Date.now() - Number(r.at)) < AUTH_REQUEST_TTL_MS ? r : null;
+  };
+
   // LG 译文导入（GUI 与 CLI 同一套函数）：文件只在 exports/ 与 uploads/ 流转
   const lgDirsResolved = {
     exportsDir: (lgDirs && lgDirs.exportsDir) || path.join(DAEMON_DIR, 'exports'),
@@ -145,7 +153,8 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         return;
       }
       if (req.method === 'GET' && url.pathname === '/ping') {
-        send(200, { ok: true, name: 'ntr-daemon', port, version: VERSION });
+        // pendingAuth：控制台请求了「从站点同步」，等油猴下次探测时推凭据（免凭据接口，别泄露别的）
+        send(200, { ok: true, name: 'ntr-daemon', port, version: VERSION, pendingAuth: Boolean(authRequestFresh()) });
         return;
       }
       if (req.method === 'GET' && url.pathname === '/status') {
@@ -181,6 +190,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
             tokenSet: Boolean(store.getConfig('token')),
             workers: maskList(workers),
             lastSync: store.getConfig('lastSync') || null,
+            authRequest: authRequestFresh(),
             serve: { port, ...serveConfig() },
             proxy: normalizeProxyConfig(store.getConfig('proxy')),
             textPreserve: { ...readTextPreserveConfig(store), presets: presetInfo() },
@@ -411,6 +421,14 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         send(200, { ok: true, ...result });
         return;
       }
+      // 控制台「从站点同步」：置一条同步请求，油猴下次探测（≤5s）看到 pendingAuth 就推一次凭据
+      if (req.method === 'POST' && url.pathname === '/auth/request') {
+        const at = Date.now();
+        store.setConfig('authRequest', { at, ua: uaSummary(req.headers['user-agent']) });
+        log.log('[auth] 已请求站点页面同步凭据（等待推送）');
+        send(200, { ok: true, at });
+        return;
+      }
       if (req.method === 'POST' && url.pathname === '/auth') {
         const body = await readBody();
         if (body.token) store.setConfig('token', body.token);
@@ -428,6 +446,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           tokenSet: Boolean(body.token),
           mode: body.auto === true ? 'auto' : 'manual',
         });
+        store.setConfig('authRequest', null);   // 推送已到：清掉同步请求标志
         log.log('[auth] 凭据/翻译器配置已更新');
         send(200, { ok: true, workers: Array.isArray(body.workers) ? body.workers.length : undefined });
         return;

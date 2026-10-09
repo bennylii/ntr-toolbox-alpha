@@ -40,7 +40,8 @@ node daemon/index.mjs forget    <bookKey>
 ### 连接（端口 / 探测 / 同步来源）
 - **端口**：设置页「连接」区改默认端口（**重启生效**）；托盘 `tray.ps1` 默认不传 `--port`（自读 config），`Wait-Ready` 跟随 `.serve-port`；显式 `-Port N` 仍可覆盖；
 - **`GET /ping`**：无需凭据，返回 `{ ok, name, port, version }`——油猴角标与外部脚本探测用（带 CORS，走同一白名单）；
-- **同步来源**：`POST /auth` 记录 `lastSync { at, origin, UA 摘要, workersCount, mode: auto|manual }`（只记元数据不记 token）→ `/status` 与设置页「连接」区可见（自动/手动）——多浏览器推送时一眼分辨是谁在生效；**油猴「Daemon 连接」开启「自动同步」（默认开）后**：页面加载即自动推送，站内 token 刷新后 ≤30s 自动重推（指纹去重，无变化零请求），不再需要手动点；daemon 报 401（need-auth）时页面开着即可自愈；
+- **同步来源**：`POST /auth` 记录 `lastSync { at, origin, UA 摘要, workersCount, mode: auto|manual }`（只记元数据不记 token）→ `/status` 与设置页「连接」区可见（自动/手动）——多浏览器推送时一眼分辨是谁在生效；**油猴「Daemon 连接」开启「自动同步」（默认开）后**：页面加载即自动推送，站内 token 刷新后 ≤5s 自动重推（指纹去重，无变化零请求），不再需要手动点；daemon 报 401（need-auth）时页面开着即可自愈；
+- **从站点同步（控制台按钮）**：设置页「站点与凭据」的「从站点同步」→ `POST /auth/request` 置一条同步请求（5 分钟过期）→ 油猴在 ≤5s 的 daemon 探测里从 `/ping.pendingAuth` 看到标志，**绕过指纹去重**立即推一次凭据 → daemon 收到 `/auth` 清位；按钮会在 35s 内等推送到达并回报结果（前提：站点页面开着且已登录——token 只在站点页面 localStorage 里）；
 - **跨域白名单**：内置默认 `n.novelia.cc` + `127.0.0.1/localhost`（不可移除）；设置页「连接」区可加附加条目（hostname 或 origin，即时生效）。
 
 ## 控制台（设置 GUI）
@@ -59,7 +60,7 @@ node daemon/index.mjs forget    <bookKey>
 - **提示词**：**全局模板**（所有项目共用，LG 式）四槽编辑；按书覆盖仅 API/CLI 保留（高级用法，UI 不暴露）；
 - **助手**：新会话自动挂当前项目；侧栏会话按项目分组（「通用」组收无书会话）；绑书会话的系统提示注入【当前项目】，工具的 book 参数缺省即此书；对话区支持 markdown 渲染（代码块带语言标签与复制按钮）、每条消息的时间/token、工具调用折叠卡（状态点 + 参数/结果分区）、审批面板结构化预览、生成中光标与步数、智能跟随滚动 +「回到底部」、空态建议提示；窄窗口下侧栏自动收成图标条；
 - **会话操作**：消息悬停可「复制」「编辑」（用户消息 → 内联编辑器「保存并重发/取消」）与「重新生成」（仅末条助手消息，丢弃该轮回答后以原文重跑，用户消息保留）；顶栏与侧栏会话行可「重命名 / 删除」（删除连带该会话的消息与审批记录；跑轮次中会被拒绝）。语义：编辑/重新生成都按截断点重跑（删除 seq ≥ 截断点的消息），若历史摘要跨过截断点则整段清掉（摘要由模型生成，无法重算）；
-- **设置**：全局设置（作用于所有项目）——八个区块：**连接**（端口 / 跨域白名单附加条目 / 上次同步来源）／**翻译模型池**（端点增删改，key 只写不回显、留空 = 按 id 保持原值）／**助手/术语模型池**（独立端点与并发限流；清空 = 跟随翻译池）／**翻译池调度与限流**／**助手池调度与限流**／**助手参数**（审批模式、maxSteps、工具结果截断、上下文预算）／**站点与凭据**（origin + token 直填）／**网络代理**（出网代理开关 / 地址 / 直连列表 / 直连-代理对比测试）。站点「Daemon 连接」推送仍会整表覆盖**翻译池**（最后写入者赢），但**不再覆盖**显式配置过的助手池；
+- **设置**：全局设置（作用于所有项目）——八个区块：**连接**（端口 / 跨域白名单附加条目 / 上次同步来源）／**翻译模型池**（端点增删改，key 只写不回显、留空 = 按 id 保持原值）／**助手/术语模型池**（独立端点与并发限流；清空 = 跟随翻译池）／**翻译池调度与限流**／**助手池调度与限流**／**助手参数**（审批模式、maxSteps、工具结果截断、上下文预算）／**站点与凭据**（origin + 「从站点同步」按钮 + token 直填）／**网络代理**（出网代理开关 / 地址 / 直连列表 / 直连-代理对比测试）。站点「Daemon 连接」推送仍会整表覆盖**翻译池**（最后写入者赢），但**不再覆盖**显式配置过的助手池；
 - **状态**：当前项目概要 + llm 双池统计（并发峰值/冷却/重试）、用量、RSS 采样；
 - **技能**：全局资源（`skills/` 目录，LG 式 SKILL.md 包），不随项目变化。
 
@@ -242,5 +243,6 @@ powershell -File daemon/tray.ps1 -TestSpawn -Port 7377          # 托盘冒烟�
 # 助手页 e2e（浏览器车道）：mock 在 8790，daemon 在 7355（--db daemon/.tmp-agent-ui.db），见 tools/.e2e-agent-ui.js 头部跑法
 # 助手页会话操作 e2e：mock 在 8790，daemon 在 7358（--db daemon/.tmp-agent-ops.db），见 tools/.e2e-agent-session-ops.js 头部
 # LG 导入 GUI e2e：mock 在 8790，daemon 在 7356（--db daemon/.tmp-lggui.db，预置 mock-trans-lg4-* 书），见 tools/.e2e-lg-gui.js 头部
-# Daemon 连接 e2e：mock 8790 + tools/.run-daemon-stub.mjs（7343：/ping /auth /last /reset），见 tools/.e2e-daemon-sync.js 头部
+# Daemon 连接 e2e：mock 8790 + tools/.run-daemon-stub.mjs（7343：/ping /auth /last /request-auth /reset），见 tools/.e2e-daemon-sync.js 头部
+# 控制台「从站点同步」按钮 e2e：daemon 7359（--db daemon/.tmp-token-sync.db），见 tools/.e2e-token-sync.js 头部
 ```

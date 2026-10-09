@@ -486,7 +486,11 @@ export const UI_HTML = `<!doctype html>
       <label>origin <input type="text" id="set-origin" size="40"></label>
       <button class="btn ghost" id="origin-save">保存 origin</button>
       <div style="margin-top:6px">
-        <label>token <input type="password" id="set-token" size="40" placeholder="粘贴站点 token（只写不回显）"></label>
+        <button class="btn" id="token-sync">从站点同步</button>
+        <span class="muted" id="token-sync-hint">从站点页面（油猴）取当前 token；需站点页面开着且已登录</span>
+      </div>
+      <div style="margin-top:6px">
+        <label>token <input type="password" id="set-token" size="40" placeholder="或手工粘贴站点 token（只写不回显）"></label>
         <button class="btn ghost" id="token-save">保存 token</button>
         <span class="muted" id="cred"></span>
       </div>
@@ -596,6 +600,7 @@ function setContentMode(tab) {
 }
 
 let STATE = { books: [], runs: [], queue: [] };
+let LAST_SYNC_AT = 0;   // 最近一次凭据同步时间（「从站点同步」按钮的判据）
 let PROJECT = localStorage.getItem('ntr-daemon-project') || '';
 function renderProjectSelect() {
   const sel = $('project-select');
@@ -953,7 +958,9 @@ async function loadSettings() {
       : '当前：全部直连（代理未启用）';
     $('cred').textContent = 'token：' + (s.settings.tokenSet ? '已同步' : '未同步') +
       ' · 翻译池 ' + ((s.settings.workers || []).length) + ' 个 · 助手池 ' +
-      ((agent.workers || []).length > 0 ? (agent.workers.length + ' 个（显式）') : '跟随翻译池');
+      ((agent.workers || []).length > 0 ? (agent.workers.length + ' 个（显式）') : '跟随翻译池') +
+      (s.settings.authRequest ? ' · 等待站点推送' : '');
+    LAST_SYNC_AT = (ls && ls.at) || 0;   // 「从站点同步」按钮用它判断推送是否到达
     const tlBox = $('pool-tl');
     const agBox = $('pool-ag');
     tlBox.innerHTML = '';
@@ -1035,6 +1042,46 @@ $('token-save').addEventListener('click', async () => {
     $('set-token').value = '';
     toast('token 已保存'); loadSettings();
   } catch (e) { toast(e.message, true); }
+});
+// 「从站点同步」：置同步请求 → 站点页面（油猴）在 ≤5s 探测里看到 pendingAuth 就推一次凭据 → 这里等 lastSync 变化
+$('token-sync').addEventListener('click', async () => {
+  const btn = $('token-sync');
+  const hint = $('token-sync-hint');
+  if (btn.disabled) return;
+  const beforeAt = LAST_SYNC_AT;
+  btn.disabled = true;
+  btn.textContent = '等待站点推送…';
+  hint.textContent = '已请求，站点页面会在几秒内推送（需页面开着且已登录）';
+  try {
+    await post('/auth/request', {});
+  } catch (e) {
+    btn.disabled = false; btn.textContent = '从站点同步';
+    hint.textContent = '';
+    toast(e.message, true);
+    return;
+  }
+  const done = (okMsg, badMsg) => {
+    btn.disabled = false;
+    btn.textContent = '从站点同步';
+    hint.textContent = badMsg || '从站点页面（油猴）取当前 token；需站点页面开着且已登录';
+    if (okMsg) toast(okMsg); else toast(badMsg, true);
+    loadSettings();
+  };
+  const deadline = Date.now() + 35000;
+  const timer = setInterval(async () => {
+    let s = null;
+    try { s = await api('/settings'); } catch (e) { /* 瞬时错误继续等 */ }
+    const ls = s && s.settings && s.settings.lastSync;
+    if (ls && (ls.at || 0) > beforeAt) {
+      clearInterval(timer);
+      done('已同步（' + (ls.ua || '?') + ' · ' + (ls.workersCount == null ? '?' : ls.workersCount) + ' 个翻译器）');
+      return;
+    }
+    if (Date.now() > deadline) {
+      clearInterval(timer);
+      done(null, '未收到推送：确认站点页面已打开并且已登录');
+    }
+  }, 1500);
 });
 $('proxy-save').addEventListener('click', async () => {
   try {

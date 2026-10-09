@@ -12,7 +12,7 @@ ntr-toolbox-alpha.dev.user.js  由 .gen-dev.mjs 生成（@version 追加 -dev、
 CHANGELOG.md                   版本记录（发布时与 @version / daemon/version.mjs 对齐）
 mock-llm/server.mjs            假 LLM + 假站点（8788 主车道；daemon 测试用 8790）
 debug-env/                     离线站点页面替身（无网络也能开发/截图）
-tools/                         开发/测试脚本（.gen-dev/.engine-test/.run-suite/.run-daemon-stub/.probe-tm-hash-ws/.e2e-*.js/.pack-*）
+tools/                         开发/测试脚本（.gen-dev/.engine-test/.run-suite/.run-daemon-stub/.probe-tm-hash-ws/.e2e-daemon-sync/.e2e-token-sync/.e2e-*/.pack-*）
 docs/architecture.md           ★ 架构总览（组件图/数据模型/子系统/设计决策/测试矩阵）——新会话先读这个
 docs/cleanroom/                行为规格 spec-01..13（全部已实施）
 docs/                          管线说明（html + png）

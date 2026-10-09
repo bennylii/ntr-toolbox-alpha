@@ -1520,6 +1520,26 @@ await t('/auth 记录 lastSync（origin/UA 摘要/workers 数/auto 标记）→ 
   const settings = await fetch(`${C}/settings`).then((r) => r.json());
   assert.ok(settings.settings.lastSync && settings.settings.lastSync.at > 0, 'GET /settings 也带 lastSync');
 });
+await t('同步请求标志：/auth/request 置位 → /ping.pendingAuth → /auth 清位 → 过期失效', async () => {
+  const req = await fetch(`${C}/auth/request`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then((r) => r.json());
+  assert.equal(req.ok, true, JSON.stringify(req));
+  assert.ok(req.at > 0, JSON.stringify(req));
+  let st = await fetch(`${C}/settings`).then((r) => r.json());
+  assert.ok(st.settings.authRequest && st.settings.authRequest.at > 0, 'settings 暴露 authRequest：' + JSON.stringify(st.settings.authRequest));
+  let ping = await fetch(`${C}/ping`).then((r) => r.json());
+  assert.equal(ping.pendingAuth, true, 'ping 报 pendingAuth');
+  await fetch(`${C}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: 'tok-sync-req' }) });
+  ping = await fetch(`${C}/ping`).then((r) => r.json());
+  assert.equal(ping.pendingAuth, false, '收到推送后清位');
+  st = await fetch(`${C}/settings`).then((r) => r.json());
+  assert.equal(st.settings.authRequest, null);
+  // 过期语义：5 分钟前的请求不再算数（防陈旧请求把 token 又推一遍）
+  await fetch(`${C}/auth/request`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  store.setConfig('authRequest', { at: Date.now() - 6 * 60 * 1000 });
+  ping = await fetch(`${C}/ping`).then((r) => r.json());
+  assert.equal(ping.pendingAuth, false, '过期请求不算数');
+  store.setConfig('authRequest', null);
+});
 await t('跨域白名单：内置默认保留 + serve.origins 附加生效', async () => {
   // 未配置附加条目：其它 origin 的 POST 403
   const deny = await fetch(`${C}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://mirror.example.com' }, body: '{}' });

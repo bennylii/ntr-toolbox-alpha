@@ -25,7 +25,7 @@
 
 ## 4. 油猴侧自动同步
 
-- 挂点：面板主循环每 tick 调用的 `refreshDaemonGlance`（30s 节流，零新增定时器）；「自动同步」开关默认**开**；
+- 挂点：面板主循环每 tick 调用的 `refreshDaemonGlance`（**5s 节流**——原为 30s；改 5s 是为了让控制台「从站点同步」按钮几秒内生效，仍是免凭据的本机回环请求）；「自动同步」开关默认**开**；
 - 流程：ping 在线 → 指纹 `JSON({token, workers, origin})` 与 `localStorage['ntr-daemon-auth-fp']` 比较 →
   - 未变：零网络请求（短路）；
   - 首次（无存档指纹）：静默推送（仅状态行更新）；
@@ -37,7 +37,7 @@
 
 - 真实用户首次从 HTTPS 页面访问本机 daemon 会有浏览器「本地网络访问」授权（一次性）；模块错误提示含该指引；
 - headless 测试车道必须 `--disable-features=LocalNetworkAccessChecks`，否则 fetch 直接失败（daemon 侧一切正常）；
-- daemon 收到 401（need-auth）时的自愈路径：页面开着 ≤30s 自动重推；或手动点「Daemon 连接」；或 `daemon auth <token>`。
+- daemon 收到 401（need-auth）时的自愈路径：页面开着 ≤5s 自动重推；或手动点「Daemon 连接」；或控制台「站点与凭据 → 从站点同步」（`POST /auth/request` → 油猴经 `/ping.pendingAuth` 强推一次）；或 `daemon auth <token>`。
 
 ## 6. 边界与刻意差异
 

@@ -77,6 +77,29 @@ try {
   const c2 = await fetch('http://127.0.0.1:7343/last').then((r) => r.json());
   check('再次 tick 不重复推送（指纹已更新）', c2.__count === 1, c2.__count);
 
+  // 5) 控制台「从站点同步」请求：/ping.pendingAuth → 指纹不变也强制推一次（推完 stub 清位）
+  await fetch('http://127.0.0.1:7343/reset', { method: 'POST' });
+  toastTexts.length = 0;
+  box.refreshDaemonGlance(true);
+  await sleep(1200);
+  const d0 = await fetch('http://127.0.0.1:7343/last').then((r) => r.json());
+  check('前置：指纹未变 → 无标志时仍零推送', d0.__count === 0, d0.__count);
+  await fetch('http://127.0.0.1:7343/request-auth', { method: 'POST' });
+  box.refreshDaemonGlance(true);
+  let forced = null;
+  for (let i = 0; i < 20 && !forced; i += 1) {
+    await sleep(300);
+    const c = await fetch('http://127.0.0.1:7343/last').then((r) => r.json());
+    if (c.__count >= 1) forced = c;
+  }
+  check('控制台请求 → 指纹不变也强制推一次（auto 标记）', !!forced && forced.auto === true && forced.token === 'e2e-token-auto-1', forced && forced.token);
+  check('强制推送提示出现（已按控制台请求同步）', toastTexts.some((t) => /已按控制台请求同步/.test(t)), toastTexts);
+  toastTexts.length = 0;
+  box.refreshDaemonGlance(true);
+  await sleep(1500);
+  const d2 = await fetch('http://127.0.0.1:7343/last').then((r) => r.json());
+  check('标志已被推送清掉 → 再次 tick 不重复', d2.__count === 1, d2.__count);
+
   // 还原种子数据
   localStorage.removeItem('ntr-daemon-auth-fp');
   if (origAuth === null) localStorage.removeItem('auth-v2'); else localStorage.setItem('auth-v2', origAuth);

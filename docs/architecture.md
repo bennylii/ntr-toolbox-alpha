@@ -124,7 +124,8 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 ### 4.10 连接与凭据
 
 - `GET /ping`（免凭据，带版本）供探测；`POST /auth` 收 `{token, workers, origin, auto}`，只回元数据不回 token；
-- **自动同步**：油猴侧 30s glance tick 顺带做「指纹（token+workers+origin）变化才推」，页面加载即推、token 刷新 ≤30s 自愈，无变化零请求；`lastSync.mode = auto|manual` 可观测；
+- **自动同步**：油猴侧 5s glance tick 顺带做「指纹（token+workers+origin）变化才推」，页面加载即推、token 刷新 ≤5s 自愈，无变化零请求；`lastSync.mode = auto|manual` 可观测；
+- **控制台请求同步**：设置页「从站点同步」→ `POST /auth/request` 置位（5 分钟过期）→ 油猴从 `/ping.pendingAuth` 看到标志后绕过指纹去重强推一次 → `/auth` 清位；控制台轮询 `lastSync.at` 变化回报结果（token 只存在站点页面 localStorage，daemon 无法自取）；
 - CORS：内置 `n.novelia.cc` + localhost（不可移除）+ `config.serve.origins` 附加条目；仅监听 127.0.0.1；LNA/PNA 头已应答（真实用户首次需浏览器授权一次；headless 车道需禁用 LocalNetworkAccessChecks）。（规格 `docs/cleanroom/spec-11`）
 - **出网代理**：`config.proxy = { enabled, url, noProxy }`；站点 API 与双池的 LLM 调用统一经 `daemon/proxy.mjs` 注入的 fetch（http 目标走代理绝对形式，https 目标走 CONNECT 隧道，支持 `user:pass@` 凭据）；**每次请求现读配置 → 控制台保存即生效**；直连列表默认 `127.0.0.1,localhost,::1`（mock/测试零影响），代理关闭时全部直连（与旧版一致）；不支持 SOCKS5；`POST /proxy/test` 对同一目标做「直连 vs 代理」双探测。工作区沙箱在 fork 时注入 `HTTP_PROXY/HTTPS_PROXY/NO_PROXY/NODE_USE_ENV_PROXY`，脚本出网与 daemon 同路。
 
@@ -137,7 +138,8 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 | 方法/路径 | 用途 |
 |---|---|
 | `GET /ping` `/status` `/settings` `/rules` `/prompts` `/books` `/progress` `/runs` `/proposals` `/snapshots` `/warnings` `/agent/*` | 只读面（探测/状态/配置回读/列表） |
-| `POST /auth` | 凭据 + 翻译器推送（油猴自动/手动共用，带 auto 标记） |
+| `POST /auth` | 凭据 + 翻译器推送（油猴自动/手动共用，带 auto 标记）；收到即清「同步请求」标志 |
+| `POST /auth/request` | 控制台请求站点页面立刻推一次凭据（油猴经 `/ping.pendingAuth` 响应） |
 | `POST /run` | 派发 `translate / glossary / check / lg-import`（单队列，lg-import 校验路径白名单） |
 | `POST /settings` | llm / agent（含 workers、llm 子对象）/ origin / serve（port、origins）/ textPreserve.preset / proxy（enabled、url、noProxy） |
 | `POST /proxy/test` | 出网代理探测：同一目标「直连 / 代理」各一次，返回状态与耗时（判断是否被墙） |
@@ -159,7 +161,7 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 | warnings 全量替换而非增量 | 源译文随时变，增量难保一致；全量 + 事务简单可靠 |
 | 工作区 CodeAct 用文件（JSONL）跨调用 | 与 LG 契约一致；脚本无状态、可审计（changes 文件即提交意图） |
 | 沙箱网络开放 | 与 LG 一致；fs 由 `--permission` 收紧，子进程/worker 被默认拒绝 |
-| 自动同步挂 30s glance tick | 零新增定时器；指纹短路保证无变化零请求 |
+| 自动同步挂 5s glance tick | 零新增定时器；指纹短路保证无变化零请求；5s 才能让控制台「从站点同步」按钮几秒内生效（探测是免凭据的本机回环请求，代价可忽略） |
 | 出网代理自研转发（而非 Node `NODE_USE_ENV_PROXY`） | 内置开关只在进程启动前解析代理环境变量、首值终身缓存，做不到「保存即生效」；自研转发挂在既有 fetchImpl 收口（site-client + scheduler 两条请求路径），配置每请求现读，且无 Node 版本门槛 |
 | cookie 通道不做 | 站点 API 只认 Bearer；真正续期的 refresh cookie 是 HttpOnly，页面读不到 |
 | UI_HTML 内嵌脚本禁反斜杠转义 | 模板字面量会吃掉 `\n` → 整页静默失效；守卫测试在 daemon-test |
