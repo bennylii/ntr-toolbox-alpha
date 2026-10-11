@@ -327,6 +327,16 @@ export const UI_HTML = `<!doctype html>
   .mention .mi.sel, .mention .mi:hover { background: var(--hl); color: var(--title-fg); }
   .syseditor { border: 1px solid var(--line); background: var(--face); padding: 6px 8px; margin: 6px auto 0; max-width: var(--col); }
   .syseditor textarea { min-height: 60px; }
+  /* 技能面板（只读）：列技能包 → 展开文件 chips → 看原文 */
+  .skillspanel .skill-row { border: 1px solid var(--line); background: var(--window); padding: 4px 7px; margin: 4px 0; cursor: pointer; }
+  .skillspanel .skill-row.sel { background: var(--hl); color: var(--title-fg); }
+  .skillspanel .skill-row.sel .muted { color: var(--title-fg); opacity: .8; }
+  .skillspanel .badge { border: 1px solid var(--line); padding: 0 4px; font-size: 10.5px; margin-left: 6px; }
+  .skillspanel .skill-files { display: none; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .skillspanel .skill-row.open .skill-files { display: flex; }
+  .skillspanel .skill-file { border: 1px solid var(--line); background: var(--face); padding: 1px 6px; font-size: 11.5px; cursor: pointer; }
+  .skillspanel .skill-file.sel, .skillspanel .skill-file:hover { background: var(--hl); color: var(--title-fg); }
+  .skillspanel pre { max-height: 240px; overflow: auto; background: var(--window); border: 1px solid var(--line); padding: 6px 8px; font-size: 11.5px; white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; }
   #toast { position: fixed; right: 12px; bottom: 12px; background: var(--info); border: 1px solid var(--text); color: var(--text); padding: 4px 10px; opacity: 0; transition: opacity .15s; pointer-events: none; max-width: 60vw; z-index: 9; font-size: 12px; }
   #toast.show { opacity: 1; }
   #toast.bad { color: var(--bad); font-weight: 700; }
@@ -392,6 +402,7 @@ export const UI_HTML = `<!doctype html>
       <button class="icon-btn sess-op" id="agent-delete" title="删除当前会话">删除</button>
       <span class="spacer"></span>
       <span class="muted" id="agent-status"></span>
+      <button class="btn ghost" id="agent-skills-btn" title="技能目录（只读）">技能</button>
       <button class="btn ghost" id="agent-sys">系统指令</button>
       <button class="btn danger" id="agent-stop" disabled>停止</button>
     </div>
@@ -418,6 +429,16 @@ export const UI_HTML = `<!doctype html>
         <button class="btn" id="agent-sys-save">保存</button>
         <button class="btn ghost" id="agent-sys-close">取消</button>
       </div>
+    </div>
+    <div id="agent-skillspanel" class="syseditor skillspanel" style="display: none">
+      <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 4px">
+        <b>技能</b>
+        <span class="muted">标「隐藏」的不进 agent 技能目录（仍可 @点名 与读取）；点技能展开文件，点文件看原文</span>
+        <span class="spacer"></span>
+        <button class="btn ghost" id="agent-skills-close">关闭</button>
+      </div>
+      <div id="agent-skills-list"></div>
+      <pre id="agent-skill-view" style="display: none"></pre>
     </div>
   </div>
 
@@ -1533,12 +1554,30 @@ async function agentResolve(id, status, resolution) {
   catch (e) { toast(e.message, true); }
   agentRefresh();
 }
+// 会话头部用量：轮数/tokens/tok/s 从消息表算（snapshot 已带每条 at+usage）；「请求 N」保留（e2e 契约）
+function agentUsageStats() {
+  let rounds = 0; let tokens = 0; let comp = 0; let firstAt = 0; let lastAt = 0;
+  for (const m of (AGENT.messages || [])) {
+    if (m.role !== 'assistant') continue;
+    rounds += 1;
+    const u = m.usage || {};
+    tokens += (Number(u.promptTokens) || 0) + (Number(u.completionTokens) || 0);
+    comp += Number(u.completionTokens) || 0;
+    if (m.at) { if (!firstAt || m.at < firstAt) firstAt = m.at; if (m.at > lastAt) lastAt = m.at; }
+  }
+  const secs = firstAt && lastAt > firstAt ? (lastAt - firstAt) / 1000 : 0;
+  return { rounds: rounds, tokens: tokens, tps: secs > 0 && comp > 0 ? Math.round(comp / secs) : 0 };
+}
 function renderAgentStatus() {
   const pj = AGENT.sessionBook ? ' · 项目 ' + String(((STATE.books || []).find((b) => b.key === AGENT.sessionBook) || {}).title || AGENT.sessionBook).slice(0, 16) : '';
+  const us = agentUsageStats();
+  const usageText = '请求 ' + (AGENT.usage ? AGENT.usage.requests : 0) +
+    (us.rounds > 0
+      ? ' · ' + us.rounds + ' 轮 / ' + us.tokens + ' tokens' + (us.tps > 0 ? ' / ~' + us.tps + ' tok/s' : '')
+      : ' / ' + (AGENT.usage ? (AGENT.usage.promptTokens + AGENT.usage.completionTokens) : 0) + ' tokens');
   $('agent-status').textContent = (AGENT.running ? '进行中…' : '空闲') +
     (AGENT.running && AGENT.step ? '（第 ' + AGENT.step + ' 步）' : '') +
-    ' · 请求 ' + (AGENT.usage ? AGENT.usage.requests : 0) +
-    ' · tokens ' + (AGENT.usage ? (AGENT.usage.promptTokens + AGENT.usage.completionTokens) : 0) +
+    ' · ' + usageText +
     pj +
     (AGENT.transport ? ' · ' + AGENT.transport : '');
 }
@@ -1841,6 +1880,56 @@ $('agent-sys-save').addEventListener('click', async function () {
   } catch (e) { toast(e.message, true); }
 });
 $('agent-sys-close').addEventListener('click', function () { $('agent-syseditor').style.display = 'none'; });
+$('agent-skills-btn').addEventListener('click', async function () {
+  const panel = $('agent-skillspanel');
+  if (panel.style.display === 'block') { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  $('agent-skill-view').style.display = 'none';
+  await renderSkillsPanel();
+});
+$('agent-skills-close').addEventListener('click', function () { $('agent-skillspanel').style.display = 'none'; });
+async function renderSkillsPanel() {
+  const list = $('agent-skills-list');
+  list.innerHTML = '<div class="muted">加载中…</div>';
+  let skills = [];
+  try { skills = (await api('/agent/skills')).skills || []; } catch (e) { list.textContent = '读取失败：' + e.message; return; }
+  AGENT_SKILLS = skills;   // 面板打开即目录最新态，顺带刷新 @候选缓存
+  if (skills.length === 0) { list.textContent = '技能目录为空（skills/ 下没有 SKILL.md 包）'; return; }
+  list.textContent = '';
+  for (const s of skills) {
+    const row = document.createElement('div'); row.className = 'skill-row';
+    const head = document.createElement('div');
+    const name = document.createElement('b'); name.textContent = s.name; head.appendChild(name);
+    if (s.hidden) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = '隐藏'; head.appendChild(badge); }
+    row.appendChild(head);
+    if (s.description) { const d = document.createElement('div'); d.className = 'muted'; d.textContent = s.description; row.appendChild(d); }
+    const files = document.createElement('div'); files.className = 'skill-files';
+    for (const f of (s.files || [])) {
+      const chip = document.createElement('span'); chip.className = 'skill-file'; chip.textContent = f;
+      chip.addEventListener('click', function (ev) { ev.stopPropagation(); agentShowSkillFile(s.name, f, chip); });
+      files.appendChild(chip);
+    }
+    row.appendChild(files);
+    row.addEventListener('click', function () {
+      const open = row.classList.contains('open');
+      list.querySelectorAll('.skill-row').forEach(function (r) { r.classList.remove('open', 'sel'); });
+      if (!open) row.classList.add('open', 'sel');
+      $('agent-skill-view').style.display = 'none';
+    });
+    list.appendChild(row);
+  }
+}
+async function agentShowSkillFile(name, relPath, chip) {
+  const view = $('agent-skill-view');
+  chip.parentElement.querySelectorAll('.skill-file').forEach(function (c) { c.classList.remove('sel'); });
+  chip.classList.add('sel');
+  view.style.display = 'block';
+  view.textContent = '加载中…';
+  try {
+    const r = await api('/agent/skill/file?name=' + encodeURIComponent(name) + '&path=' + encodeURIComponent(relPath));
+    view.textContent = (r.truncated ? '（内容过长，已截断到前 100000 字）' : '') + r.content;
+  } catch (e) { view.textContent = '读取失败：' + e.message; }
+}
 $('agent-input').addEventListener('input', function () {
   agentSkillsCache().then(function () { agentMentionUpdate(); });
 });

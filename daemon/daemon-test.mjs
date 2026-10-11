@@ -973,12 +973,32 @@ await t('/agent/skills 列出目录；未知 @ → 400 带清单', async () => {
     const skills = await agentFetch(7364, '/agent/skills');
     assert.equal(skills.ok, true);
     assert.ok(skills.skills.some((x) => x.name === 'glossary-workflow'), JSON.stringify(skills.skills.map((x) => x.name)));
+    assert.ok(Array.isArray(skills.skills[0].files), 'files 应为路径数组（技能面板用）');
+    assert.equal(skills.skills.find((x) => x.name === 'agent-charter').hidden, true, '隐藏技能应带 hidden 标注');
     const { sessionId } = await agentFetch(7364, '/agent/session', { title: 'bad' });
     const bad = await agentFetch(7364, '/agent/message', { session: sessionId, message: '@nope-skill 看看' });
     assert.equal(bad.ok, false, JSON.stringify(bad));
     assert.ok(bad.error.includes('nope-skill') && Array.isArray(bad.knownSkills), JSON.stringify(bad));
     const snap = await agentFetch(7364, `/agent/snapshot?session=${encodeURIComponent(sessionId)}`);
     assert.equal(snap.messages.length, 0, '400 时不落消息');
+  } finally { server.close(); }
+});
+await t('/agent/skill/file：读技能原文（404 文件不存在 / 400 路径越界 / 404 未知技能）', async () => {
+  const { server } = await mkAgentServer(7367, '', [doingTool]);
+  try {
+    const ok = await agentFetch(7367, '/agent/skill/file?name=glossary-workflow');
+    assert.equal(ok.ok, true, JSON.stringify(ok).slice(0, 200));
+    assert.equal(ok.path, 'SKILL.md');
+    assert.ok(String(ok.content).includes('name: glossary-workflow'), '应返回 SKILL.md 原文');
+    const ref = await agentFetch(7367, '/agent/skill/file?name=glossary-extract&path=' + encodeURIComponent('references/extract.md'));
+    assert.equal(ref.ok, true, JSON.stringify(ref).slice(0, 200));
+    assert.ok(String(ref.content).length > 100, 'references 文件应有正文');
+    const missing = await agentFetch(7367, '/agent/skill/file?name=glossary-workflow&path=nope.md');
+    assert.equal(missing.ok, false, JSON.stringify(missing));
+    const evil = await agentFetch(7367, '/agent/skill/file?name=glossary-workflow&path=' + encodeURIComponent('../store.mjs'));
+    assert.equal(evil.ok, false, JSON.stringify(evil));
+    const unknown = await agentFetch(7367, '/agent/skill/file?name=nope-skill');
+    assert.equal(unknown.ok, false, JSON.stringify(unknown));
   } finally { server.close(); }
 });
 await t('@技能名：该轮系统提示注入技能正文（mock lastSystem 断言）', async () => {

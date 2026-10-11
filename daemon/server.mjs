@@ -572,7 +572,22 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
       }
       if (req.method === 'GET' && url.pathname === '/agent/skills') {
         if (!agentLoop || !agentLoop.skills) { send(400, { ok: false, error: '技能目录未装配' }); return; }
-        send(200, { ok: true, skills: agentLoop.skills.list().map((s) => ({ name: s.name, description: s.description, files: s.files.length })) });
+        send(200, { ok: true, skills: agentLoop.skills.list().map((s) => ({ name: s.name, description: s.description, files: s.files, hidden: s.disableModelInvocation === true })) });
+        return;
+      }
+      // 技能面板读单文件：read() 自带防逃逸（拒绝 .. / 绝对路径 / 越界），端点只做封装与截断
+      if (req.method === 'GET' && url.pathname === '/agent/skill/file') {
+        if (!agentLoop || !agentLoop.skills) { send(400, { ok: false, error: '技能目录未装配' }); return; }
+        const name = url.searchParams.get('name') || '';
+        const relPath = url.searchParams.get('path') || 'SKILL.md';
+        try {
+          const r = agentLoop.skills.read(name, relPath);
+          const content = String(r.content || '');
+          send(200, { ok: true, name: r.skill, path: r.path, content: content.slice(0, 100000), truncated: content.length > 100000 });
+        } catch (e) {
+          const code = (e && e.code) || '';
+          send(code === 'skill_not_found' || code === 'file_not_found' ? 404 : 400, { ok: false, error: (e && e.message) || String(e) });
+        }
         return;
       }
       if (req.method === 'POST' && url.pathname === '/agent/personality') {

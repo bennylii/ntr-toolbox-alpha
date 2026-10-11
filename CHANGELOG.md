@@ -31,6 +31,8 @@ All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 
 - **助手页从"纯文本流"重做为完整聊天界面**（此前只有一行行纯文本 + 朴素 `<details>` 工具块）：markdown 渲染（标题/列表/引用/表格/行内代码/围栏代码块 + 语言标签与复制按钮、裸 URL 自动链接且只有 http(s) 成链接、其余全部转义）、用户消息气泡右对齐 + 助手通栏、每条消息的时间与 token 用量、工具调用折叠卡（状态点 + 参数/结果分区 + 复制）、审批面板结构化预览（原始 payload 可折叠）、「生成中」闪烁光标与步数指示、智能跟随滚动（用户上翻不拉回）+「回到底部」、空态问候 + 4 条可点建议、侧栏会话行相对时间与运行点、窄窗自适应（≤700px 侧栏收成图标条）。
 - 渲染方式：消息按 `seq` 增量 diff（不再每个 SSE 事件整表重绘，保住滚动位置与 `<details>` 展开态）；`renderMarkdown` 等纯函数放模块作用域、经 `${MD_SOURCE}` 内联进页面（既避开 `UI_HTML` 模板字面量的转义陷阱，又能在 Node 侧单测，daemon-test +7 例）。
+- **技能面板（只读）**：助手页顶栏新增「技能」——列出 skills/ 全部技能包 + 描述 + 「隐藏」徽标（`disable-model-invocation`，不进 agent 目录但仍可读取）；点技能展开文件 chips（SKILL.md / references/*），点文件看原文（100k 字截断提示）。后端 `/agent/skills` 补 `hidden` 字段且 `files` 改为路径数组，新增 `GET /agent/skill/file`（复用 `skills.read()` 的防逃逸守卫：拒绝 `..`/绝对路径/越界，404/400 分码）；打开面板顺带刷新输入框 `@技能` 候选缓存。daemon-test +2 断言（files 数组/hidden 标注）与 +1 用例（读原文/404/越界/未知技能）。
+- **会话头部用量条升级**：状态栏在「请求 N」后追加「N 轮 / X tokens / ~Y tok/s」——轮数 = assistant 消息数，tok/s = Σcompletion ÷（末条−首条 assistant 时间差），全部由前端从 snapshot 的 per-message `at`+`usage` 现算（后端零改动）；压缩裁剪后无消息时回落为只显示请求数；e2e 契约「请求 ≥ 2」保持不变。
 
 ### 控制台 UI
 
