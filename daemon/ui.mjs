@@ -514,13 +514,14 @@ export const UI_HTML = `<!doctype html>
     </fieldset>
     <fieldset><legend>助手参数（审批 / 步数 / 上下文预算）</legend>
       <label><input type="checkbox" id="ag-auto-mode"> 自动批准写入（auto；默认 manual 逐次审批）</label>
+      <label><input type="checkbox" id="ag-ask-default"> 追问超时默认选第一项（关闭 = 超时取消该次追问）</label>
       <label>单轮步数上限 maxSteps <input type="number" id="ag-steps" min="1"></label>
       <label>工具结果截断(字符) <input type="number" id="ag-toolmax" min="500"></label>
       <label>上下文上限 <input type="number" id="ag-ctx" min="1024"></label>
       <label>压缩阈值 <input type="number" id="ag-compact" min="1024"></label>
       <label>保留最近消息 <input type="number" id="ag-keep" min="2"></label>
       <div><button class="btn" id="agent-budget-save">保存助手参数</button></div>
-      <div class="muted">超压缩阈值时旧对话摘要化；审批模式也可在「助手」页顶部切换。</div>
+      <div class="muted">超压缩阈值时旧对话摘要化；审批模式也可在「助手」页顶部切换。追问超时（默认 300 秒）到点后按默认项继续，无人值守也能自推进。</div>
     </fieldset>
     <fieldset><legend>站点与凭据</legend>
       <label>origin <input type="text" id="set-origin" size="40"></label>
@@ -981,6 +982,7 @@ async function loadSettings() {
     $('ag-compact').value = agent.compactThresholdTokens || 120000;
     $('ag-keep').value = agent.keepRecentMessages || 12;
     $('ag-auto-mode').checked = agent.approvalMode === 'auto';
+    $('ag-ask-default').checked = agent.questionDefaultFirst !== false;
     $('ag-steps').value = agent.maxSteps || 24;
     $('ag-toolmax').value = agent.toolResultMaxChars || 12000;
     const agLlm = agent.llm || {};
@@ -1066,6 +1068,7 @@ $('agent-budget-save').addEventListener('click', async () => {
   try {
     await post('/settings', { agent: {
       approvalMode: $('ag-auto-mode').checked ? 'auto' : 'manual',
+      questionDefaultFirst: $('ag-ask-default').checked,
       maxSteps: Number($('ag-steps').value) || 24,
       toolResultMaxChars: Number($('ag-toolmax').value) || 12000,
       maxContextTokens: Number($('ag-ctx').value) || 200000,
@@ -1257,7 +1260,7 @@ $('job-run').addEventListener('click', async () => {
 });
 
 // ---------------- 助手（Agent） ----------------
-let AGENT = { session: localStorage.getItem('ntr-daemon-agent-session') || '', es: null, polling: null, messages: [], pending: null, running: false, usage: null, transport: '', sessionBook: '', sessionTitle: '', step: 0, nodes: new Map(), localCount: 0, pinned: true, lockScroll: false };
+let AGENT = { session: localStorage.getItem('ntr-daemon-agent-session') || '', es: null, polling: null, messages: [], pending: null, running: false, usage: null, transport: '', sessionBook: '', sessionTitle: '', step: 0, nodes: new Map(), localCount: 0, pinned: true, lockScroll: false, cfg: null, askTimer: null };
 let lastSessions = [];
 function agentLine(cls, text) { const d = document.createElement('div'); d.className = cls; d.textContent = text; return d; }
 function agentRelTime(at) {
@@ -1529,9 +1532,11 @@ function agentGrowInput() {
   t.style.height = 'auto';
   t.style.height = Math.min(200, Math.max(26, t.scrollHeight)) + 'px';
 }
+function agentClearAskTimer() { if (AGENT.askTimer) { clearInterval(AGENT.askTimer); AGENT.askTimer = null; } }
 function renderAgentDecision() {
   const panel = $('agent-decision');
   const d = AGENT.pending;
+  agentClearAskTimer();
   if (!d) { panel.style.display = 'none'; panel.innerHTML = ''; return; }
   panel.style.display = 'block';
   panel.innerHTML = '';
@@ -1567,6 +1572,23 @@ function renderAgentDecision() {
     row.appendChild(allow); row.appendChild(reject);
   }
   panel.appendChild(row);
+  const askCfg = AGENT.cfg || {};
+  const askOptions = (d.payload && d.payload.options) || [];
+  if (d.kind === 'question' && askCfg.questionDefaultFirst !== false && askOptions.length > 0) {
+    const first = askOptions[0];
+    const timeoutMs = Number(askCfg.decisionTimeoutMs) >= 5000 ? Number(askCfg.decisionTimeoutMs) : 300000;
+    const deadline = (Number(d.at) || Date.now()) + timeoutMs;
+    const hint = document.createElement('div'); hint.className = 'muted'; hint.id = 'agent-ask-countdown';
+    const tick = function () {
+      const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      hint.textContent = left > 0
+        ? (left + ' 秒后将默认选：' + (first.label || first.id))
+        : '正在按默认项继续…';
+    };
+    tick();
+    AGENT.askTimer = setInterval(tick, 1000);
+    panel.appendChild(hint);
+  }
 }
 async function agentResolve(id, status, resolution) {
   try { await post('/agent/decision', { id: id, status: status, resolution: resolution || null }); toast(status === 'allowed' ? '已允许' : '已拒绝'); }
@@ -1701,6 +1723,7 @@ function renderAgentSessions(list) {
 async function agentInit() {
   try {
     const cfg = await api('/agent/config');
+    AGENT.cfg = cfg;
     $('agent-auto').checked = cfg.approvalMode === 'auto';
     renderAgentSessions(cfg.sessions || []);
     if (AGENT.session && !(cfg.sessions || []).some(function (x) { return x.id === AGENT.session; })) {

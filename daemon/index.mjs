@@ -184,6 +184,10 @@ const agentLoop = createAgentLoop({
   options: {
     approvalMode: agentApprovalDefault,
     bookKey: typeof flags.book === 'string' ? flags.book : '',
+    // 追问超时策略（设置页「助手参数」保存后经 /settings → setOptions 热更新）
+    ...(typeof agentCfg0.questionDefaultFirst === 'boolean' ? { questionDefaultFirst: agentCfg0.questionDefaultFirst } : {}),
+    ...(Number.isFinite(Number(agentCfg0.decisionTimeoutMs)) && Number(agentCfg0.decisionTimeoutMs) >= 5000
+      ? { decisionTimeoutMs: Math.floor(Number(agentCfg0.decisionTimeoutMs)) } : {}),
     extraSystem: skillCatalog.promptText(),   // 兜底；loop 内每步优先 deps.skills.promptText()（技能可运行时增改）
     deps: {
       engine,

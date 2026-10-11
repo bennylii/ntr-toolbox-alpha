@@ -28,6 +28,7 @@ export function createAgentSession({ store, chat, log = console, options = {} })
     compactThresholdTokens: 120000,   // 超过则压缩（估算值）
     keepRecentMessages: 12,           // 压缩时保留的最近消息条数
     decisionTimeoutMs: 300000,        // 审批/追问等待上限（超时视为拒绝/取消）
+    questionDefaultFirst: true,       // 追问超时改为默认选第一项（LG 行为；无人值守可自推进）
   };
   for (const [key, value] of Object.entries(options || {})) if (value !== undefined) opt[key] = value;
   const waiters = new Map();   // decisionId -> { resolve, timer }
@@ -53,6 +54,14 @@ export function createAgentSession({ store, chat, log = console, options = {} })
     const id = store.createAgentDecision({ sessionId, kind, payload });
     const promise = new Promise((resolve) => {
       const timer = setTimeout(() => {
+        const opts = (payload && payload.options) || [];
+        if (kind === 'question' && opt.questionDefaultFirst && opts.length > 0) {
+          // 追问超时 = 默认选第一项（LG 行为）：无人值守也能自推进；审批（write）维持超时拒绝
+          const resolution = { selected: String(opts[0].id || ''), reason: 'timeout_default' };
+          store.resolveAgentDecision(id, 'allowed', resolution);
+          settle(id, 'allowed', resolution);
+          return;
+        }
         store.resolveAgentDecision(id, kind === 'write' ? 'rejected' : 'cancelled', { reason: 'timeout' });
         settle(id, kind === 'write' ? 'rejected' : 'cancelled', { reason: 'timeout' });
       }, Math.max(1000, Number(timeoutMs) || opt.decisionTimeoutMs));

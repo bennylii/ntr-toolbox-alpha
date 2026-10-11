@@ -556,9 +556,13 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
       // ---- Agent（本地助手） ----
       if (req.method === 'GET' && url.pathname === '/agent/config') {
         const cfg = store.getConfig('agent') || {};
+        const live = (agentLoop && agentLoop.options) || {};
         send(200, {
           ok: true,
           approvalMode: cfg.approvalMode === 'auto' ? 'auto' : 'manual',
+          // 追问超时策略：优先回读循环层现值（保存即生效），未装配时回退配置/默认
+          questionDefaultFirst: live.questionDefaultFirst !== undefined ? live.questionDefaultFirst === true : cfg.questionDefaultFirst !== false,
+          decisionTimeoutMs: Math.max(5000, Number(live.decisionTimeoutMs) || Number(cfg.decisionTimeoutMs) || 300000),
           tools: agentLoop ? [...agentLoop.registry.keys()] : [],
           sessions: store.listAgentSessions(100).map((x) => ({ id: x.id, bookKey: x.bookKey, title: x.title, state: x.state, updatedAt: x.updatedAt, running: agentLoop ? agentLoop.running(x.id) : false })),
         });

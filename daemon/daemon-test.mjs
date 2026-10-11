@@ -644,6 +644,45 @@ await t('agent：stop() 中止挂起中的追问（decision 取消 + 轮次 abor
   assert.equal(store.getPendingAgentDecision(sessionId), null, '决定应被取消');
   assert.equal(store.getAgentSession(sessionId).state, 'idle');
 });
+await t('agent：ask_user 超时默认选第一项（LG 行为：decision allowed + 回填 selected）', async () => {
+  const q = '?toolcall=ask_user&toolargs=' + encodeURIComponent('{"question":"选哪个？","options":[{"id":"a","label":"A"},{"id":"b","label":"B"}]}');
+  const scheduler = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW('ag4', 'agkey4', q)], maxInFlight: 1 } });
+  const llm = createAgentLlm({ scheduler, log: quiet });
+  const loop = createAgentLoop({
+    store, chat: llm.chat, takeUsage: llm.takeUsage, tools: [askUserTool], log: quiet,
+    options: { decisionTimeoutMs: 1500 },   // 默认 questionDefaultFirst=true
+  });
+  const sessionId = store.createAgentSession({ bookKey: '', title: 'timeout-default' });
+  let questionId = null;
+  const r = await loop.runTurn(sessionId, '问一下', { onEvent: (e) => { if (e.type === 'question') questionId = e.decisionId; } });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(questionId, '应产生提问');
+  const toolRow = store.listAgentMessages(sessionId).find((x) => x.role === 'tool');
+  const parsed = JSON.parse(toolRow.content);
+  assert.equal(parsed.ok, true, JSON.stringify(parsed));
+  assert.equal(parsed.result.answer.selected, 'a', JSON.stringify(parsed.result));
+  assert.equal(parsed.result.answer.reason, 'timeout_default', JSON.stringify(parsed.result));
+  assert.equal(store.getAgentDecision(questionId).status, 'allowed');
+  assert.equal(store.getPendingAgentDecision(sessionId), null);
+});
+await t('agent：ask_user 超时关闭默认项 → 维持取消（ask_cancelled）', async () => {
+  const q = '?toolcall=ask_user&toolargs=' + encodeURIComponent('{"question":"选哪个？","options":[{"id":"a","label":"A"},{"id":"b","label":"B"}]}');
+  const scheduler = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW('ag5', 'agkey5', q)], maxInFlight: 1 } });
+  const llm = createAgentLlm({ scheduler, log: quiet });
+  const loop = createAgentLoop({
+    store, chat: llm.chat, takeUsage: llm.takeUsage, tools: [askUserTool], log: quiet,
+    options: { decisionTimeoutMs: 1500, questionDefaultFirst: false },
+  });
+  const sessionId = store.createAgentSession({ bookKey: '', title: 'timeout-cancel' });
+  let questionId = null;
+  const r = await loop.runTurn(sessionId, '问一下', { onEvent: (e) => { if (e.type === 'question') questionId = e.decisionId; } });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const toolRow = store.listAgentMessages(sessionId).find((x) => x.role === 'tool');
+  const parsed = JSON.parse(toolRow.content);
+  assert.equal(parsed.result.ok, false, JSON.stringify(parsed));
+  assert.equal(parsed.result.error, 'ask_cancelled', JSON.stringify(parsed));
+  assert.equal(store.getAgentDecision(questionId).status, 'cancelled');
+});
 
 console.log('== Agent 只读工具（A2：技能目录 + 书/正文/译文/质检，真实 HTTP） ==');
 const readToolSet = [...createReadTools({ store, engine, makeClient, log: quiet }), doingTool, askUserTool];

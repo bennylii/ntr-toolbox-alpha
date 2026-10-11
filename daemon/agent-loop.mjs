@@ -25,6 +25,7 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
     compactThresholdTokens: 120000,
     keepRecentMessages: 12,
     decisionTimeoutMs: 300000,
+    questionDefaultFirst: true,     // 追问超时默认选第一项（LG 行为；可在设置页关闭）
     bookKey: '',
     extraSystem: '',
     deps: {},                      // A2/A3：makeClient / pipelines / engine / skills 等
@@ -40,6 +41,7 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
       compactThresholdTokens: opt.compactThresholdTokens,
       keepRecentMessages: opt.keepRecentMessages,
       decisionTimeoutMs: opt.decisionTimeoutMs,
+      questionDefaultFirst: opt.questionDefaultFirst,
     },
   });
 
@@ -185,15 +187,23 @@ ${String(loaded.content || '').slice(0, 6000)}`;
     }
   }
 
-  // 运行中热更新（GUI / 设置页用）：只接受数值预算与审批模式
+  // 运行中热更新（GUI / 设置页用）：只接受数值预算、审批模式与追问超时策略
   function setOptions(partial = {}) {
     for (const [key, raw] of Object.entries(partial || {})) {
       if (['maxContextTokens', 'compactThresholdTokens', 'keepRecentMessages', 'maxSteps', 'toolResultMaxChars'].includes(key)) {
         const n = Math.floor(Number(raw));
         if (Number.isFinite(n) && n > 0) opt[key] = n;
       }
+      if (key === 'decisionTimeoutMs') {
+        const n = Math.floor(Number(raw));
+        if (Number.isFinite(n) && n >= 5000) opt.decisionTimeoutMs = n;
+      }
+      if (key === 'questionDefaultFirst' && typeof raw === 'boolean') opt.questionDefaultFirst = raw;
       if (key === 'approvalMode' && (raw === 'auto' || raw === 'manual')) opt.approvalMode = raw;
     }
+    // 追问超时策略在会话层生效（ask 的默认超时与超时分支都读它），与循环层同源
+    sessionApi.options.decisionTimeoutMs = opt.decisionTimeoutMs;
+    sessionApi.options.questionDefaultFirst = opt.questionDefaultFirst;
     return { ...opt };
   }
 
