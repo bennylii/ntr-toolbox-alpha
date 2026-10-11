@@ -16,6 +16,7 @@ All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 ### LG 对齐六项（②⑥①⑤③④）
 
 - **② 技能带可执行脚本**：`read_skill` 返回值新增 `baseUrl`（技能包目录的 `file:` URL）——agent 在 `workspace_run` 沙箱里可用 `await import(new URL('scripts/xxx.mjs', baseUrl).href)` 加载技能自带脚本（对齐 LG 的 `matchLiterals` 模式）；沙箱 execArgv 把内置技能根（repo `skills/`）加进 `--allow-fs-read` 白名单（只读——写内置包撞权限模型天然拒绝，用户技能根仍读写）。现有技能包全是纯文档，属纯使能基建（手测：白名单下 import 成功、去掉即 `ERR_ACCESS_DENIED`）。
+- **⑥ quality-workflow 审校技能充实（纯内容）**：七码表每码补「取证命令」列；新增「审校循环」节——批量取证优先 `workspace_run` 扫 `warnings/entries.jsonl`（无绑书回落 `list_warnings` 分页）、自启发种子循环 + 种子账本 `work/review-seeds.json`（LG 同构：`completedRounds` + `seeds.{轮次:[{pattern, consumed}]}`，每轮必须更新、禁止跨轮补写、≥3 轮收敛）、处置映射（个别行 → 修句**提案**、整章 → `run_check` 复核后建议 `run_translate` expire 档、术语类 → 转 glossary-workflow、`RETRY_THRESHOLD` → 只读人工）、汇报规范（只挑重点码 + 落地率口径引用 acceptance-scan）；新增 `references/review.md` 七码逐节（判据 → 误报排除 → 处置）。红线写明：只产提案，不直写译文。
 
 ### 连接与凭据
 
