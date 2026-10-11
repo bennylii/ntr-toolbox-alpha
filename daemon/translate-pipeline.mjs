@@ -5,7 +5,7 @@
 // 内存纪律：段落/译文只在单章作用域内存在，上传后随作用域释放（工作区泄漏的正面修复）。
 // 调度纪律：所有 LLM 请求经 LlmScheduler（默认全局单线程）；本次 run 的选项以参数覆盖，不改共享配置。
 import crypto from 'node:crypto';
-import { segmentLines, translateSegment } from './translate.mjs';
+import { segmentLines, translateSegment, splitEmptyParagraphs, mergeEmptyParagraphs } from './translate.mjs';
 import { LlmScheduler } from './scheduler.mjs';
 import { processorFromStore } from './processors.mjs';
 import { templateFromStore, renderSystemPrompt } from './prompt.mjs';
@@ -117,9 +117,12 @@ export class TranslationPipeline {
           }
           const paragraphs = dto.paragraphJp || [];
           if (paragraphs.length === 0) { skipped += 1; continue; }
+          // 空段预过滤（④ 探针实测真站点含空段；LG 同款）：空段不进请求（编号/token 不花），
+          // 提交前原位回填 → 上传段数与顺序（上传契约）不变
+          const { filled } = splitEmptyParagraphs(paragraphs);
 
           // 分段 → 并发翻译（段缓存落库；未完成的段在下次运行复用）
-          const segments = segmentLines(paragraphs);
+          const segments = segmentLines(filled);
           const zhParts = new Array(segments.length).fill(null);
           let cursor = 0;
           let chapterRetries = 0;   // 本章各段重试次数取最大（质检 RETRY_THRESHOLD 用）
@@ -162,10 +165,11 @@ export class TranslationPipeline {
           await Promise.all(Array.from({ length: Math.min(concurrency, segments.length) }, () => lane()));
           if (shouldStop()) break;   // 本轮未跑完 → 不整章上传（已完成的段已缓存，续跑复用）
 
-          const paragraphsZh = zhParts.flat();
-          if (paragraphsZh.length !== paragraphs.length) {
-            throw new Error(`段落数不匹配：${paragraphsZh.length}/${paragraphs.length}`);
+          const filledZh = zhParts.flat();
+          if (filledZh.length !== filled.length) {
+            throw new Error(`段落数不匹配：${filledZh.length}/${filled.length}`);
           }
+          const paragraphsZh = mergeEmptyParagraphs(paragraphs, filledZh);   // 空段原位回填
           await client.uploadChapter(book, target.chapterId, { glossaryId: dto.glossaryId, paragraphsZh }, translatorId, target.volumeId);
           this.store.setProgress(bookKey, chapterKey, { glossaryUuid: target.glossaryUuid, state: 'done' });
           this.store.setChapterMeta(bookKey, chapterKey, { retries: chapterRetries });

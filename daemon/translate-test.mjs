@@ -174,6 +174,17 @@ await t('全空段直接返回（不请求）', async () => {
   assert.deepEqual(result, ['', '  ']);
   assert.equal(calls, 0);
 });
+await t('空段预过滤（④）：空段不进分段/请求；原位回填后段数与顺序不变', () => {
+  const paragraphs = ['a', '', '  ', 'b'];
+  const { filled, map } = T.splitEmptyParagraphs(paragraphs);
+  assert.deepEqual(filled, ['a', 'b'], '空段不进请求');
+  assert.deepEqual(map, [0, -1, -1, 1]);
+  assert.equal(T.segmentLines(filled).length, 1);
+  assert.deepEqual(T.mergeEmptyParagraphs(paragraphs, ['甲', '乙']), ['甲', '', '  ', '乙'], '原位回填（空段原样保留）');
+  const allEmpty = T.splitEmptyParagraphs(['', '  ']);
+  assert.equal(allEmpty.filled.length, 0, '全空章：零请求（filled 为空）');
+  assert.deepEqual(T.mergeEmptyParagraphs(['', '  '], []), ['', '  ']);
+});
 
 console.log(`\n通过 ${pass}，失败 ${fail}`);
 process.exit(fail === 0 ? 0 : 1);

@@ -113,6 +113,22 @@ await t('续跑：仅补剩余 2 章，段缓存复用（已完成章的段不�
   assert.equal(again.stats.requests, 0, '全部完成 + toc 已当前 → 零请求');
 });
 
+console.log('== 空段预过滤（④：真站点实测含空段 → 空段不进请求、提交前原位回填） ==');
+await t('runBook：含空段的章只把非空段送进请求；上传段数/顺序不变（空段原样回填）', async () => {
+  const bookKey = `web:mock/mock-empty-${RUN}`;
+  store.upsertBook({ key: bookKey, kind: 'web', providerId: 'mock', novelId: `mock-empty-${RUN}`, origin: MOCK, title: '' });
+  const r = await mkPipeline({}).runBook(bookKey);
+  assert.equal(r.stats.uploaded, 1, JSON.stringify(r.stats));
+  const stats = await fetch(`${MOCK}/__stats`).then((res) => res.json());
+  const up = stats.lastChapterUpload;
+  assert.equal(up.chapterId, 'e1');
+  assert.equal(up.count, 4, '上传段数 = 原段落数（含空段，上传契约不变）');
+  assert.equal(up.preview[1], '', '空段原位回填');
+  assert.equal(up.preview[2], '   ', '空白段原样保留');
+  assert.ok(String(up.preview[0]).includes('模拟译'), up.preview[0]);
+  assert.equal(stats.lastTranslate.lines, 2, '只有非空段进请求（编号/token 不花在空段上）');
+});
+
 console.log('== 调度器（P1：全局并发门 / key 池 / 限流 / 用量） ==');
 const quiet = { log: () => { }, error: () => { } };
 const mkW = (id, key, extra = '') => ({ id, model: 'mock-glossary-1', endpoint: `${MOCK}/v1${extra}`, key });

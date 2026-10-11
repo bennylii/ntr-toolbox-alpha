@@ -37,6 +37,33 @@ export function segmentLines(lines, options = {}) {
   return ranges.map((r) => lines.slice(r.start, r.end));
 }
 
+// ---- 空段预过滤（④ 探针实测真站点 paragraphJp 含空段：空段不占编号/token，提交前原位回填）----
+// splitEmptyParagraphs：filled = 参与翻译的段（原序）；map[i] = 该段在 filled 中的下标（空段 -1）
+export function splitEmptyParagraphs(paragraphs) {
+  const filled = [];
+  const map = [];
+  for (const raw of paragraphs || []) {
+    const text = String(raw == null ? '' : raw);
+    if (text.trim() === '') { map.push(-1); continue; }
+    map.push(filled.length);
+    filled.push(text);
+  }
+  return { filled, map };
+}
+
+// mergeEmptyParagraphs：filledZh 按 filled 顺序回填；空段原样保留（段数/顺序 = 上传契约）
+export function mergeEmptyParagraphs(paragraphs, filledZh) {
+  const { map } = splitEmptyParagraphs(paragraphs);
+  const out = [];
+  let k = 0;
+  (paragraphs || []).forEach((raw, i) => {
+    if (map[i] < 0) { out.push(String(raw == null ? '' : raw)); return; }
+    out.push(filledZh[k]);
+    k += 1;
+  });
+  return out;
+}
+
 // ---- 提示词（镜像 openai-prompt.ts；systemPrompt/thinking 可由模板注入，协议段不可改）----
 export function buildTranslateMessages(lines, glossary, options = {}) {
   const opts = options || {};

@@ -120,17 +120,17 @@ GF文庫 => GF文库
 ### 5. 预过滤与空行
 
 - **LG**：导入即预过滤（`create_project_commit` 内）：空行成 item 但**不发请求**（pre-pipeline 无可译内容 → `dst=src, PROCESSED`），纯符号行同样跳过——本例 300 行只有 178 进请求。
-- **daemon**：`segmentLines` 不滤空行，300 行全进协议（空行 `#n:` 占编号，解析侧原样保留）。站点章节的 `paragraphJp` 通常没有大段空行，所以实际影响主要在 **import-lg / txt 回导路径**；代价是空行占比高时（本例 37%）浪费编号和 token。
+- **daemon**：`segmentLines` 不滤空行，300 行全进协议（空行 `#n:` 占编号，解析侧原样保留）。**实测更正（④ 探针）**：真站点 `paragraphJp` 同样含大量空段——`tools/.probe-empty-paragraphs.mjs` 对 `web:syosetu/n7608cw` 前 3 章实测 557 段里 **198 段为空（35.5%）**，与本例摘录的 37% 空行占比吻合；原「站点通常没有大段空行」的推断不成立。daemon 已实装「分段前过滤 + 提交前原位回填」（`translate.mjs` 的 `splitEmptyParagraphs` / `mergeEmptyParagraphs`，上传段数与顺序不变），空行不再占编号和 token。
 
 ### 6. 并发与输出
 
 - 并发：LG 自动并发 4（1..16 自适应，429 减半，模型可显式 `concurrency_limit`/`rpm_limit`）；daemon 双池调度器（翻译池独立于助手/术语池），并发/RPM/逾时运行时可调（`jobRuntime`）。
 - 输出：LG CLI 写 `<outputDir>/<rel_path>` + `<outputDir>/bilingual/<rel_path>`（GUI 导出才带 `_译文`/`_译文_双语对照` 后缀目录）；daemon 译文直接提交站点，本地导出走 `export-src`（一行一段 + 对齐清单）与 `import-lg`（三层校验回切）。
 
-## 四、可借鉴点（仅记录，未改代码）
+## 四、可借鉴点（记录 + 采纳状态）
 
 1. **条目级对账 + 缩段重试**：LG 只重试解析失败的子集，daemon 段级全有全无——长段里单行解析失败会拖整段重试。daemon 已有二分兜底，但「按 id/编号对账后只补缺行」是更省的重试形态（代价是与站点二分语义分叉）。
-2. **空行不进请求**：LG 让空行在导入时直接落 `dst=src`，编号/token 都不花；daemon 的 txt 回导路径（import-lg）可以考虑同样的预过滤，站点在线路径不受影响。
+2. **空行不进请求**：LG 让空行在导入时直接落 `dst=src`，编号/token 都不花。**已实装（④）**：探针实测真站点空段占比 35.5%（见三.5），daemon 站点在线路径已做分段前过滤 + 提交前原位回填（`splitEmptyParagraphs` / `mergeEmptyParagraphs`；上传契约不变）。
 3. **分段随模型预算**：LG 的 `max(8, token_limit/16)` 让每请求行数自适应模型上下文；daemon 的 1500/30 是站点镜像（有行为对齐价值），但给「非站点镜像模式」留一个 token 上限选项是低风险的增强。
 4. **`<why>` 结构化思考**：强制模型先输出极简「语境/决策」块再给正文，解析侧剥除——对质量有可感知收益，且与 daemon 现有的可选思考指引兼容（可做成协议段）。
 5. **术语表 info 列**：LG 的 `#类型`（人名/地名/组织…）进提示词给模型类型线索；daemon 的站点术语格式固定 `{jp: zh}`，若未来扩展可考虑附带类型说明。

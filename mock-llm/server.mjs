@@ -207,6 +207,10 @@ const transBook = (novelId) => {
 const transChapters = (novelId) => (/mock-trans-r/.test(novelId) ? ['r1', 'r2', 'r3'] : ['t1', 't2', 't3']);
 const transParagraphCount = (chapterId) => (chapterId.endsWith('1') ? 6 : chapterId.endsWith('2') ? 4 : 2);
 const transParagraphs = (chapterId) => Array.from({ length: transParagraphCount(chapterId) }, (_, i) => `第${i + 1}行：アリスが魔導書を読む。`);
+// 空段夹具（④）：真站点 paragraphJp 含空段/空白段——验证 daemon「空段不进请求 + 提交前原位回填」
+const emptyParagraphs = () => ['第1行：アリスが魔導書を読む。', '', '   ', '第4行：ローズも来た。'];
+const chaptersFor = (novelId) => (/mock-empty/.test(novelId) ? ['e1'] : transChapters(novelId));
+const paragraphsFor = (novelId, chapterId) => (/mock-empty/.test(novelId) ? emptyParagraphs() : transParagraphs(chapterId));
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || HOST}`);
@@ -279,7 +283,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { ...cors, 'content-type': 'application/json', 'cache-control': 'no-store' });
     const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || (url.pathname.split('/').filter(Boolean)[3] || 'mock-novel');
     const state = transBook(novelId);
-    if (/\/chapter-task\//.test(url.pathname) && !/mock-trans/.test(novelId)) {
+    if (/\/chapter-task\//.test(url.pathname) && !/mock-trans/.test(novelId) && !/mock-empty/.test(novelId)) {
       // 非 mock-trans 的书：rich 风格（25/12 段 + 对齐旧译，供修句/回扫用例）
       const ch = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
       const n = ch === 'ch2' ? 12 : 25;
@@ -297,7 +301,7 @@ const server = http.createServer(async (req, res) => {
     if (/\/chapter-task\//.test(url.pathname)) {
       const chapterId = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
       const done = state.get(chapterId);
-      const paragraphs = transParagraphs(chapterId);
+      const paragraphs = paragraphsFor(novelId, chapterId);
       res.end(JSON.stringify({
         paragraphJp: paragraphs,
         oldParagraphZh: done ? paragraphs.map((_, i) => `【已译】第${i + 1}行`) : null,
@@ -316,7 +320,7 @@ const server = http.createServer(async (req, res) => {
         chapterId,
         glossaryId: body.glossaryId,
         count: Array.isArray(body.paragraphsZh) ? body.paragraphsZh.length : 0,
-        preview: Array.isArray(body.paragraphsZh) ? body.paragraphsZh.slice(0, 2) : [],
+        preview: Array.isArray(body.paragraphsZh) ? body.paragraphsZh.slice(0, 8) : [],
       };
       res.end(JSON.stringify({ jp: 1, zh: 1 }));
       return;
@@ -330,7 +334,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && /^\/api\/(novel|wenku)\//.test(url.pathname)) {
     const segs = url.pathname.split('/').filter(Boolean);
     const rich = /mock-src/.test(url.pathname);
-    const trans = /mock-trans/.test(url.pathname);
+    const trans = /mock-trans/.test(url.pathname) || /mock-empty/.test(url.pathname);   // mock-empty：空段夹具（④）
     const boost = /mock-boost/.test(url.pathname);
     const noted = /mock-noted/.test(url.pathname);
     const check = /mock-check/.test(url.pathname);
@@ -366,7 +370,7 @@ const server = http.createServer(async (req, res) => {
         // 站点「下载原文」格式（mode=jp）：头部 → ############ → 简介，之后每章 = `# 标题` + 空行 + 逐段正文，
         // 章块之间 3 行结构空行；段落与 chapter-task 同源（transParagraphs），保证 daemon 的 sha1 对齐能过。
         const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || (url.pathname.split('/').filter(Boolean)[3] || 'mock-novel');
-        const chapters = transChapters(novelId);
+        const chapters = chaptersFor(novelId);
         const lines = [
           `书名 ${novelId}`,
           '',
@@ -383,7 +387,7 @@ const server = http.createServer(async (req, res) => {
         ];
         for (const chapterId of chapters) {
           lines.push(`# 章 ${chapterId}`, '');
-          for (const p of transParagraphs(chapterId)) lines.push(p);
+          for (const p of paragraphsFor(novelId, chapterId)) lines.push(p);
           lines.push('', '', '');
         }
         res.end(lines.join('\n'));
@@ -397,7 +401,7 @@ const server = http.createServer(async (req, res) => {
       const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || (url.pathname.split('/').filter(Boolean)[3] || 'mock-novel');
       const state = transBook(novelId);
       res.end(JSON.stringify({
-        toc: transChapters(novelId).map((chapterId) => ({ chapterId, titleJp: `章 ${chapterId}`, glossaryUuid: state.get(chapterId) || undefined })),
+        toc: chaptersFor(novelId).map((chapterId) => ({ chapterId, titleJp: `章 ${chapterId}`, glossaryUuid: state.get(chapterId) || undefined })),
         glossaryUuid: TRANS_GLOSSARY_ID,
         glossary: {},
       }));
