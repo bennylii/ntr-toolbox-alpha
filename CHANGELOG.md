@@ -55,6 +55,7 @@ All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 
 ### 文档 / 仓库
 
+- **LinguaGacha 流程同文对比入库（`tools/lg-compare/` + `docs/lg-compare.md`）**：同一篇 300 行日文小说摘录分别走 LinguaGacha v0.125.0 的官方 CLI 流程（进程内装配 + 内置 stub 端点，不需要 Electron）和本仓库 `daemon/translate.mjs` 真实核心，两侧每个请求的完整 system/user 提示词全量落盘（`artifacts/*.jsonl`）。实测：LG 9 请求/进请求 178 行（空行零请求、纯符号行预过滤、token 上限分段 13–26 行/请求、术语表 `src -> dst #info` 按 work unit 命中激活、条目级 id 对账 + 缩段重试、`<why>` 结构化思考块）；daemon 10 请求/300 行全进（1500 字符/30 行固定分段、空行占编号、段级重试 + 二分、`jp => zh` 按段命中注入）。报告含六维对比、双方提示词全文与 5 条可借鉴点（仅记录未改码）；LG 侧驱动由 `run-lg-flow.mjs` 复制进 LG 仓库 vitest 跑完即删，LG 仓库跟踪文件零改动。
 - 安装/更新流程写清楚（README「安装」+ AGENTS「交付流程」）：三个装法（仓库文件 / 走 mock 装正式构建 / `gen-dev` 后的 dev 构建）、**mock 必须先起着**（8788 没进程时浏览器就是"连接被拒"）、脚本头无 `@updateURL` 所以 **Tampermonkey 不会自动更新**、测试 profile 里重装 ≠ 日常浏览器也更新（两边各自要装并刷新）；daemon/README 补「从站点同步」按钮的前提。
 - LinguaGacha 上游源码 junction 挂载到仓库根（`linguagacha/` → `C:\cache\linguagacha`，pin `MANUAL_BUILD_v0.125.0`——spec-06..10 的借鉴出处，另留 `upstream-main` 分支备查；独立仓库不入库）：AGENTS 结构与上手表、README 导航表补行。
 

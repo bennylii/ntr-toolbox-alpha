@@ -68,6 +68,7 @@ README.md                     使用说明（命令/控制台/托盘/各专项�
 | 查版本 / 发布 | `CHANGELOG.md`；发布流程见下方「交付流程」 |
 | KeywordGacha 上游（术语管线的出处，含 auto-novel 术语表导出） | `keywordgacha/`（junction 挂载的独立 fork 仓库，不入本库） |
 | LinguaGacha 上游（调度/质检/处理链/提示词/LG 互通的借鉴出处） | `linguagacha/`（junction 挂载，pin `MANUAL_BUILD_v0.125.0`——spec-06..10 引用的就是这一版；源码在 `src/` 下） |
+| 和 LG 流程做同文对比（管线行为/提示词证据/复跑） | `tools/lg-compare/`（两侧可复跑驱动 + 请求全量落盘的 artifacts；结论在 `docs/lg-compare.md`） |
 
 ## 常用命令
 
