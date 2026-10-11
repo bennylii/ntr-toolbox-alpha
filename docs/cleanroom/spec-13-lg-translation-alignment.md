@@ -21,6 +21,18 @@
 附加统计：`疑似未翻` = 结果行 === 原文行且非空（LG 空译文回退原文的特性）——dry-run 报告先看这个数再提交。
 通过章携带 `{glossaryId(站点当前), paragraphsZh}` 供提交；未过章 `paragraphsZh=null`。
 
+### 2.1 站点「下载原文」格式（mode=jp）自动对齐
+
+站点简介页「下载原文」拿到的是另一种 txt：头部（书名/作者/标签/统计）→ `############` → 简介，之后每章 = `# 标题` + 1 结构空行 + 逐段正文，章块之间还有结构空行；卷/分组标题自身也占「`# 标题` + 空行」两行（它们没有章条目）。经 LinguaGacha 翻译后仍是同格式（LG 保行数），所以可以折回契约行数组：
+
+- **触发条件（保守，不误伤契约格式）**：结果行数 ≠ 清单 `linesTotal`，且文本里出现 `############` 或 `^# ` 标题行；满足才抓站点原文（`GET .../file?mode=jp&filename=jp.<novelId>.txt`，一次 2MB 级请求）；
+- **对齐规则** `convertSiteFormat({zhLines, jpLines, manifest})`：从首个 `# ` 行起，每章按「标题 + 跳 1 空行 + count 段」定位，并在 ±2 行窗口内用**逐章 sha1** 找回块起点（卷/分组标题顶掉两行时兜底）；随后逐段比对空/非空模式。**任一章对不上即整体失败**（返回 `{ok:false, reason}`），绝不输出错位数据；
+- **输出**：与 `export-src` 契约完全等价的「一行一段」行数组（内存，不落盘），交给同一套三层校验与提交路径；
+- **失败语义**：抓原文是 2MB 级请求，代理链路抖动时容易整场失败 → `alignLgResult` 按轮次重试（默认 3 轮 + 轮间歇），全轮失败把原因放进 `alignError`：runner 抛「…（站点格式自动对齐失败：fetch failed——代理链路抖动时稍后重跑）」、`/lg/verify` 回 `convertError` 由面板显示，而不是只报「行数不符」；
+- **Callers 一致**：`/lg/verify`、`lg-import` runner、CLI `import-lg`、Agent `import_lg_result` 共用 `alignLgResult`；契约格式路径**零额外请求**；
+- **清单归属**：`manifest.book.key` 与当前项目不一致时直接拒绝（防串项目）；
+- 离线转换 / 逐章诊断：`node tools/.lg-import-sitefmt.mjs --book <key> --zh <LG译文.txt> --manifest <清单.json> [--jp 快照] [--out 结果] [--report 诊断.json]`（与 daemon 同一内核）。
+
 ## 3. 提交（import-lg --apply / /run job=lg-import / import_lg_result）
 
 - 逐章 `uploadChapter`（spec 契约：`{glossaryId, paragraphsZh, sakuraVersion:'0.9'}`，段落数严格一致）→ 站点与 daemon 均视为「GPT 工作区已译」；
@@ -42,5 +54,6 @@
 
 ## 6. 验证对照
 
-- 纯函数 `lg-align-test.mjs` 10 例（导出行映射、清单结构、解析容忍、全对齐、疑似未翻、三类拒绝、漂移、章失败）；
-- daemon-test「LG 导入 GUI」7 例（端点/上传白名单/校验/队列全流程/进度断言）+ 浏览器 e2e `tools/.e2e-lg-gui.js`。
+- 纯函数 `lg-align-test.mjs` 17 例（导出行映射、清单结构、解析容忍、全对齐、疑似未翻、三类拒绝、漂移、章失败 + 站点格式 7 例：识别/头部与卷标题不误伤/空行模式拒绝/sha1 漂移拒绝/行数符零请求/不像站点格式不转换/清单串项目 fatal）；
+- daemon-test「LG 导入」9 例（端点/上传白名单/校验/队列全流程/进度断言 + 站点格式两例：`/lg/verify` 自动对齐 3/3、`/run lg-import` 站点格式全量提交且 `stats.converted=true`）；
+- 浏览器 e2e `tools/.e2e-lg-gui.js`：mock 车道一把跑完（契约格式 + 站点格式自动对齐两段，43 项断言）；真机车道用 `window.__LG_GUI_TEST` 分阶段（`export/open/verify-start/verify/apply/await`）+ `node tools/cdp.mjs setfiles "<选择器>" <真实 txt>` 塞盘上文件，长流程不受单条 CDP 命令超时限制。

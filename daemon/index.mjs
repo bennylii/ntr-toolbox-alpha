@@ -31,7 +31,7 @@ const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
 const { CheckPipeline, samplesToTsv } = await imp('check-pipeline.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
 const { parseBookUrl } = await imp('book-url.mjs');
-const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport, exportBookSource, applyImportReport, createLgImportRunner } = await imp('lg-align.mjs');
+const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport, alignLgResult, exportBookSource, applyImportReport, createLgImportRunner } = await imp('lg-align.mjs');
 const { createAgentLlm } = await imp('agent-llm.mjs');
 const { createAgentLoop } = await imp('agent-loop.mjs');
 const { doingTool, askUserTool } = await imp('agent-tools.mjs');
@@ -78,7 +78,13 @@ const proxyFetch = createProxyFetch({ getProxy });
 
 function makeClient(book) {
   const origin = book.origin || store.getConfig('origin') || 'https://n.novelia.cc';
-  return new SiteClient({ origin, token: store.getConfig('token') || '', engine, fetchImpl: proxyFetch });
+  const siteCfg = store.getConfig('site') || {};
+  const retries = Number.isFinite(Number(siteCfg.retries)) ? Math.max(0, Math.min(8, Math.floor(Number(siteCfg.retries)))) : 3;
+  return new SiteClient({
+    origin, token: store.getConfig('token') || '', engine, fetchImpl: proxyFetch, retries,
+    // 传输层重试可观测（代理链路抖动：ECONNRESET / fetch failed / 超时）；次数在控制台「站点与凭据」可调
+    onRetry: (e, n, label) => log.log(`  站点请求失败，重试 ${n}/${retries}：${(e && e.message) || e}（${String(label).slice(0, 80)}）`),
+  });
 }
 
 // 调度器（全局并发门默认 1 = 单线程 Gemini 场景）；配置优先级：CLI 旗标 > config.llm > 默认
@@ -470,8 +476,11 @@ switch (command) {
     const ioClient = makeClient(ioBook);
     const ioLines = splitResultLines(fs.readFileSync(path.resolve(flags.txt), 'utf8'));
     const ioManifest = JSON.parse(fs.readFileSync(path.resolve(flags.manifest), 'utf8'));
+    const ioAligned = await alignLgResult({ client: ioClient, book: ioBook, manifest: ioManifest, resultLines: ioLines, log: (m) => log.log(m) });
+    if (ioAligned.fatal) { log.error(ioAligned.fatal); break; }
+    if (ioAligned.converted) log.log(`  ↻ ${ioAligned.note}`);
     const ioReport = await verifyImport({
-      resultLines: ioLines,
+      resultLines: ioAligned.lines,
       manifest: ioManifest,
       getChapter: (chapterId, volumeId) => ioClient.getChapterTask(ioBook, chapterId, 'gpt', volumeId),
     });

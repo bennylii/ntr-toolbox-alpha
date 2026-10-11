@@ -362,6 +362,33 @@ const server = http.createServer(async (req, res) => {
         ].join('\n'));
         return;
       }
+      if (trans && url.searchParams.get('mode') === 'jp') {
+        // 站点「下载原文」格式（mode=jp）：头部 → ############ → 简介，之后每章 = `# 标题` + 空行 + 逐段正文，
+        // 章块之间 3 行结构空行；段落与 chapter-task 同源（transParagraphs），保证 daemon 的 sha1 对齐能过。
+        const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || (url.pathname.split('/').filter(Boolean)[3] || 'mock-novel');
+        const chapters = transChapters(novelId);
+        const lines = [
+          `书名 ${novelId}`,
+          '',
+          '作者[mock]',
+          '',
+          '标签 / 测试 / ',
+          `总计: ${chapters.length} / GPT: ${chapters.length}`,
+          '',
+          '############',
+          '简介：这是 mock 的站点导出格式夹具。',
+          '',
+          '',
+          '',
+        ];
+        for (const chapterId of chapters) {
+          lines.push(`# 章 ${chapterId}`, '');
+          for (const p of transParagraphs(chapterId)) lines.push(p);
+          lines.push('', '', '');
+        }
+        res.end(lines.join('\n'));
+        return;
+      }
       res.end('アルテは笑った\nオルトが来た\nアリスが魔導書を読む。\nローズも来た。\n');
       return;
     }

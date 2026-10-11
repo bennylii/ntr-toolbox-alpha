@@ -11,7 +11,7 @@ import { PROMPT_SLOTS, DEFAULT_TEMPLATE, FORMAT_RULES } from './prompt.mjs';
 import { UI_HTML } from './ui.mjs';
 import { createJobQueue } from './job-queue.mjs';
 import { restoreSnapshot, applyProposal } from './glossary-io.mjs';
-import { exportBookSource, splitResultLines, verifyImport } from './lg-align.mjs';
+import { exportBookSource, splitResultLines, verifyImport, alignLgResult } from './lg-align.mjs';
 import { PRESET_NAMES, presetInfo, readTextPreserveConfig } from './preserve.mjs';
 import { VERSION } from './version.mjs';
 import { createProxyFetch, normalizeProxyConfig, assertProxyConfig } from './proxy.mjs';
@@ -58,6 +58,12 @@ const maskKey = (key) => {
   const s = String(key || '');
   if (s === '') return '';
   return s.length <= 8 ? s.slice(0, 2) + '…' : s.slice(0, 4) + '…' + s.slice(-2);
+};
+
+// 站点请求传输层重试次数（config.site.retries；默认 3，0–8）
+const normalizeSiteRetries = (raw) => {
+  const n = Math.floor(Number(raw && raw.retries));
+  return Number.isFinite(n) ? Math.max(0, Math.min(8, n)) : 3;
 };
 
 export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler = null, queue, makeClient, engine, agentLoop, agentEvents, port = 7331, log = console, lgImportRunner = null, lgDirs = null }) {
@@ -193,6 +199,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
             authRequest: authRequestFresh(),
             serve: { port, ...serveConfig() },
             proxy: normalizeProxyConfig(store.getConfig('proxy')),
+            site: { retries: normalizeSiteRetries(store.getConfig('site')) },
             textPreserve: { ...readTextPreserveConfig(store), presets: presetInfo() },
           },
         });
@@ -239,6 +246,14 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
             next.origins = body.serve.origins.map((o) => String(o || '').trim()).filter(Boolean).slice(0, 32);
           }
           store.setConfig('serve', next);
+        }
+        if (body.site && typeof body.site === 'object') {
+          const cur = store.getConfig('site') || {};
+          const n = Math.floor(Number(body.site.retries));
+          if (Number.isFinite(n)) {
+            // 站点请求传输层重试次数（墙内代理链路抖动大时加档；0=不重试，上限 8）
+            store.setConfig('site', { ...cur, retries: Math.max(0, Math.min(8, n)) });
+          }
         }
         if (body.textPreserve && typeof body.textPreserve === 'object') {
           const cur = store.getConfig('textPreserve') || {};
@@ -507,14 +522,21 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           const lines = splitResultLines(fs.readFileSync(txtPath, 'utf8'));
           const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
           const client = makeClient(book);
-          const report = await verifyImport({
-            resultLines: lines,
-            manifest,
-            getChapter: (chapterId, volumeId) => client.getChapterTask(book, chapterId, 'gpt', volumeId),
-          });
+          // 站点「下载原文」经 LG 翻译的 txt 是另一种格式：行数不符且像站点导出时自动抓原文对齐
+          const aligned = await alignLgResult({ client, book, manifest, resultLines: lines, log: (m) => log.log(m) });
+          const report = aligned.fatal
+            ? { globalError: aligned.fatal, okCount: 0, total: 0, untranslated: 0, chapters: [] }
+            : await verifyImport({
+              resultLines: aligned.lines,
+              manifest,
+              getChapter: (chapterId, volumeId) => client.getChapterTask(book, chapterId, 'gpt', volumeId),
+            });
           send(200, {
             ok: true,
             globalError: report.globalError,
+            converted: aligned.converted,
+            convertNote: aligned.note || '',
+            convertError: aligned.alignError || '',
             okCount: report.okCount,
             total: report.total,
             untranslated: report.untranslated,

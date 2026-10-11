@@ -1,15 +1,45 @@
 // daemon/site-client.mjs —— 站点契约客户端（工作区兼容；与站点前端同一套接口）
 // kind: 'web'（/api/novel/...）| 'wenku'（/api/wenku/...）；401 有明确错误码（提示重新同步凭据）。
+// 传输层重试：站点常经代理访问（链路抖动 → ECONNRESET / fetch failed / 超时），失败按次数退避重试；
+// HTTP 状态错误（401/400/404/5xx 响应）不重试，直接抛给上层。
 export class SiteClient {
-  constructor({ origin, token, engine, fetchImpl }) {
+  constructor({ origin, token, engine, fetchImpl, retries = 3, retryDelayMs = 300, onRetry = null }) {
     this.engine = engine;   // parseParallelText 等纯函数（术语管线用）
     this.origin = String(origin || '').replace(/\/$/, '');
     this.token = token || '';
     // 出网收口：默认全局 fetch；daemon 装配时注入代理转发（daemon/proxy.mjs）
     this.fetchImpl = typeof fetchImpl === 'function' ? fetchImpl : ((...args) => globalThis.fetch(...args));
+    const n = Number(retries);
+    this.retries = Number.isFinite(n) ? Math.max(0, Math.min(6, Math.floor(n))) : 3;
+    const d = Number(retryDelayMs);
+    this.retryDelayMs = Number.isFinite(d) && d >= 0 ? d : 300;
+    this.onRetry = typeof onRetry === 'function' ? onRetry : null;
   }
 
   setToken(token) { this.token = token || ''; }
+
+  // 传输失败重试（退避 retryDelayMs × 次数）；HTTP 状态错误在读取层标 noRetry 后不重试
+  async #withRetries(label, run) {
+    let lastErr = null;
+    for (let attempt = 0; attempt <= this.retries; attempt += 1) {
+      try { return await run(); } catch (e) {
+        if (e && e.noRetry) throw e;
+        lastErr = e;
+        if (attempt >= this.retries) break;
+        if (this.onRetry) { try { this.onRetry(e, attempt + 1, label); } catch { } }
+        await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs * (attempt + 1)));
+      }
+    }
+    throw lastErr;
+  }
+
+  // 传输/状态错误分流：状态码错误不回重试
+  static #httpError(message, code = '') {
+    const e = new Error(message);
+    if (code) e.code = code;
+    e.noRetry = true;
+    return e;
+  }
 
   async fetchRaw(pathname, { method = 'GET', body, timeoutMs = 60000 } = {}) {
     const controller = new AbortController();
@@ -30,30 +60,40 @@ export class SiteClient {
   }
 
   async #json(pathname, options) {
-    const res = await this.fetchRaw(pathname, options);
-    if (res.status === 401) { const e = new Error('401 未授权：token 失效，请重新同步凭据'); e.code = 'unauthorized'; throw e; }
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      throw new Error(`HTTP ${res.status} ${pathname}${detail ? `：${String(detail).slice(0, 120)}` : ''}`);
-    }
-    return res.json();
+    return this.#withRetries(pathname, async () => {
+      const res = await this.fetchRaw(pathname, options);
+      if (res.status === 401) throw SiteClient.#httpError('401 未授权：token 失效，请重新同步凭据', 'unauthorized');
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw SiteClient.#httpError(`HTTP ${res.status} ${pathname}${detail ? `：${String(detail).slice(0, 120)}` : ''}`);
+      }
+      return res.json();
+    });
   }
 
   async getText(pathname) {
-    const res = await this.fetchRaw(pathname);
-    if (res.status === 401) { const e = new Error('401 未授权：token 失效，请重新同步凭据'); e.code = 'unauthorized'; throw e; }
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${pathname}`);
-    return res.text();
+    return this.#withRetries(pathname, async () => {
+      const res = await this.fetchRaw(pathname);
+      if (res.status === 401) throw SiteClient.#httpError('401 未授权：token 失效，请重新同步凭据', 'unauthorized');
+      if (!res.ok) throw SiteClient.#httpError(`HTTP ${res.status} ${pathname}`);
+      return res.text();
+    });
   }
 
   async putGlossaryRaw(book, glossary) {
     const pathname = book.kind === 'web'
       ? `/api/novel/${book.providerId}/${book.novelId}/glossary`
       : `/api/wenku/${book.novelId}/glossary`;
-    const res = await this.fetchRaw(pathname, { method: 'PUT', body: glossary });
-    if (res.status === 401) { const e = new Error('401 未授权：token 失效，请重新同步凭据'); e.code = 'unauthorized'; throw e; }
-    if (!res.ok) { const detail = await res.text().catch(() => ''); throw new Error(`写入术语表失败 HTTP ${res.status}${detail ? `：${String(detail).slice(0, 120)}` : ''}`); }
-    return true;
+    // 整表替换，内容幂等：传输失败重试安全
+    return this.#withRetries(pathname, async () => {
+      const res = await this.fetchRaw(pathname, { method: 'PUT', body: glossary });
+      if (res.status === 401) throw SiteClient.#httpError('401 未授权：token 失效，请重新同步凭据', 'unauthorized');
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw SiteClient.#httpError(`写入术语表失败 HTTP ${res.status}${detail ? `：${String(detail).slice(0, 120)}` : ''}`);
+      }
+      return true;
+    });
   }
 
   // ---- 契约方法（翻译 worker 所需） ----

@@ -66,9 +66,11 @@
 2. `POST .../translate-v2/{t}/chapter-task/{ch}?sync=false` → `paragraphJp` + 旧译（`sync` 必填，缺了 404）；
 3. `POST .../translate-v2/gpt/chapter/{id}` body `{glossaryId, paragraphsZh, sakuraVersion:'0.9'}` → 章节提交（`sakuraVersion` 是站点工作区客户端的固定常量，段落数严格一致）；
 4. `PUT .../glossary` 全量替换（写前快照 + 写后回读校验）；
-5. `GET .../file?mode=jp-zh&filename=…`（`filename` 必填，缺了 404）。
+5. `GET .../file?mode=jp-zh&filename=…`（`filename` 必填，缺了 404；另有 `mode=jp`（站点「下载原文」整本导出）与 `mode=zh`（整本译文，回扫/验收用），daemon 用它们做站点格式自动对齐与导入后比对）。
 
 鉴权 = `Authorization: Bearer <auth-v2.token>`；站点 API **不使用 Cookie**（refresh cookie 是 HttpOnly 且属站点域，daemon 无法也无需持有）。
+
+传输层重试：站点在墙内只经代理可达、链路抖动（`ECONNRESET` / `fetch failed` / 超时）频繁，`SiteClient` 对**网络层失败**默认重试 3 次（退避 300ms×n，`onRetry` 回调让 CLI 打出「站点请求失败，重试 n/3」；次数在控制台「站点与凭据」可调 0–8，存 `config.site.retries`）；**HTTP 状态错误（401/400/404/5xx 响应）不重试**，语义不变——章节提交与术语表 PUT 都是内容幂等的整章/整表写，重试安全。实测整本导入的校验通过率由此从 115/167 章升到 165–167/167（同一代理链路）。
 
 ### 4.2 LlmScheduler 与双模型池
 
@@ -112,10 +114,11 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 
 - **术语表**：`glossary-io` 双向 JSON（导入含引擎审计与 regex→规则分流）。
 - **译文**：`export-src`（GUI 同款）导出「一行一段」纯文本 + 对齐清单（每章 `start/count/jpSha1`）→ LinguaGacha 翻译（txt 天然保行号）→ `import-lg`/GUI「导入 LG 译文」按清单切片回章，**三层校验**（总行数 / 每章行数+空行模式 / 源 sha1）后按 §4.1-3 契约提交；GUI 里以 `lg-import` 队列任务跑，进度经队列 progress 通道实时回显。（规格 `docs/cleanroom/spec-13`）
+- **也接受站点「下载原文」格式**：站点 `mode=jp` 整本导出（头部 → `############` → 简介，之后每章 `# 标题` + 空行 + 正文）经 LG 翻译后仍是同格式，会在「行数不符 + 文本像站点导出」时自动抓原文逐章 sha1 对齐（±2 偏移窗口容忍卷/分组标题占两行、逐段空/非空模式；任一章不过即拒绝），契约格式路径零额外请求；抓原文是 2MB 级请求，失败分轮重试并把原因带进错误。纯函数 `convertSiteFormat`/`fetchSiteExportLines`/`alignLgResult` 在 `lg-align.mjs`（四处调用点共用：`/lg/verify`、`lg-import` runner、CLI、Agent 工具）。
 
 ### 4.9 控制台（`/ui`，Windows 经典灰 + 扁平直角）
 
-「项目」为一级容器：侧栏「当前项目」切换器全站跟随（通用 = 全局视角）；项目页卡片（进度/最近 run/队列/提案 + 导出/导入 LG 按钮）；任务/规则/提示词/助手/状态默认作用于当前项目；规则页另含「内置保护预设」选择器。提示词与技能是**全局资源**（LG 式）。设置页八个区块（连接 / 双模型池×2 / 调度×2 / 助手参数 / 站点与凭据 / 网络代理）。
+「项目」为一级容器：侧栏「当前项目」切换器全站跟随（通用 = 全局视角）；项目页卡片（进度/最近 run/队列/提案 + 导出/导入 LG 按钮）；任务/规则/提示词/助手/状态默认作用于当前项目；规则页另含「内置保护预设」选择器。提示词与技能是**全局资源**（LG 式）。设置页八个区块（连接 / 双模型池×2 / 调度×2 / 助手参数 / 站点与凭据——origin、从站点同步、token、站点请求重试 0–8 / 网络代理）。
 
 外观：**Windows 经典（PB/VB 年代）** —— **灰打底**（工作区/侧栏/分组框/表格皆 `#c0c0c0`，字段白底，对话区是白底"文档窗口"浮在灰工作区上）、1px `#808080` 描边、**零圆角**；**经典蓝只做点缀**（窗口标题栏与侧栏页眉 VB6/Office97 蓝渐变 `#0a246a → #a6caf0`、悬停/选中藏青 `#000080` 白字、表格行浅蓝 `#d6e2f5`、主按钮与焦点）、经典提示条配色（`#ffffe1`）、16px 方块滚动条（窄屏 10px）；图标用系统自带 **Segoe MDL2 Assets** 单色字形（JS `String.fromCodePoint(0xE8BD)` 生成，不写 `\u`/CSS `content` 转义）。经典体系只有浅色，**无深色主题**。滚动条两侧对称预留（`scrollbar-gutter: stable both-edges`）——聊天区与各页内容列因此与滚动条无关，不会出现"右侧多半个滚动条宽"的错位。
 
@@ -163,6 +166,7 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 | 沙箱网络开放 | 与 LG 一致；fs 由 `--permission` 收紧，子进程/worker 被默认拒绝 |
 | 自动同步挂 5s glance tick | 零新增定时器；指纹短路保证无变化零请求；5s 才能让控制台「从站点同步」按钮几秒内生效（探测是免凭据的本机回环请求，代价可忽略） |
 | 出网代理自研转发（而非 Node `NODE_USE_ENV_PROXY`） | 内置开关只在进程启动前解析代理环境变量、首值终身缓存，做不到「保存即生效」；自研转发挂在既有 fetchImpl 收口（site-client + scheduler 两条请求路径），配置每请求现读，且无 Node 版本门槛 |
+| 站点请求带传输层重试（默认 3 次退避） | 站点只经代理可达、链路抖动频繁（整本导入实测约 1/3 请求首发出错）；只重试网络层失败、HTTP 状态错误照旧直抛，且章/术语表写都是内容幂等的，重试不改语义。次数在控制台「站点与凭据」可调 0–8（默认 3：整本 167 章逐章抓取每轮约 2 章失败，8 次基本清零） |
 | cookie 通道不做 | 站点 API 只认 Bearer；真正续期的 refresh cookie 是 HttpOnly，页面读不到 |
 | 滚动条两侧对称预留（`scrollbar-gutter: stable both-edges`） | 聊天区滚动条占在窗口内部，会把居中的 928px 消息列挤偏半个滚动条宽（8px），而输入框/审批面板在窗口外不跟着动 → 一长对话就错位；两侧预留后内容盒宽度恒定，布局与滚动条有无无关（各页内容列同理保持居中） |
 | UI_HTML 内嵌脚本禁反斜杠转义 | 模板字面量会吃掉 `\n` → 整页静默失效；守卫测试在 daemon-test |
@@ -175,8 +179,8 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 | 油猴页面流 | `tools/.e2e-*.js`（inject）+ `tools/.run-suite.mjs` | mock 8788/8790 + CDP 车道 |
 | daemon 纯函数 | quality / translate / processors / prompt / glossary-io / lg-align / agent / agent-skills `-test.mjs` | 无 |
 | daemon 代理 | `daemon/proxy-test.mjs`（本地回环测试代理 + 自签证书 fixture） | 无 |
-| daemon 冒烟 | `daemon/daemon-test.mjs`（122 例：管线/调度/质检/Agent/会话操作/工作区/LG 导入/连接/托盘端口） | mock 8790 |
-| 浏览器 e2e | `.e2e-agent-ui.js`（助手页）、`.e2e-agent-session-ops.js`（会话操作）、`.e2e-lg-gui.js`（导入 GUI）、`.e2e-daemon-sync.js`（连接/自动同步） | mock 8790 + stub 7343 + CDP 车道 |
+| daemon 冒烟 | `daemon/daemon-test.mjs`（129 例：管线/调度/质检/Agent/会话操作/工作区/LG 导入（含站点 mode=jp 自动对齐）/站点请求重试/连接/托盘端口） | mock 8790 |
+| 浏览器 e2e | `.e2e-agent-ui.js`（助手页）、`.e2e-agent-session-ops.js`（会话操作）、`.e2e-lg-gui.js`（导入 GUI：mock 车道一把 43 项；真机分阶段 `__LG_GUI_TEST` + `cdp setfiles` 真实文件）、`.e2e-daemon-sync.js`（连接/自动同步） | mock 8790 + stub 7343 + CDP 车道 |
 | 真机 | TM 重装（sha256 整文件比对）→ 实站全流程 | 测试 profile + LNA 旗标 |
 
 ## 8. 版本与发布

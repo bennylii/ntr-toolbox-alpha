@@ -1,6 +1,6 @@
 // daemon/lg-align-test.mjs —— LG 对齐导入纯函数单测（无需 mock；getChapter 用桩）
 import assert from 'node:assert/strict';
-import { buildSourceExport, manifestOf, splitResultLines, verifyImport, MANIFEST_VERSION } from './lg-align.mjs';
+import { buildSourceExport, manifestOf, splitResultLines, verifyImport, convertSiteFormat, looksLikeSiteFormat, alignLgResult, MANIFEST_VERSION } from './lg-align.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -117,6 +117,93 @@ await t('章节获取失败 → 该章 ✗ 且不上传', async () => {
   assert.equal(t2.ok, false);
   assert.ok(/获取失败/.test(t2.reason), t2.reason);
   assert.equal(t2.paragraphsZh, null);
+});
+
+// ---- 站点导出格式（mode=jp）自动对齐 ----
+// 站点格式夹具：头部 + ############ + 简介，之后每章 `# 标题` + 空行 + 段落，章块之间 3 行结构空行；
+// 开头额外放一个没有章节条目的「卷标题」占两行（真实站点导出里就是这样，靠 ±2 偏移窗口兜）
+const SITE_HEAD = ['书名', '', '作者[mock]', '', '标签 / 测试 /', '总计: 3 / GPT: 3', '', '############', '简介一句。', '', '', ''];
+const siteFormat = (paragraphsOf, groups = []) => {
+  const lines = [...SITE_HEAD];
+  for (const ch of CHAPTERS) {
+    if (groups.includes(ch.chapterId)) lines.push(`# 卷 ${ch.chapterId}`, '');
+    lines.push(`# ${ch.title}`, '');
+    for (const p of paragraphsOf(ch)) lines.push(p);
+    lines.push('', '', '');
+  }
+  return lines;
+};
+const MANIFEST = { linesTotal: BUILT.linesTotal, chapters: BUILT.chapters };
+
+console.log('== 站点导出格式（mode=jp）自动对齐 ==');
+await t('looksLikeSiteFormat：认 ############ 与 # 标题行；契约格式不误判', () => {
+  assert.equal(looksLikeSiteFormat(SITE_HEAD), true);
+  assert.equal(looksLikeSiteFormat(splitResultLines(BUILT.text)), false);
+  assert.equal(looksLikeSiteFormat(['纯文本', '一行一段']), false);
+});
+await t('转换：头部/卷标题/结构空行都不误伤，输出行数=清单', () => {
+  const jp = siteFormat((ch) => ch.paragraphs, ['t2']);       // t2 前放一个无章节条目的「卷标题」
+  const zh = siteFormat((ch) => translate(ch.paragraphs), ['t2']);
+  const conv = convertSiteFormat({ zhLines: zh, jpLines: jp, manifest: MANIFEST });
+  assert.equal(conv.ok, true, conv.reason);
+  assert.equal(conv.lines.length, BUILT.linesTotal);
+  assert.equal(conv.untranslated, 0);
+  assert.deepEqual(conv.chapters.map((c) => [c.chapterId, c.count]), [['t1', 6], ['t2', 4], ['t3', 3]]);
+  // 折出的契约行 = 契约格式的译文行（逐行等价）
+  assert.deepEqual(conv.lines, translate(splitResultLines(BUILT.text)));
+  // 章块起点单调递增；卷标题占两行 → 该章靠 ±2 偏移窗口兜回
+  const starts = conv.chapters.map((c) => c.fileStart);
+  assert.deepEqual(starts, [...starts].sort((a, b) => a - b), JSON.stringify(starts));
+  const t2 = conv.chapters.find((c) => c.chapterId === 't2');
+  assert.equal(t2.fileStart, t2.titlePos + 4, JSON.stringify(t2));
+});
+await t('转换：译文块空/非空模式与原文不符 → 明确拒绝（不输出错位数据）', () => {
+  const jp = siteFormat((ch) => ch.paragraphs);
+  const zh = siteFormat((ch) => ch.paragraphs.map((p, i, arr) => (p === '' ? '（多出来的）' : `【译】${p}`)));
+  const conv = convertSiteFormat({ zhLines: zh, jpLines: jp, manifest: MANIFEST });
+  assert.equal(conv.ok, false, JSON.stringify(conv));
+  assert.ok(/空\/非空模式/.test(conv.reason), conv.reason);
+  assert.equal(conv.lines, undefined);
+});
+await t('转换：站点原文块 sha1 对不上（站点已更新）→ 拒绝并指出章节', () => {
+  const jp = siteFormat((ch) => (ch.chapterId === 't2' ? ch.paragraphs.map((p) => p + '！') : ch.paragraphs));
+  const zh = siteFormat((ch) => translate(ch.paragraphs));
+  const conv = convertSiteFormat({ zhLines: zh, jpLines: jp, manifest: MANIFEST });
+  assert.equal(conv.ok, false, JSON.stringify(conv));
+  assert.ok(/对不上/.test(conv.reason) && /t2/.test(conv.reason), conv.reason);
+});
+await t('alignLgResult：行数符 → 原样返回、零请求；站点格式 → 自动抓原文对齐', async () => {
+  let calls = 0;
+  const client = { getText: async () => { calls += 1; return siteFormat((ch) => ch.paragraphs).join('\n'); } };
+  const book = { key: 'web:mock/x', kind: 'web', providerId: 'mock', novelId: 'x' };
+  const contract = translate(splitResultLines(BUILT.text));
+  const same = await alignLgResult({ client, book, manifest: MANIFEST, resultLines: contract });
+  assert.equal(same.converted, false);
+  assert.equal(calls, 0, '行数已符不应请求站点');
+  const siteLines = siteFormat((ch) => translate(ch.paragraphs));
+  const conv = await alignLgResult({ client, book, manifest: MANIFEST, resultLines: siteLines });
+  assert.equal(conv.converted, true, JSON.stringify(conv));
+  assert.equal(calls, 1);
+  assert.deepEqual(conv.lines, contract);
+  assert.ok(/站点导出格式/.test(conv.note), conv.note);
+});
+await t('alignLgResult：不像站点格式 → 不转换（交给 verifyImport 报行数不符）', async () => {
+  let calls = 0;
+  const client = { getText: async () => { calls += 1; return ''; } };
+  const book = { key: 'web:mock/x', kind: 'web', providerId: 'mock', novelId: 'x' };
+  const bad = ['随便几行', '行数不对'];
+  const r = await alignLgResult({ client, book, manifest: MANIFEST, resultLines: bad });
+  assert.equal(r.converted, false);
+  assert.equal(calls, 0);
+  assert.deepEqual(r.lines, bad);
+});
+await t('alignLgResult：清单属于别的项目 → fatal（不与当前书混用）', async () => {
+  const client = { getText: async () => '' };
+  const r = await alignLgResult({
+    client, book: { key: 'web:mock/x' }, resultLines: [],
+    manifest: { linesTotal: 1, chapters: [], book: { key: 'web:mock/y' } },
+  });
+  assert.ok(/不一致/.test(r.fatal || ''), JSON.stringify(r));
 });
 
 console.log(`\n通过 ${pass}，失败 ${fail}`);

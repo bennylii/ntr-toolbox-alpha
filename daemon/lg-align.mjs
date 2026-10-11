@@ -71,6 +71,109 @@ export function splitResultLines(text) {
   return s.split('\n');
 }
 
+// ---- 站点导出格式（mode=jp）自动对齐 ----
+// 另一种常见来路：站点简介页「下载原文」拿到的是 mode=jp 整本导出——头部（书名/作者/标签/统计）→
+// `############` → 简介，之后每章 = `# 标题` + 1 结构空行 + 逐段正文，章块之间还有结构空行；
+// 卷/分组标题自身也占「# 标题 + 空行」两行（它们没有对应章条目，靠下面的 ±2 偏移窗口兜住）。
+// LG 翻完仍是同格式（LG 保行数），所以可以按「站点原文与译文逐行同构」把它折回契约行数组。
+
+// 离线可判：像站点导出格式（有 `############` 分隔行或 `# ` 标题行）
+export function looksLikeSiteFormat(lines) {
+  const list = lines || [];
+  return list.some((l) => String(l).trim() === '############') || list.some((l) => /^#\s/.test(String(l)));
+}
+
+// 站点格式译文 → 契约行数组。逐章 sha1 硬校验 + 逐段空/非空模式校验，任一章不过即失败（宁可拒绝，不导错位数据）。
+// 返回 { ok:true, lines, chapters:[{chapterId,title,count,fileStart,titlePos,untranslated}], untranslated }
+//    | { ok:false, reason }
+export function convertSiteFormat({ zhLines, jpLines, manifest }) {
+  const zh = zhLines || [];
+  const jp = jpLines || [];
+  const entries = (manifest && manifest.chapters) || [];
+  const fail = (reason) => ({ ok: false, reason });
+  if (entries.length === 0) return fail('清单没有章节条目');
+  let pos = jp.findIndex((l) => /^#\s/.test(String(l)));
+  if (pos < 0) return fail('站点原文里没有「# 」标题行（不是 mode=jp 整本导出？）');
+  const chapters = [];
+  const lines = [];
+  let untranslated = 0;
+  for (const entry of entries) {
+    if (!/^#\s/.test(String(jp[pos] ?? ''))) {
+      return fail(`清单第 ${entry.chapterId} 章（${entry.title || ''}）前找不到标题行（站点原文与清单不同步？）`);
+    }
+    const titlePos = pos;
+    pos += 2;                       // 标题行 + 紧随其后的结构空行
+    let hit = -1;                   // 规则偏移；卷/分组标题顶掉两行时在 ±2 窗口内找回
+    for (const cand of [pos, pos - 1, pos + 1, pos - 2, pos + 2]) {
+      if (cand < 0) continue;
+      const block = jp.slice(cand, cand + entry.count);
+      if (block.length === entry.count && sha1(block.join('\n')) === entry.jpSha1) { hit = cand; break; }
+    }
+    if (hit < 0) return fail(`清单第 ${entry.chapterId} 章（${entry.title || ''}）原文块对不上（站点原文已更新，或文件与导出时不是同一份）`);
+    if (zh.length < hit + entry.count) return fail(`译文文件行数不足（第 ${entry.chapterId} 章要到第 ${hit + entry.count} 行，实有 ${zh.length} 行）`);
+    const jpBlock = jp.slice(hit, hit + entry.count);
+    const zhBlock = zh.slice(hit, hit + entry.count);
+    for (let i = 0; i < entry.count; i += 1) {
+      const jpEmpty = String(jpBlock[i] || '').trim() === '';
+      const zhEmpty = String(zhBlock[i] || '').trim() === '';
+      if (jpEmpty !== zhEmpty) return fail(`清单第 ${entry.chapterId} 章第 ${i + 1} 段空/非空模式与原文不符（译文与站点原文不是同一份导出？）`);
+      if (!jpEmpty && zhBlock[i] === jpBlock[i]) untranslated += 1;
+    }
+    chapters.push({ chapterId: entry.chapterId, title: entry.title || '', count: entry.count, fileStart: hit, titlePos, untranslated });
+    for (const l of zhBlock) lines.push(l);
+    pos = hit + entry.count;
+    while (pos < jp.length && String(jp[pos]) === '') pos += 1;   // 章块之间的结构空行
+  }
+  if (manifest.linesTotal && lines.length !== manifest.linesTotal) {
+    return fail(`对齐后行数 ${lines.length} 与清单 ${manifest.linesTotal} 不符`);
+  }
+  return { ok: true, lines, chapters, untranslated };
+}
+
+// 站点整本原文（mode=jp）→ 行数组（站点格式译文的对齐基准；web 版可用，文库版站点没这个接口）
+export async function fetchSiteExportLines(client, book) {
+  const q = new URLSearchParams({ mode: 'jp', translationsMode: 'parallel', type: 'txt', filename: `jp.${book.novelId}.txt` });
+  const pathname = book.kind === 'web'
+    ? `/api/novel/${book.providerId}/${book.novelId}/file?${q}`
+    : `/api/wenku/${book.novelId}/file?${q}`;
+  return splitResultLines(await client.getText(pathname));
+}
+
+// 结果行 → 契约行：行数已符直接返回（零额外请求）；否则「像站点格式」时抓站点原文自动对齐。
+// 对齐失败不抛错，原样返回 → 由 verifyImport 报原本的「行数不符」，行为可预期。
+// 抓整本原文是一次 2MB 级请求，代理链路抖动时容易整场失败——用 rounds 轮次 + 轮间歇再试，
+// 全轮失败时把原因放进 alignError（调用方拼进错误消息，别让用户只看到「行数不符」）。
+// 返回 { lines, converted, note, sitefmt?, fatal?, alignError? }
+export async function alignLgResult({ client, book, manifest, resultLines, log = null, rounds = 3, roundDelayMs = 2000 }) {
+  const lines = resultLines || [];
+  const say = (m) => { try { log && log(m); } catch { } };
+  const expectedKey = manifest && manifest.book && manifest.book.key;
+  if (expectedKey && book && book.key && expectedKey !== book.key) {
+    return { lines, converted: false, note: '', fatal: `清单属于 ${expectedKey}，与当前项目 ${book.key} 不一致（选错了清单文件？）` };
+  }
+  if (lines.length === (manifest.linesTotal || 0)) return { lines, converted: false, note: '' };
+  if (!looksLikeSiteFormat(lines)) return { lines, converted: false, note: '' };
+  const total = Math.max(1, Math.floor(Number(rounds) || 1));
+  let lastError = '';
+  for (let round = 1; round <= total; round += 1) {
+    try {
+      const jpLines = await fetchSiteExportLines(client, book);
+      const conv = convertSiteFormat({ zhLines: lines, jpLines, manifest });
+      if (!conv.ok) {
+        say(`  · 站点格式自动对齐未通过：${conv.reason}`);
+        return { lines, converted: false, note: '', alignError: conv.reason };
+      }
+      const note = `已识别站点导出格式（mode=jp），并抓站点原文逐章 sha1 对齐 ${conv.chapters.length} 章`;
+      return { lines: conv.lines, converted: true, note, sitefmt: { chapters: conv.chapters.length, untranslated: conv.untranslated } };
+    } catch (e) {
+      lastError = (e && e.message) || String(e);
+      say(`  · 站点格式对齐第 ${round}/${total} 轮失败：${lastError}${round < total ? '（稍后重试）' : ''}`);
+      if (round < total) await new Promise((r) => setTimeout(r, Math.max(0, Number(roundDelayMs) || 0) * round));
+    }
+  }
+  return { lines, converted: false, note: '', alignError: lastError };
+}
+
 // 校验 + 行号映射：
 //   getChapter(chapterId, volumeId) → 章节 DTO（paragraphJp + glossaryId）
 //   返回 { ok, globalError, chapters:[{...entry, ok, reason, paragraphsZh, glossaryId}], untranslated, okCount, total }
@@ -176,12 +279,19 @@ export function createLgImportRunner({ store, makeClient, log = console }) {
         const lines = splitResultLines(fs.readFileSync(txtPath, 'utf8'));
         const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
         const client = makeClient(book);
+        const aligned = await alignLgResult({ client, book, manifest, resultLines: lines, log: (m) => log.log(m) });
+        if (aligned.fatal) throw new Error(aligned.fatal);
+        if (aligned.converted) report({ phase: 'verify', message: `${aligned.note}，逐章校验…` });
         const verified = await verifyImport({
-          resultLines: lines,
+          resultLines: aligned.lines,
           manifest,
           getChapter: (chapterId, volumeId) => client.getChapterTask(book, chapterId, 'gpt', volumeId),
         });
-        if (verified.globalError) throw new Error(verified.globalError);
+        if (verified.globalError) {
+          throw new Error(aligned.alignError
+            ? `${verified.globalError}（站点格式自动对齐失败：${aligned.alignError}——代理链路抖动时稍后重跑）`
+            : verified.globalError);
+        }
         for (const c of verified.chapters) {
           if (!c.ok) log.log(`  ✗ ${c.title || c.chapterId}：${c.reason}`);
         }
@@ -203,6 +313,7 @@ export function createLgImportRunner({ store, makeClient, log = console }) {
         const stats = {
           total: verified.total, ok: verified.okCount, untranslated: verified.untranslated,
           uploaded: applied.uploaded, failed: applied.failed, pending: applied.pending,
+          converted: aligned.converted,
         };
         report({ phase: 'done', uploaded: applied.uploaded, failed: applied.failed, total: effectiveTotal, okTotal, untranslated: verified.untranslated, message: `完成：上传 ${applied.uploaded}，失败 ${applied.failed}，未过校验 ${verified.total - verified.okCount}` });
         store.finishRun(runId, applied.uploaded === 0 && applied.failed > 0 ? 'failed' : 'done', stats);

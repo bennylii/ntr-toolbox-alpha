@@ -12,7 +12,7 @@ ntr-toolbox-alpha.dev.user.js  由 .gen-dev.mjs 生成（@version 追加 -dev、
 CHANGELOG.md                   版本记录（发布时与 @version / daemon/version.mjs 对齐）
 mock-llm/server.mjs            假 LLM + 假站点（8788 主车道；daemon 测试用 8790）
 debug-env/                     离线站点页面替身（无网络也能开发/截图）
-tools/                         开发/测试脚本（.gen-dev/.engine-test/.run-suite/.run-daemon-stub/.probe-tm-hash-ws/.e2e-daemon-sync/.e2e-token-sync/.e2e-*/.pack-*）
+tools/                         开发/测试脚本（.gen-dev/.engine-test/.run-suite/.run-daemon-stub/.probe-tm-hash-ws/.lg-import-sitefmt/.e2e-daemon-sync/.e2e-token-sync/.e2e-*/.pack-*）
 docs/architecture.md           ★ 架构总览（组件图/数据模型/子系统/设计决策/测试矩阵）——新会话先读这个
 docs/cleanroom/                行为规格 spec-01..13（全部已实施）
 docs/                          管线说明（html + png）
@@ -28,7 +28,7 @@ daemon/                        本地 daemon（模块地图见下）
 index.mjs                      入口/CLI（serve|translate|glossary|check|agent|export-src|import-lg|glossary-io|rules|prompt|auth|status…）
 server.mjs                     控制面 HTTP（/ui 页面 + /status /run /auth /settings /rules /prompts /lg/* /warnings /agent/* …）
 ui.mjs                         控制台页面（Windows 经典：灰打底（工作区/侧栏/面板），经典蓝只做点缀（VB6 蓝渐变标题栏与侧栏页眉、藏青选中/高亮、主按钮），扁平直角；图标走 Segoe MDL2 Assets；renderMarkdown 在模块作用域、经 MD_SOURCE 内联；内嵌脚本禁反斜杠转义——见已知陷阱）
-site-client.mjs                站点 API 客户端（5 条契约；Bearer 鉴权；uploadChapter 带 sakuraVersion）
+site-client.mjs                站点 API 客户端（5 条契约；Bearer 鉴权；uploadChapter 带 sakuraVersion；传输层重试 3 次——HTTP 状态错误不重试）
 engine.mjs                     从油猴脚本加载 GlossaryEngine（与浏览器同一份实现）
 ---- 管线 ----
 translate-pipeline.mjs / translate.mjs      翻译 worker（toc 档位/分段/#编号协议/行数重试/段缓存/上传）
@@ -36,7 +36,7 @@ glossary-pipeline.mjs                        术语管线（SCAN→EXTRACT→VER
 check-pipeline.mjs / quality.mjs             质检 v2（七码判定 + warnings 落库）
 processors.mjs / presets/                    文本处理链（资源投影/保留段/替换表/标点；base 开关）
 preserve.mjs                                 内置保护预设（base/kag/renpy/rpgmaker/wolf + 用户规则合并）
-lg-align.mjs                                 LG 译文对齐（导出/校验/应用 + lg-import 队列 runner）
+lg-align.mjs                                 LG 译文对齐（导出/校验/应用 + lg-import 队列 runner；含站点 mode=jp 整本导出格式自动对齐）
 ---- 调度与存储 ----
 scheduler.mjs                LlmScheduler（双模型池：翻译池 vs 助手/术语池；并发门/冷却/RPM）
 job-queue.mjs                单队列 FIFO（四类任务共用；progress 通道）
@@ -63,6 +63,7 @@ README.md                     使用说明（命令/控制台/托盘/各专项�
 | 改油猴功能 | `ntr-toolbox-alpha.user.js` → `tools/.gen-dev.mjs` → `tools/engine-test.mjs` + 相关 `.e2e-*` |
 | 改 daemon 功能 | `daemon/index.mjs` + 对应模块 → `daemon/daemon-test.mjs`（先起 8790 mock） |
 | 找某个行为的规格 | `docs/cleanroom/spec-01..13` |
+| 测控制台 GUI（点击测试/查 UI 行为） | `tools/.e2e-lg-gui.js`（`window.__LG_GUI_TEST` 分阶段：export/open/verify-start/verify/apply/await）+ `tools/cdp.mjs setfiles`（CDP 原生塞真实文件）/`shot`；mock 车道一把跑完，真机跑法与端口见 `daemon/README.md` 车道清单 |
 | 日常使用 / 命令 / 控制台 | `daemon/README.md`；控制台 <http://127.0.0.1:7331/ui>；双击仓库根 `daemon.cmd` 一键启动（`daemon.cmd restart` 换代码），或 `daemon/tray.cmd` 只起托盘 |
 | 查版本 / 发布 | `CHANGELOG.md`；发布流程见下方「交付流程」 |
 | KeywordGacha 上游（术语管线的出处，含 auto-novel 术语表导出） | `keywordgacha/`（junction 挂载的独立 fork 仓库，不入本库） |
@@ -77,6 +78,7 @@ node tools/.gen-dev.mjs                      # 生成 ntr-toolbox-alpha.dev.user
 node tools/engine-test.mjs                   # GlossaryEngine 单测（需 mock 在跑）
 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8788/wenku/mock-src"   # 跑 e2e 套件
 node tools/cdp.mjs open <url> | inject | evalf <file> | shot <png> | logs   # 直接操作浏览器（CDP_PORT 环境变量换端口）
+node tools/cdp.mjs setfiles "<css选择器>" <文件…>                                     # 给 <input type=file> 塞真实文件（CDP DOM.setFileInputFiles）
 
 # daemon（详见 daemon/README.md）：
 node daemon/index.mjs serve --port 7331      # 控制台 /ui + 控制面（或双击仓库根 daemon.cmd / daemon\tray.cmd）
@@ -138,6 +140,7 @@ CDP_PORT=9334 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8789
 - TM 的 `@match` 只覆盖真实站点域名，不含 127.0.0.1 —— mock 页上装好的 TM 脚本**不会**注入（属正常），mock 测试一律走 `cdp.mjs inject`。
 - **`daemon/ui.mjs` 的 UI_HTML 是模板字面量**：内嵌 JS 里写 `'\n'` 这类转义会被外层吃掉成真换行 → 整页脚本静默语法错误（页面渲染但毫无功能）；要么写 `\\n`、要么避免反斜杠。需要正则转义的代码（如 markdown 渲染器）放**模块作用域**再用 `${MD_SOURCE}`（toString）内联，别写进模板正文。图标字形用 `String.fromCodePoint(0xE8BD)` 生成（别写 `\u` 转义或 CSS `content`）；`data-icon="0x…"` 的元素由 `paintIcons()` 在启动时填充。daemon-test 有「/ui 内嵌脚本可解析」守卫 + `renderMarkdown` 纯函数单测，改 UI 后必须全量跑。
 - mock 8788/8790 掉线时：engine-test 会**跳过**「请求层/编排」集成段（计数变少但 0 失败，别误判），daemon-test 则会卡住等 fetch——跑 daemon 系测试前先确认 mock 活着。
+- **站点只能走代理且链路抖动**（墙内直连 ECONNRESET）：`SiteClient` 内建传输层重试（HTTP 状态错误不重试），次数在控制台设置页「站点与凭据 → 站点请求重试」可调 0–8（`config.site.retries`，默认 3，保存即生效）——整本 167 章逐章抓取实测约 1/3 请求首发失败，3 次重试每轮仍剩 2 章左右，8 次基本清零；自己写临时脚本直连站点时要带重试，别用裸 fetch。大文件/长响应（`file?mode=jp` 整本 2MB+、200+ 段大章）失败率更高，跑整本前先看链路（`/proxy/test` 或连打几次 chapter-task 数成功率）。
 - TM 安装/重装对话框落在扩展的 `ask.html`（targets[0]），按钮是 `<input value="更新/重新安装">`——按 **value** 匹配点击；同版本重装按钮文案是「重新安装」。
 
 ## 上游与许可

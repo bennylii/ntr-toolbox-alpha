@@ -8,6 +8,9 @@ All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 
 ### daemon
 
+- **站点请求重试次数可调**：控制台设置页「站点与凭据 → 站点请求重试」0–8（`config.site.retries`，默认 3，保存即生效）；实测整本 167 章逐章抓取时约 1/3 请求首发失败、3 次重试每轮仍剩 2 章左右，调到 8 次基本清零。
+- **LG 译文导入支持站点「下载原文」格式（mode=jp）**：站点简介页下载的整本 txt（书名/作者/标签/统计 → `############` → 简介，之后每章 `# 标题` + 空行 + 正文）经 LinguaGacha 翻译后仍是同格式，以前会被「行数不符」拒绝。现在 `/lg/verify`、`lg-import` 队列 runner、CLI `import-lg` 与 Agent 工具 `import_lg_result` 会在「行数不符且文本像站点导出」时**自动抓站点原文逐章 sha1 对齐**（卷/分组标题占两行的 ±2 偏移窗口、逐段空/非空模式校验；任一章对不上即拒绝，绝不输出错位数据），契约格式路径零额外请求；抓原文是 2MB 级请求，链路抖动时**分轮重试**、全轮失败把原因带进错误消息（不再只报「行数不符」）。控制台校验报告标注「已识别站点导出格式（mode=jp），并抓站点原文逐章 sha1 对齐 N 章」，队列 stats 带 `converted`。顺带：清单 `book.key` 与当前项目不一致时直接拒绝（防串项目）。新纯函数 `convertSiteFormat` / `fetchSiteExportLines` / `alignLgResult` 在 `lg-align.mjs`（lg-align-test 17/0，+7）；mock 补 `mode=jp` 夹具（与 chapter-task 同源）、daemon-test 129/0（+2：`/lg/verify` 站点格式自动对齐 3/3、`/run lg-import` 站点格式全量提交）；`tools/.lg-import-sitefmt.mjs` 改为复用同一内核。真机验收（控制台 GUI 点击脚本，非命令行）：`web:syosetu/n7608cw` 导出 34651 行 / 167 章 → 选站点格式 txt 校验 **167/167 章通过**（带自动对齐提示）→ 提交 5 章队列 done（uploaded 5 / failed 0 / converted=true），证据在 `daemon/exports/backup-n7608cw-*/`。
+- **站点请求传输层重试**：`SiteClient` 对网络层失败（`ECONNRESET` / `fetch failed` / 超时）默认重试 3 次（退避 300ms×n，`onRetry` 让 CLI 打出「站点请求失败，重试 n」）；HTTP 状态错误（401/400/404/5xx）不重试，语义不变（章节提交与术语表 PUT 都是内容幂等的整章/整表写）。墙内站点只经代理可达、链路抖动频繁——实测整本导入的逐章校验通过率由此从 115/167 升到 165–167/167；测试 daemon-test 129/0（+4 用例：重试后成功 / 耗尽即抛 / 401 不重试 / PUT 重试幂等）。
 - **网络代理（出网）**：控制台设置页新增「网络代理」区块（第八个）——站点 API、翻译池、助手/术语池与 Agent 工作区沙箱脚本的出网统一走本机代理（HTTP 绝对形式 + HTTPS CONNECT 隧道，支持 `user:pass@` 凭据）；**保存即生效**，无需重启（未用 Node 内置 `NODE_USE_ENV_PROXY`——它只在进程启动前解析且首值缓存）；直连列表默认 `127.0.0.1,localhost,::1`（mock/测试零影响，关闭时行为与旧版一致）；「测试」按钮做「直连 / 代理」对比探测（`POST /proxy/test`）；不支持 SOCKS5。
 
 ### 连接与凭据
@@ -45,6 +48,7 @@ All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 
 ### 工具 / 启动
 
+- **点击测试基建**：`tools/cdp.mjs` 新增 `setfiles <选择器> <文件…>`（CDP `DOM.setFileInputFiles`，真实文件走磁盘、不经页面字符串，1.7MB 也不怕）与 `CDP_TIMEOUT_MS`（覆盖单条命令的 300s 超时，真机长阶段用）；`tools/.e2e-lg-gui.js` 支持 `window.__LG_GUI_TEST` 阶段化驱动（`all`/`export`/`open`/`verify`/`apply`/`await`）与真实的 bookKey/文件/期望值，mock 车道一把跑完 43/43（原契约格式段 + 新增「站点导出格式自动对齐」段）。
 - **托盘不再叠加**（修掉「反复重启后托盘出现两个 7331 实例」）：`daemon.cmd start` 只在没有托盘时拉起（daemon 没跑但有残留托盘时先清理再拉，保证唯一）；`restart` 先清旧托盘再换新 daemon；`stop` 连托盘一起收。四种边界实测：在跑时 start 不新增、restart 后仍 1 个、stop 后托盘归零、干净 start 恰好 1 托盘 + 1 daemon。
 - **启动方式去 vbs、全 PowerShell**：新增仓库根 **`daemon.cmd`**（双击 = 启动：端口没有 daemon 就拉起托盘并等就绪后打开控制台；已在跑只开控制台；另支持 `restart|stop|status|console [端口]`——restart 按端口定位进程，用于换新代码）与 **`daemon/tray.cmd`**（只要托盘），逻辑在 `daemon/launch.ps1` / `tray.ps1`；删除 `daemon/tray.vbs`（双击 .ps1 会被记事本截胡，所以保留一个 .cmd 双击壳）。
 - 顺带修掉托盘日志的老问题：日志改为按端口分文件 `daemon/.tray-<端口>.log`——原先共用 `.tray.log` 时 cmd 的 `>>` 独占文件句柄，会导致「已有实例在跑时，另一个端口的实例静默起不来」。

@@ -54,13 +54,13 @@ node daemon/index.mjs forget    <bookKey>
 - 侧栏顶部「**当前项目**」切换器全站跟随（`通用` = 全局视角），选择持久化；顶栏显示当前项目；
 - **项目**页：项目卡片（标题 / 来源 / 状态 / 已译章数 / 最近 run / 队列 / open 提案），操作 = 设为当前 / 派发任务 / **导出 LG 源文** / **导入 LG 译文** / 忘记；点卡片展开详情（进度明细、规则覆盖数、绑定会话可跳助手页）；URL 登记新项目也在此页；
   - **导出 LG 源文**：逐章取原文写成纯文本 + 对齐清单（落 `daemon/exports/`，路径显示在卡片里；交给 LinguaGacha 建项目翻译，保持行数）；
-  - **导入 LG 译文**：选 LG 导出的结果 txt（清单默认用本会话导出时那份，可另选覆盖）→「校验」逐章核对（行数/空行模式/源 sha1；卡片里直接看到 ✓/✗ 报告与「疑似未翻」行数）→「提交通过章」（可限 N 章）入队 `lg-import`，进度看任务页；上传的副本存 `daemon/uploads/`（可手动清）。与 CLI 的 `export-src`/`import-lg` 是同一套函数，行为完全一致；
+  - **导入 LG 译文**：选 LG 导出的结果 txt（清单默认用本会话导出时那份，可另选覆盖）→「校验」逐章核对（行数/空行模式/源 sha1；卡片里直接看到 ✓/✗ 报告与「疑似未翻」行数）→「提交通过章」（可限 N 章）入队 `lg-import`，进度看任务页；上传的副本存 `daemon/uploads/`（可手动清）。与 CLI 的 `export-src`/`import-lg` 是同一套函数，行为完全一致；**站点简介页「下载原文」经 LG 翻译的整本 txt 也能直接选**（自动识别 `mode=jp` 导出格式并抓站点原文对齐，报告里会标注「↻ 已识别站点导出格式」）；
 - **任务**：派发 `translate / glossary / check`（档位、限章数、提案开关），书下拉默认当前项目；
 - **规则**：pre/post 替换、保留段——列表 = 全局 + 当前项目条目（标注来源）；新增默认作用当前项目，「作用域」可切全局；
 - **提示词**：**全局模板**（所有项目共用，LG 式）四槽编辑；按书覆盖仅 API/CLI 保留（高级用法，UI 不暴露）；
 - **助手**：新会话自动挂当前项目；侧栏会话按项目分组（「通用」组收无书会话）；绑书会话的系统提示注入【当前项目】，工具的 book 参数缺省即此书；对话区支持 markdown 渲染（代码块带语言标签与复制按钮）、每条消息的时间/token、工具调用折叠卡（状态点 + 参数/结果分区）、审批面板结构化预览、生成中光标与步数、智能跟随滚动 +「回到底部」、空态建议提示；窄窗口下侧栏自动收成图标条；
 - **会话操作**：消息悬停可「复制」「编辑」（用户消息 → 内联编辑器「保存并重发/取消」）与「重新生成」（仅末条助手消息，丢弃该轮回答后以原文重跑，用户消息保留）；顶栏与侧栏会话行可「重命名 / 删除」（删除连带该会话的消息与审批记录；跑轮次中会被拒绝）。语义：编辑/重新生成都按截断点重跑（删除 seq ≥ 截断点的消息），若历史摘要跨过截断点则整段清掉（摘要由模型生成，无法重算）；
-- **设置**：全局设置（作用于所有项目）——八个区块：**连接**（端口 / 跨域白名单附加条目 / 上次同步来源）／**翻译模型池**（端点增删改，key 只写不回显、留空 = 按 id 保持原值）／**助手/术语模型池**（独立端点与并发限流；清空 = 跟随翻译池）／**翻译池调度与限流**／**助手池调度与限流**／**助手参数**（审批模式、maxSteps、工具结果截断、上下文预算）／**站点与凭据**（origin + 「从站点同步」按钮 + token 直填）／**网络代理**（出网代理开关 / 地址 / 直连列表 / 直连-代理对比测试）。站点「Daemon 连接」推送仍会整表覆盖**翻译池**（最后写入者赢），但**不再覆盖**显式配置过的助手池；
+- **设置**：全局设置（作用于所有项目）——八个区块：**连接**（端口 / 跨域白名单附加条目 / 上次同步来源）／**翻译模型池**（端点增删改，key 只写不回显、留空 = 按 id 保持原值）／**助手/术语模型池**（独立端点与并发限流；清空 = 跟随翻译池）／**翻译池调度与限流**／**助手池调度与限流**／**助手参数**（审批模式、maxSteps、工具结果截断、上下文预算）／**站点与凭据**（origin + 「从站点同步」按钮 + token 直填 + **站点请求重试次数** 0–8）／**网络代理**（出网代理开关 / 地址 / 直连列表 / 直连-代理对比测试）。站点「Daemon 连接」推送仍会整表覆盖**翻译池**（最后写入者赢），但**不再覆盖**显式配置过的助手池；
 - **状态**：当前项目概要 + llm 双池统计（并发峰值/冷却/重试）、用量、RSS 采样；
 - **技能**：全局资源（`skills/` 目录，LG 式 SKILL.md 包），不随项目变化。
 
@@ -92,6 +92,7 @@ node daemon/index.mjs forget    <bookKey>
 - **对比测试**：设置页「测试（对比直连 / 代理）」按当前填写的值各探测一次站点 origin（各 8s 超时），直接看到「直连失败 / 代理成功」——也可直接调 `POST /proxy/test { proxy, targetUrl? }`；
 - **工作区脚本**：`workspace_run` 的沙箱子进程在 fork 时注入 `HTTP_PROXY/HTTPS_PROXY/NO_PROXY/NODE_USE_ENV_PROXY`，模型脚本自己的 fetch 与 daemon 走同一代理（代理关闭时不注入，保持原样）；
 - **不影响本机**：直连列表默认含回环地址，mock（8788/8790）、托盘 `/status`、控制台自身流量都不经代理；代理关闭时全部直连，行为与旧版一致；
+- **传输层重试**：站点请求（`SiteClient`）对网络层失败默认重试 3 次（退避 300ms×n），CLI 打「站点请求失败，重试 n/3」；HTTP 状态错误（401/404/…）不重试。次数在控制台设置页「站点与凭据 → 站点请求重试」可调（0–8，保存即生效）——墙内代理链路抖动（`ECONNRESET` / `fetch failed`）很常见：实测整本 167 章逐章抓取约 1/3 请求首发失败，3 次重试每轮仍有 2 章左右失败，调到 8 次基本清零；
 - CLI（`translate` / `run` / `check` / `agent` / `status`）读同一份配置，`status` 会打印当前代理状态。
 
 ## 调度与限流（默认单线程，适配 Gemini 逆向 / 单槽上游）
@@ -198,15 +199,18 @@ node daemon/index.mjs import-lg --book <key> --txt <LG结果.txt> --manifest <�
 ```
 
 - **兼容前提**（来自 LG 源码）：LG 的 TXT 格式一行一条 item、空行也是条目、写出逐行 join（空译文回退原文）→ 结果 txt 的行数与行号和输入天然一致。因此**不要在 LG 里增删行、不要开启会改行数的处理**；
+- **也吃站点「下载原文」格式**：站点简介页「下载原文」拿到的是 `mode=jp` 整本导出（书名/作者/标签/统计 → `############` → 简介，之后每章 `# 标题` + 空行 + 正文），LG 翻完仍是同格式。控制台「导入 LG 译文」/CLI `import-lg` 会在**行数不符且文本像站点导出**时自动抓站点原文、按「标题后 count 段」逐章 sha1 对齐（卷/分组标题占两行的 ±2 偏移窗口；逐段空/非空模式校验；任一章对不上即拒绝），校验报告会显示「↻ 已识别站点导出格式（mode=jp），并抓站点原文逐章 sha1 对齐 N 章」，队列 stats 带 `converted`。抓整本原文是一次 2MB 级请求，代理链路抖动时会分轮重试，全轮失败会把原因写进错误（「…（站点格式自动对齐失败：fetch failed——代理链路抖动时稍后重跑）」）；契约格式路径零额外请求。离线转换/排查用 `node tools/.lg-import-sitefmt.mjs --book <key> --zh <LG译文.txt> --manifest <清单.json>`（同一内核）；
 - **三层校验**：总行数 = 清单 `linesTotal`（否则全局拒绝）；每章行数 + 空/非空模式与站点当前 `paragraphJp` 一致（行错位检测）；每章原文 sha1 与导出时一致（源站更新/漂移 → 该章拒绝）；
 - **疑似未翻**：结果行 === 原文行（非空）的行数会统计进报告（LG 空译文回退原文的特性），dry-run 里先看这个数再 `--apply`；
 - **提交即 GPT 翻译器兼容**：逐章走站点既有 `POST .../translate-v2/gpt/chapter/{id}`（带当前 `glossaryId`、`sakuraVersion 0.9`、段落数严格一致），导入后站点与 daemon 都把该章视为已译；`--apply` 后可跑 `translate --level expire` 验证零目标；
 - **Agent 工具**：`export_lg_source({book, out?})` 自动执行（写 `daemon/exports/`）；`import_lg_result({book, txtPath, manifestPath, apply, limit})` 需审批，preview 即完整校验报告；
+- **站点下载的原文经 LG 翻译（另一种常见来路）**：站点简介页「下载原文」拿到的是 `mode=jp` 整本导出（书名/作者/标签/统计 → `############` → 简介，之后每章 = `# 标题` + 空行 + 正文），LG 翻完是**同格式**译文——它不是 `export-src` 的「一行一段」契约，先用 `node tools/.lg-import-sitefmt.mjs --book <key> --zh <LG译文.txt> --manifest <export-src 清单>` 转成契约格式（逐章 sha1 + 空/非空模式硬校验，任一章不过就拒绝写出），再走上面的 `import-lg`；
 - 边界：导入期间若站点原文更新（sha1 漂移）对应章自动跳过；文件读写仅限 `--out`/`exports/` 指定路径。
 
 ## 真机契约备忘（mock 已同步改严）
 
 - `GET /api/novel/{p}/{id}/file` 必须带 `filename` 参数，缺了 404（`createFileUrl` 的 `filename` 无默认值）；
+- `/file` 的 `mode=jp` 是站点「下载原文」整本导出（头部 → `############` → 每章 `# 标题` + 空行 + 正文，章块间 3 空行、卷/分组标题各占两行）——LG 译文自动对齐靠它，见「LG 译文对齐导入」段；
 - web 版 `POST .../translate-v2/{t}/chapter-task/{ch}` 的 `sync` 查询参数必填（缺了 404；
   `sync=true` 仅站点「同步原文」档使用，翻译链路固定 `false`）；
 - HTTPS 站点页面 fetch 本机 daemon 走 Chrome 本地网络访问（LNA/PNA）：daemon 已在 CORS 预检里回
@@ -244,6 +248,9 @@ powershell -File daemon/tray.ps1 -TestSpawn -Port 7377          # 托盘冒烟�
 # 助手页 e2e（浏览器车道）：mock 在 8790，daemon 在 7355（--db daemon/.tmp-agent-ui.db），见 tools/.e2e-agent-ui.js 头部跑法
 # 助手页会话操作 e2e：mock 在 8790，daemon 在 7358（--db daemon/.tmp-agent-ops.db），见 tools/.e2e-agent-session-ops.js 头部
 # LG 导入 GUI e2e：mock 在 8790，daemon 在 7356（--db daemon/.tmp-lggui.db，预置 mock-trans-lg4-* 书），见 tools/.e2e-lg-gui.js 头部
+#   一把跑完（契约格式 + 站点 mode=jp 格式自动对齐两段）：CDP_PORT=9335 node tools/cdp.mjs open http://127.0.0.1:7356/ui && node tools/cdp.mjs evalf tools/.e2e-lg-gui.js
+#   真机分阶段（长流程）：window.__LG_GUI_TEST={bookKey,txtPath,expect,limit} + phase=export/open/setfiles/verify-start/verify/apply/await，
+#   文件用 CDP 原生塞盘上的真实 txt：node tools/cdp.mjs setfiles "#books-table .proj-card .proj-detail input[type=file]" "<LG译文.txt>"
 # Daemon 连接 e2e：mock 8790 + tools/.run-daemon-stub.mjs（7343：/ping /auth /last /request-auth /reset），见 tools/.e2e-daemon-sync.js 头部
 # 控制台「从站点同步」按钮 e2e：daemon 7359（--db daemon/.tmp-token-sync.db），见 tools/.e2e-token-sync.js 头部
 ```

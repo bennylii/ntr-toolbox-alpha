@@ -494,6 +494,11 @@ export const UI_HTML = `<!doctype html>
         <button class="btn ghost" id="token-save">保存 token</button>
         <span class="muted" id="cred"></span>
       </div>
+      <div style="margin-top:6px">
+        <label>站点请求重试 <input type="number" id="site-retries" min="0" max="8" size="3" style="width:56px"></label>
+        <button class="btn ghost" id="site-retries-save">保存</button>
+        <div class="muted" id="site-retries-info" style="margin-top:4px"></div>
+      </div>
     </fieldset>
     <fieldset><legend>网络代理（出网 · 站点与模型接口统一走代理；保存后立即生效）</legend>
       <label><input type="checkbox" id="proxy-enable"> 启用代理</label>
@@ -763,7 +768,9 @@ function openLgImportPanel(card, bookKey) {
   const mfLabel = document.createElement('span'); mfLabel.textContent = '清单 json：';
   const mfInput = document.createElement('input'); mfInput.type = 'file'; mfInput.accept = '.json,application/json';
   const mfHint = document.createElement('span'); mfHint.className = 'muted';
-  mfHint.textContent = state.manifestPath ? ('默认用本会话导出时的清单：' + state.manifestPath + '（可另选覆盖）') : '未记住清单，请选择导出时生成的 .manifest.json';
+  mfHint.textContent = state.manifestPath
+    ? ('默认用本会话导出时的清单：' + state.manifestPath + '（可另选覆盖）')
+    : '未记住清单，请选择导出时生成的 .manifest.json（站点「下载原文」经 LG 翻译的 txt 也可直接选，会按站点格式自动对齐）';
   mfRow.append(mfLabel, mfInput, mfHint);
   // 操作行
   const opRow = mkRow();
@@ -773,7 +780,7 @@ function openLgImportPanel(card, bookKey) {
   const applyBtn = document.createElement('button'); applyBtn.className = 'btn'; applyBtn.textContent = '提交通过章'; applyBtn.disabled = true;
   opRow.append(verifyBtn, limitLabel, limitInput, applyBtn);
   const report = document.createElement('div'); report.className = 'muted';
-  report.textContent = '选好文件后点「校验」：逐章核对行数/空行模式/源 sha1，再决定提交。';
+  report.textContent = '选好文件后点「校验」：逐章核对行数/空行模式/源 sha1，再决定提交。站点「下载原文」经 LG 翻译的整本 txt（含 # 标题行）会自动识别并对齐。';
   box.append(txtRow, mfRow, opRow, report);
   const uploadFile = async (file) => {
     const text = await file.text();
@@ -792,13 +799,15 @@ function openLgImportPanel(card, bookKey) {
       if (v.globalError) {
         applyBtn.disabled = true;
         report.innerHTML = '<div class="bad">' + esc(v.globalError) + '</div>' +
+          (v.convertError ? '<div class="muted">站点格式自动对齐失败：' + esc(v.convertError) + '（代理链路抖动时可稍后重试「校验」）</div>' : '') +
           '<div class="muted">结果 ' + v.linesIn + ' 行 / 清单 ' + v.linesTotal + ' 行</div>';
         return;
       }
       const rows = (v.chapters || []).map((c) =>
         '<div>' + (c.ok ? '<span class="ok">✓</span>' : '<span class="bad">✗</span>') + ' ' +
         esc(c.title || c.chapterId) + '（' + c.count + ' 段）' + (c.ok ? '' : '：' + esc(c.reason)) + '</div>').join('');
-      report.innerHTML = '<div><b>校验：' + v.okCount + '/' + v.total + ' 章通过 · 疑似未翻 ' + v.untranslated + ' 行</b>（' + esc(v.note) + '）</div>' + rows;
+      const convNote = v.converted ? ('<div class="muted">↻ ' + esc(v.convertNote || '已识别站点导出格式并自动对齐') + '</div>') : '';
+      report.innerHTML = convNote + '<div><b>校验：' + v.okCount + '/' + v.total + ' 章通过 · 疑似未翻 ' + v.untranslated + ' 行</b>（' + esc(v.note) + '）</div>' + rows;
       applyBtn.disabled = !(v.okCount > 0);
       toast('校验完成：' + v.okCount + '/' + v.total + ' 章通过');
     } catch (e) { report.textContent = '校验失败：' + e.message; applyBtn.disabled = true; }
@@ -956,6 +965,10 @@ async function loadSettings() {
     $('proxy-info').textContent = px.enabled && px.url
       ? ('当前：经 ' + px.url + ' 出网 · 直连 ' + (px.noProxy || '—'))
       : '当前：全部直连（代理未启用）';
+    const site = (s.settings && s.settings.site) || {};
+    $('site-retries').value = site.retries == null ? 3 : site.retries;
+    $('site-retries-info').textContent = '站点请求（抓原文/章节提交/术语表）传输层失败最多重试 ' + ($('site-retries').value) +
+      ' 次——墙内走代理链路抖动大时可加档；整本抓取 167 章实测约 1/3 请求首发失败，3 次重试仍有零星章失败，8 次基本清零。';
     $('cred').textContent = 'token：' + (s.settings.tokenSet ? '已同步' : '未同步') +
       ' · 翻译池 ' + ((s.settings.workers || []).length) + ' 个 · 助手池 ' +
       ((agent.workers || []).length > 0 ? (agent.workers.length + ' 个（显式）') : '跟随翻译池') +
@@ -1041,6 +1054,13 @@ $('token-save').addEventListener('click', async () => {
     await post('/auth', { token: tok });
     $('set-token').value = '';
     toast('token 已保存'); loadSettings();
+  } catch (e) { toast(e.message, true); }
+});
+$('site-retries-save').addEventListener('click', async () => {
+  try {
+    const n = Math.max(0, Math.min(8, Math.floor(Number($('site-retries').value) || 0)));
+    await post('/settings', { site: { retries: n } });
+    toast('站点请求重试次数已保存（' + n + ' 次，立即生效）'); loadSettings();
   } catch (e) { toast(e.message, true); }
 });
 // 「从站点同步」：置同步请求 → 站点页面（油猴）在 ≤5s 探测里看到 pendingAuth 就推一次凭据 → 这里等 lastSync 变化

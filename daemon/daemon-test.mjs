@@ -1714,6 +1714,49 @@ await t('/run lg-import：全量提交 t2/t3；越界 options 被拒', async () 
   const stats = await fetch(`${MOCK}/__stats`).then((r) => r.json());
   assert.equal(stats.lastChapterUpload.chapterId, 't3', JSON.stringify(stats.lastChapterUpload));
 });
+await t('/lg/verify：站点导出格式（mode=jp）的 LG 译文 → 自动识别并对齐 3/3', async () => {
+  // 站点「下载原文」格式夹具：头部 → ############ → 简介，之后每章 `# 标题` + 空行 + 正文，章块间 3 空行
+  const transCount = (id) => (id.endsWith('1') ? 6 : id.endsWith('2') ? 4 : 2);
+  const mkSite = (pre) => {
+    const lines = [`书名 ${LGG_BOOK}`, '', '作者[mock]', '', '标签 / 测试 /', '总计: 3 / GPT: 3', '', '############', '简介。', '', '', ''];
+    for (const id of ['t1', 't2', 't3']) {
+      lines.push(`# 章 ${id}`, '');
+      for (let i = 0; i < transCount(id); i += 1) lines.push(`${pre}第${i + 1}行：アリスが魔導書を読む。`);
+      lines.push('', '', '');
+    }
+    return lines.join('\n');
+  };
+  const mockJp = await fetch(`${MOCK}/api/novel/mock/${LGG_BOOK}/file?mode=jp&translationsMode=parallel&type=txt&filename=jp.${LGG_BOOK}.txt`).then((r) => r.text());
+  const mockJpLines = mockJp.split('\n');
+  assert.ok(mockJpLines.includes('############') && mockJpLines.includes('# 章 t1'), 'mock 的 mode=jp 夹具应是站点导出结构：' + JSON.stringify(mockJpLines.slice(0, 14)));
+  assert.equal(mockJpLines.filter((l) => l.startsWith('第')).length, 12, '与 chapter-task 同源（6+4+2 段）');
+  const up = await lgPost('/lg/upload', { filename: 'lg-result-sitefmt.txt', content: mkSite('【译】') });
+  assert.equal(up.status, 200, JSON.stringify(up.body));
+  const r = await lgPost('/lg/verify', { bookKey: `web:mock/${LGG_BOOK}`, txtPath: up.body.path, manifestPath: lgExport.manifestFile });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.ok(!r.body.globalError, r.body.globalError);
+  assert.equal(r.body.converted, true, '应识别为站点导出格式并自动对齐：' + JSON.stringify(r.body));
+  assert.ok(/站点导出格式/.test(r.body.convertNote || ''), r.body.convertNote);
+  assert.equal(r.body.okCount, 3, JSON.stringify(r.body));
+  assert.ok(r.body.linesIn > r.body.linesTotal, `站点格式原文件行数(${r.body.linesIn}) 应多于清单契约行数(${r.body.linesTotal})`);
+  globalThis.__lgSiteFmt = up.body.path;
+});
+await t('/run lg-import：站点格式 txt → 队列侧同样自动对齐并全量提交', async () => {
+  const run = await lgPost('/run', { bookKey: `web:mock/${LGG_BOOK}`, job: 'lg-import', options: { txtPath: globalThis.__lgSiteFmt, manifestPath: lgExport.manifestFile, limit: 0 } });
+  assert.equal(run.status, 202, JSON.stringify(run.body));
+  let item = null;
+  for (let i = 0; i < 60; i++) {
+    await new Promise((res) => setTimeout(res, 200));
+    item = lgQueue.get(run.body.id);
+    if (item && (item.state === 'done' || item.state === 'failed')) break;
+  }
+  assert.equal(item && item.state, 'done', JSON.stringify(item));
+  assert.equal(item.stats.uploaded, 3, JSON.stringify(item.stats));
+  assert.equal(item.stats.converted, true, '队列统计应标注自动对齐：' + JSON.stringify(item.stats));
+  const stats = await fetch(`${MOCK}/__stats`).then((r) => r.json());
+  assert.equal(stats.lastChapterUpload.chapterId, 't3', JSON.stringify(stats.lastChapterUpload));
+  assert.ok((stats.lastChapterUpload.preview || []).every((l) => String(l).startsWith('【译】')), JSON.stringify(stats.lastChapterUpload));
+});
 await t('GET /warnings：质检警告端点（摘要 + 明细）', async () => {
   const r = await fetch(`${LG}/warnings?book=${encodeURIComponent(CHECK_KEY)}&limit=10`).then((x) => x.json());
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -1726,6 +1769,58 @@ await t('清理：LG GUI 测试目录与服务器', () => {
   fs.rmSync(lgTmp.exportsDir, { recursive: true, force: true });
   fs.rmSync(lgTmp.uploadsDir, { recursive: true, force: true });
   assert.ok(!fs.existsSync(lgTmp.exportsDir));
+});
+
+// ---- SiteClient 传输层重试（代理链路抖动；纯假 fetch，不需要 mock） ----
+const flakyFetch = (script) => {
+  let calls = 0;
+  const fn = async () => {
+    const step = script[Math.min(calls, script.length - 1)];
+    calls += 1;
+    const value = typeof step === 'function' ? step() : step;
+    if (value instanceof Error) throw value;   // 传输层失败：fetch 抛出
+    return value;
+  };
+  return { fn, calls: () => calls };
+};
+const netErr = () => { const e = new TypeError('fetch failed'); e.cause = { code: 'ECONNRESET' }; return e; };
+const okJson = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+
+await t('SiteClient 重试：传输失败 2 次后成功（第 3 次返回数据，重试可观测）', async () => {
+  const seq = flakyFetch([netErr, netErr, okJson({ titleJp: 'x' })]);
+  const retried = [];
+  const c = new SiteClient({
+    origin: 'https://example.test', token: 't', engine, fetchImpl: seq.fn, retries: 3, retryDelayMs: 1,
+    onRetry: (e, n, label) => retried.push([n, String(label)]),
+  });
+  const dto = await c.getNovel('syosetu', 'n1');
+  assert.equal(seq.calls(), 3);
+  assert.equal(dto.titleJp, 'x');
+  assert.equal(retried.length, 2, JSON.stringify(retried));
+  assert.equal(retried[1][0], 2, JSON.stringify(retried));
+  assert.ok(/novel\/syosetu\/n1/.test(retried[1][1]), JSON.stringify(retried[1]));
+});
+
+await t('SiteClient 重试：耗尽即抛（不无限重试）', async () => {
+  const seq = flakyFetch([netErr]);
+  const c = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: seq.fn, retries: 2, retryDelayMs: 1 });
+  await assert.rejects(() => c.getNovel('s', 'n'), /fetch failed/);
+  assert.equal(seq.calls(), 3, '1 次原始 + 2 次重试');
+});
+
+await t('SiteClient 重试：HTTP 状态错误不重试（401 保留 unauthorized 码，只发 1 次）', async () => {
+  const seq = flakyFetch([new Response('nope', { status: 401 })]);
+  const c = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: seq.fn, retries: 3, retryDelayMs: 1 });
+  await assert.rejects(() => c.getNovel('s', 'n'), (e) => e.code === 'unauthorized');
+  assert.equal(seq.calls(), 1);
+});
+
+await t('SiteClient 重试：写术语表 PUT 传输失败重试后成功（内容幂等）', async () => {
+  const seq = flakyFetch([netErr, new Response('', { status: 200 })]);
+  const c = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: seq.fn, retries: 2, retryDelayMs: 1 });
+  const ok = await c.putGlossaryRaw({ kind: 'web', providerId: 'syosetu', novelId: 'n1' }, { a: 'b' });
+  assert.equal(ok, true);
+  assert.equal(seq.calls(), 2);
 });
 
 console.log(`\n通过 ${pass}，失败 ${fail}`);
