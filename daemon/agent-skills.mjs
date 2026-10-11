@@ -1,6 +1,7 @@
 // daemon/agent-skills.mjs —— Agent 技能目录（SKILL.md 包约定：frontmatter name/description + references/**）
-// 参考 LG 的技能包约定独立实现：发现（按根目录、首个 SKILL.md 为包边界）、读取（每次读盘、防路径逃逸）、
-// 目录注入（<available_skills>，disable-model-invocation 的技能不进目录但仍可 read_skill）。
+// 参考 LG 的技能包约定独立实现：发现（多根目录、首个 SKILL.md 为包边界，user 根覆盖 builtin）、
+// 读取（每次读盘、防路径逃逸）、目录注入（disable-model-invocation 的技能不进目录但仍可 read_skill）。
+// 目录支持运行时 refresh（用户技能可被面板/agent 沙箱增改，无需重启 daemon）。
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -43,41 +44,51 @@ const listFiles = (dir, { cap = 200 } = {}) => {
 };
 
 export function createSkillCatalog({ roots = [], log = console } = {}) {
-  const found = [];
-  const seen = new Set();
-  for (const root of roots) {
-    const base = path.resolve(String(root || ''));
-    let dirs = [];
-    try { dirs = fs.readdirSync(base, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith('.')).map((e) => e.name); } catch { continue; }
-    for (const name of dirs) {
-      const dir = path.join(base, name);
-      const skillFile = path.join(dir, 'SKILL.md');
-      if (!fs.existsSync(skillFile)) continue;
-      let meta = {};
-      let extract = '';
-      try {
-        const parsed = parseFrontmatter(fs.readFileSync(skillFile, 'utf8'));
-        meta = parsed.meta;
-        extract = String(parsed.body || '').trim().split(/\r?\n/).slice(0, 3).join(' ').slice(0, 200);
-      } catch (e) { log.log(`[skills] 读取失败 ${skillFile}: ${(e && e.message) || e}`); continue; }
-      const skillName = String(meta.name || name);
-      if (seen.has(skillName)) { log.log(`[skills] 重名跳过：${skillName}（${dir}）`); continue; }
-      seen.add(skillName);
-      found.push({
-        name: skillName,
-        description: String(meta.description || extract || '').trim(),
-        dir,
-        disableModelInvocation: meta['disable-model-invocation'] === true,
-        files: listFiles(dir),
-      });
-    }
-  }
-  found.sort((a, b) => a.name.localeCompare(b.name));
+  // roots 项：字符串（legacy，source='builtin'）或 {dir, source:'builtin'|'user'}；
+  // 顺序即优先级：靠前的根同名获胜（LG 语义 = user 覆盖 builtin，index.mjs 把 user 根排最前）
+  const normalizedRoots = roots.map((r) => (typeof r === 'string' || r instanceof String)
+    ? { dir: path.resolve(String(r)), source: 'builtin' }
+    : { dir: path.resolve(String(r.dir || '')), source: r.source === 'user' ? 'user' : 'builtin' });
 
-  const byName = new Map(found.map((s) => [s.name, s]));
+  // 现扫磁盘建快照；缺失的根容忍（用户技能目录可暂不存在）
+  const scan = () => {
+    const found = [];
+    const seen = new Set();
+    for (const root of normalizedRoots) {
+      let dirs = [];
+      try { dirs = fs.readdirSync(root.dir, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith('.')).map((e) => e.name); } catch { continue; }
+      for (const name of dirs) {
+        const dir = path.join(root.dir, name);
+        const skillFile = path.join(dir, 'SKILL.md');
+        if (!fs.existsSync(skillFile)) continue;
+        let meta = {};
+        let extract = '';
+        try {
+          const parsed = parseFrontmatter(fs.readFileSync(skillFile, 'utf8'));
+          meta = parsed.meta;
+          extract = String(parsed.body || '').trim().split(/\r?\n/).slice(0, 3).join(' ').slice(0, 200);
+        } catch (e) { log.log(`[skills] 读取失败 ${skillFile}: ${(e && e.message) || e}`); continue; }
+        const skillName = String(meta.name || name);
+        if (seen.has(skillName)) { log.log(`[skills] 重名跳过：${skillName}（${dir}）`); continue; }
+        seen.add(skillName);
+        found.push({
+          name: skillName,
+          description: String(meta.description || extract || '').trim(),
+          dir,
+          source: root.source,
+          disableModelInvocation: meta['disable-model-invocation'] === true,
+          files: listFiles(dir),
+        });
+      }
+    }
+    found.sort((a, b) => a.name.localeCompare(b.name));
+    return { found, byName: new Map(found.map((s) => [s.name, s])) };
+  };
+
+  let current = scan();
 
   const read = (name, relPath = 'SKILL.md') => {
-    const skill = byName.get(String(name || ''));
+    const skill = current.byName.get(String(name || ''));
     if (!skill) throw Object.assign(new Error(`技能不存在：${name}`), { code: 'skill_not_found' });
     const rel = String(relPath || 'SKILL.md').replace(/\\/g, '/');
     if (rel === '' || rel.startsWith('/') || rel.split('/').includes('..')) {
@@ -99,25 +110,26 @@ export function createSkillCatalog({ roots = [], log = console } = {}) {
     const unknown = [];
     for (const m of String(text || '').matchAll(/(?:^|[^\w@])@([A-Za-z0-9_-]+)/g)) {
       const name = m[1];
-      if (byName.has(name)) { if (!skills.includes(name)) skills.push(name); }
+      if (current.byName.has(name)) { if (!skills.includes(name)) skills.push(name); }
       else if (!unknown.includes(name)) unknown.push(name);
     }
     return { skills, unknown };
   };
 
   const promptText = () => {
-    const visible = found.filter((s) => !s.disableModelInvocation);
+    const visible = current.found.filter((s) => !s.disableModelInvocation);
     if (visible.length === 0) return '';
     const lines = visible.map((s) => `- ${s.name}: ${s.description || '(无描述)'}`);
     return `可用技能（需要时用 read_skill 读取完整说明与 references）：\n${lines.join('\n')}`;
   };
 
   return {
-    roots,
-    list: () => found.map(({ name, description, files, disableModelInvocation }) => ({ name, description, files, disableModelInvocation })),
-    get: (name) => byName.get(String(name || '')) || null,
+    roots: normalizedRoots,
+    list: () => current.found.map(({ name, description, files, disableModelInvocation, source }) => ({ name, description, files, disableModelInvocation, source })),
+    get: (name) => current.byName.get(String(name || '')) || null,
     mentions,
     read,
     promptText,
+    refresh: () => { current = scan(); },   // 用户技能可被面板/沙箱运行时增改，查询方按需重扫
   };
 }

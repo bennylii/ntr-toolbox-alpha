@@ -86,9 +86,11 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
   const agentPoolExplicit = (cfgAgent) => Array.isArray(cfgAgent && cfgAgent.workers) && cfgAgent.workers.length > 0;
 
   // @技能点名：解析文本里的技能；未知名返回错误与可用清单（发送/重发/编辑共用）
+  // 查询前重扫技能目录（用户技能可被面板/沙箱运行时增改，对齐 LG「每查询现扫磁盘」）
   const agentMentions = (text) => {
     const s = String(text == null ? '' : text);
     if (!s.includes('@') || !agentLoop || !agentLoop.skills) return { skills: [] };
+    try { agentLoop.skills.refresh?.(); } catch { /* 沿用上次快照 */ }
     const m = agentLoop.skills.mentions(s);
     if (m.unknown.length > 0) return { error: `未知技能：${m.unknown.join('、')}`, knownSkills: agentLoop.skills.list().map((x) => x.name) };
     return { skills: m.skills };
@@ -572,12 +574,22 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
       }
       if (req.method === 'GET' && url.pathname === '/agent/skills') {
         if (!agentLoop || !agentLoop.skills) { send(400, { ok: false, error: '技能目录未装配' }); return; }
-        send(200, { ok: true, skills: agentLoop.skills.list().map((s) => ({ name: s.name, description: s.description, files: s.files, hidden: s.disableModelInvocation === true })) });
+        try { agentLoop.skills.refresh?.(); } catch { /* 沿用上次快照 */ }
+        send(200, {
+          ok: true,
+          skills: agentLoop.skills.list().map((s) => ({
+            name: s.name, description: s.description, files: s.files,
+            hidden: s.disableModelInvocation === true,
+            source: s.source === 'user' ? 'user' : 'builtin',
+            writable: s.source === 'user',
+          })),
+        });
         return;
       }
       // 技能面板读单文件：read() 自带防逃逸（拒绝 .. / 绝对路径 / 越界），端点只做封装与截断
       if (req.method === 'GET' && url.pathname === '/agent/skill/file') {
         if (!agentLoop || !agentLoop.skills) { send(400, { ok: false, error: '技能目录未装配' }); return; }
+        try { agentLoop.skills.refresh?.(); } catch { /* 沿用上次快照 */ }
         const name = url.searchParams.get('name') || '';
         const relPath = url.searchParams.get('path') || 'SKILL.md';
         try {
@@ -588,6 +600,77 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           const code = (e && e.code) || '';
           send(code === 'skill_not_found' || code === 'file_not_found' ? 404 : 400, { ok: false, error: (e && e.message) || String(e) });
         }
+        return;
+      }
+      // ---- 技能写端点（面板/人工用；agent 生成技能走沙箱写 daemon/skills-user）----
+      // 写守卫对称于 read()：仅 user 根、拒绝 .. / 绝对路径 / 越界；保存 tmp+rename 原子写
+      if (req.method === 'POST' && url.pathname === '/agent/skill/save') {
+        if (!agentLoop || !agentLoop.skills) { send(400, { ok: false, error: '技能目录未装配' }); return; }
+        const body = await readBody();
+        try { agentLoop.skills.refresh?.(); } catch { /* ignore */ }
+        const skill = agentLoop.skills.get(String(body.name || ''));
+        if (!skill) { send(404, { ok: false, error: `技能不存在：${body.name}` }); return; }
+        if (skill.source !== 'user') { send(403, { ok: false, error: '内置技能只读（保存到用户技能目录可覆盖同名内置）' }); return; }
+        const rel = String(body.path || 'SKILL.md').replace(/\\/g, '/');
+        if (rel === '' || rel.startsWith('/') || rel.split('/').includes('..')) { send(400, { ok: false, error: `非法路径：${body.path}` }); return; }
+        const full = path.resolve(skill.dir, rel);
+        if (full !== skill.dir && !full.startsWith(skill.dir + path.sep)) { send(400, { ok: false, error: `路径越界：${body.path}` }); return; }
+        const content = String(body.content == null ? '' : body.content);
+        if (Buffer.byteLength(content, 'utf8') > 2 * 1024 * 1024) { send(400, { ok: false, error: '内容超过 2MB 上限' }); return; }
+        if (!fs.existsSync(path.dirname(full))) fs.mkdirSync(path.dirname(full), { recursive: true });
+        const tmp = full + '.tmp-' + Date.now();
+        fs.writeFileSync(tmp, content, 'utf8');
+        fs.renameSync(tmp, full);
+        log.log(`[skills] 保存 ${skill.name}/${rel}（${Buffer.byteLength(content, 'utf8')}B）`);
+        send(200, { ok: true, name: skill.name, path: rel });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/agent/skill/create') {
+        if (!agentLoop || !agentLoop.skills) { send(400, { ok: false, error: '技能目录未装配' }); return; }
+        const body = await readBody();
+        const userRoot = agentLoop.skills.roots.find((r) => r.source === 'user');
+        if (!userRoot) { send(400, { ok: false, error: '未装配用户技能根' }); return; }
+        const name = String(body.name || '').trim();
+        if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name) || name.length > 64) {
+          send(400, { ok: false, error: '技能名只允许小写字母/数字/中划线（如 my-skill），≤64 字符' }); return;
+        }
+        if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(name) || /[. ]$/.test(name)) { send(400, { ok: false, error: '该名称是 Windows 保留名或以点/空格结尾' }); return; }
+        const dir = path.join(userRoot.dir, name);
+        if (fs.existsSync(path.join(dir, 'SKILL.md'))) { send(409, { ok: false, error: `技能已存在：${name}` }); return; }
+        const description = String(body.description == null ? '' : body.description).trim().replace(/[\r\n]+/g, ' ').slice(0, 200);
+        const content = `---\nname: ${name}\ndescription: ${description || '（一句话描述这个技能什么时候用）'}\n---\n\n（在这里写技能正文：步骤、判据、注意事项…）\n`;
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'SKILL.md'), content, 'utf8');
+        log.log(`[skills] 新建用户技能 ${name}`);
+        send(200, { ok: true, name });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/agent/skill/delete') {
+        if (!agentLoop || !agentLoop.skills) { send(400, { ok: false, error: '技能目录未装配' }); return; }
+        const body = await readBody();
+        try { agentLoop.skills.refresh?.(); } catch { /* ignore */ }
+        const skill = agentLoop.skills.get(String(body.name || ''));
+        if (!skill) { send(404, { ok: false, error: `技能不存在：${body.name}` }); return; }
+        if (skill.source !== 'user') { send(403, { ok: false, error: '内置技能只读，不可删除' }); return; }
+        const rel = String(body.path || '').replace(/\\/g, '/');
+        if (rel === '') {
+          // 删整包：解析后必须仍在用户根内（双保险；目录来自 catalog 本身，正常不会越界）
+          const resolved = path.resolve(skill.dir);
+          const userRoot = agentLoop.skills.roots.find((r) => r.source === 'user');
+          if (!resolved.startsWith(path.resolve(userRoot.dir) + path.sep)) { send(400, { ok: false, error: '目录越界' }); return; }
+          fs.rmSync(resolved, { recursive: true, force: true });
+          log.log(`[skills] 删除用户技能 ${skill.name}`);
+          send(200, { ok: true, deleted: 'skill', name: skill.name });
+          return;
+        }
+        if (rel === 'SKILL.md') { send(400, { ok: false, error: 'SKILL.md 是技能包边界，不能单独删除（要删请删整个技能）' }); return; }
+        if (rel.startsWith('/') || rel.split('/').includes('..')) { send(400, { ok: false, error: `非法路径：${body.path}` }); return; }
+        const full = path.resolve(skill.dir, rel);
+        if (!full.startsWith(path.resolve(skill.dir) + path.sep)) { send(400, { ok: false, error: `路径越界：${body.path}` }); return; }
+        if (!fs.existsSync(full)) { send(404, { ok: false, error: `文件不存在：${rel}` }); return; }
+        fs.rmSync(full, { force: true });
+        log.log(`[skills] 删除文件 ${skill.name}/${rel}`);
+        send(200, { ok: true, deleted: 'file', name: skill.name, path: rel });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/agent/personality') {

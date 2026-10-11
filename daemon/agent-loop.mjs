@@ -93,6 +93,7 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
       registry,
     };
     store.touchAgentSession(sessionId, { state: 'running' });
+    try { opt.deps?.skills?.refresh?.(); } catch { /* 目录重扫失败不影响本轮（沿用上次快照） */ }
     if (appendUserMessage) {
       store.appendAgentMessage({ sessionId, role: 'user', content: String(userText == null ? '' : userText) });
       emit({ type: 'user_message', text: String(userText == null ? '' : userText) });
@@ -108,8 +109,9 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
         }
         steps += 1;
 
-        // 压缩（失败不影响主流程）+ 硬预算裁剪
-        let extraSystem = opt.extraSystem;
+        // 压缩（失败不影响主流程）+ 硬预算裁剪；
+        // 技能目录运行时可变（面板/沙箱增改用户技能），每步优先走目录现值，opt.extraSystem 只是无 skills 时的兜底
+        let extraSystem = (opt.deps && typeof opt.deps.skills?.promptText === 'function') ? opt.deps.skills.promptText() : opt.extraSystem;
         if (session.bookKey) {
           const bk = store.getBook(session.bookKey);
           const title = bk && bk.title ? String(bk.title).replace(/\s+/g, ' ').slice(0, 60) : '';

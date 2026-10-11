@@ -402,7 +402,7 @@ export const UI_HTML = `<!doctype html>
       <button class="icon-btn sess-op" id="agent-delete" title="删除当前会话">删除</button>
       <span class="spacer"></span>
       <span class="muted" id="agent-status"></span>
-      <button class="btn ghost" id="agent-skills-btn" title="技能目录（只读）">技能</button>
+      <button class="btn ghost" id="agent-skills-btn" title="技能目录（内置只读；用户技能可编辑，agent 沙箱可生成）">技能</button>
       <button class="btn ghost" id="agent-sys">系统指令</button>
       <button class="btn danger" id="agent-stop" disabled>停止</button>
     </div>
@@ -433,12 +433,31 @@ export const UI_HTML = `<!doctype html>
     <div id="agent-skillspanel" class="syseditor skillspanel" style="display: none">
       <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 4px">
         <b>技能</b>
-        <span class="muted">标「隐藏」的不进 agent 技能目录（仍可 @点名 与读取）；点技能展开文件，点文件看原文</span>
+        <span class="muted">内置只读；用户技能（daemon/skills-user）可编辑，agent 沙箱也可在此生成；「隐藏」不进 agent 目录但仍可读取</span>
         <span class="spacer"></span>
+        <button class="btn ghost" id="agent-skill-new">＋ 新建</button>
         <button class="btn ghost" id="agent-skills-close">关闭</button>
       </div>
+      <div id="agent-skill-create" style="display: none; border: 1px solid var(--line); background: var(--window); padding: 5px 7px; margin: 4px 0">
+        <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap">
+          <input type="text" id="agent-skill-new-name" placeholder="技能名（小写字母/数字/中划线，如 my-skill）" style="flex: 1; min-width: 200px">
+          <input type="text" id="agent-skill-new-desc" placeholder="一句话描述（什么时候用）" style="flex: 2; min-width: 240px">
+          <button class="btn" id="agent-skill-create-save">创建</button>
+          <button class="btn ghost" id="agent-skill-create-cancel">取消</button>
+        </div>
+      </div>
       <div id="agent-skills-list"></div>
-      <pre id="agent-skill-view" style="display: none"></pre>
+      <div id="agent-skill-viewbox" style="display: none">
+        <div id="agent-skill-view-head" style="display: flex; align-items: center; gap: 6px; margin-top: 6px; flex-wrap: wrap"></div>
+        <pre id="agent-skill-view"></pre>
+        <div id="agent-skill-editor" style="display: none">
+          <textarea id="agent-skill-edit-text" style="width: 100%; min-height: 180px"></textarea>
+          <div style="display: flex; gap: 8px; margin-top: 4px">
+            <button class="btn" id="agent-skill-edit-save">保存</button>
+            <button class="btn ghost" id="agent-skill-edit-cancel">取消</button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1884,29 +1903,82 @@ $('agent-skills-btn').addEventListener('click', async function () {
   const panel = $('agent-skillspanel');
   if (panel.style.display === 'block') { panel.style.display = 'none'; return; }
   panel.style.display = 'block';
-  $('agent-skill-view').style.display = 'none';
+  $('agent-skill-viewbox').style.display = 'none';
+  $('agent-skill-create').style.display = 'none';
   await renderSkillsPanel();
 });
 $('agent-skills-close').addEventListener('click', function () { $('agent-skillspanel').style.display = 'none'; });
+let agentSkillEdit = null;   // 当前查看/编辑的文件 {name, path, content}
+const skillWritable = (name) => ((AGENT_SKILLS || []).find((s) => s.name === name) || {}).writable === true;
+function agentSkillViewHead(name, relPath) {
+  const head = $('agent-skill-view-head');
+  head.textContent = '';
+  const label = document.createElement('b'); label.textContent = name + '/' + relPath; head.appendChild(label);
+  if (!skillWritable(name)) {
+    const ro = document.createElement('span'); ro.className = 'muted'; ro.textContent = '（内置，只读）'; head.appendChild(ro);
+    return;
+  }
+  const editBtn = document.createElement('button'); editBtn.className = 'btn ghost'; editBtn.textContent = '编辑';
+  editBtn.addEventListener('click', function () {
+    $('agent-skill-view').style.display = 'none';
+    $('agent-skill-editor').style.display = 'block';
+    $('agent-skill-edit-text').value = agentSkillEdit ? agentSkillEdit.content : '';
+    $('agent-skill-edit-text').focus();
+  });
+  head.appendChild(editBtn);
+  if (relPath !== 'SKILL.md') {
+    const delFile = document.createElement('button'); delFile.className = 'btn ghost'; delFile.textContent = '删除此文件';
+    delFile.addEventListener('click', async function () {
+      if (!confirm('删除 ' + name + '/' + relPath + '？')) return;
+      try { await post('/agent/skill/delete', { name: name, path: relPath }); toast('文件已删除'); await renderSkillsPanel(); agentOpenSkillFile(name, 'SKILL.md'); }
+      catch (e) { toast(e.message, true); }
+    });
+    head.appendChild(delFile);
+  }
+  const delSkill = document.createElement('button'); delSkill.className = 'btn danger'; delSkill.textContent = '删除技能';
+  delSkill.addEventListener('click', async function () {
+    if (!confirm('删除整个技能 ' + name + '（含全部文件）？')) return;
+    try { await post('/agent/skill/delete', { name: name }); toast('技能已删除'); $('agent-skill-viewbox').style.display = 'none'; await renderSkillsPanel(); }
+    catch (e) { toast(e.message, true); }
+  });
+  head.appendChild(delSkill);
+}
+async function agentOpenSkillFile(name, relPath) {
+  const box = $('agent-skill-viewbox');
+  const view = $('agent-skill-view');
+  $('agent-skill-editor').style.display = 'none';
+  view.style.display = 'block';
+  box.style.display = 'block';
+  view.textContent = '加载中…';
+  try {
+    const r = await api('/agent/skill/file?name=' + encodeURIComponent(name) + '&path=' + encodeURIComponent(relPath));
+    agentSkillEdit = { name: name, path: r.path, content: r.content };
+    agentSkillViewHead(name, r.path);
+    view.textContent = (r.truncated ? '（内容过长，已截断到前 100000 字）' : '') + r.content;
+  } catch (e) { view.textContent = '读取失败：' + e.message; }
+}
 async function renderSkillsPanel() {
   const list = $('agent-skills-list');
   list.innerHTML = '<div class="muted">加载中…</div>';
   let skills = [];
   try { skills = (await api('/agent/skills')).skills || []; } catch (e) { list.textContent = '读取失败：' + e.message; return; }
   AGENT_SKILLS = skills;   // 面板打开即目录最新态，顺带刷新 @候选缓存
-  if (skills.length === 0) { list.textContent = '技能目录为空（skills/ 下没有 SKILL.md 包）'; return; }
+  if (skills.length === 0) { list.textContent = '技能目录为空'; return; }
   list.textContent = '';
   for (const s of skills) {
     const row = document.createElement('div'); row.className = 'skill-row';
     const head = document.createElement('div');
     const name = document.createElement('b'); name.textContent = s.name; head.appendChild(name);
-    if (s.hidden) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = '隐藏'; head.appendChild(badge); }
+    const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = s.source === 'user' ? '用户' : '内置';
+    if (s.source === 'user') badge.style.fontWeight = '700';
+    head.appendChild(badge);
+    if (s.hidden) { const h = document.createElement('span'); h.className = 'badge'; h.textContent = '隐藏'; head.appendChild(h); }
     row.appendChild(head);
     if (s.description) { const d = document.createElement('div'); d.className = 'muted'; d.textContent = s.description; row.appendChild(d); }
     const files = document.createElement('div'); files.className = 'skill-files';
     for (const f of (s.files || [])) {
       const chip = document.createElement('span'); chip.className = 'skill-file'; chip.textContent = f;
-      chip.addEventListener('click', function (ev) { ev.stopPropagation(); agentShowSkillFile(s.name, f, chip); });
+      chip.addEventListener('click', function (ev) { ev.stopPropagation(); agentOpenSkillFile(s.name, f); });
       files.appendChild(chip);
     }
     row.appendChild(files);
@@ -1914,22 +1986,41 @@ async function renderSkillsPanel() {
       const open = row.classList.contains('open');
       list.querySelectorAll('.skill-row').forEach(function (r) { r.classList.remove('open', 'sel'); });
       if (!open) row.classList.add('open', 'sel');
-      $('agent-skill-view').style.display = 'none';
+      $('agent-skill-viewbox').style.display = 'none';
     });
     list.appendChild(row);
   }
 }
-async function agentShowSkillFile(name, relPath, chip) {
-  const view = $('agent-skill-view');
-  chip.parentElement.querySelectorAll('.skill-file').forEach(function (c) { c.classList.remove('sel'); });
-  chip.classList.add('sel');
-  view.style.display = 'block';
-  view.textContent = '加载中…';
+$('agent-skill-new').addEventListener('click', function () {
+  const form = $('agent-skill-create');
+  form.style.display = form.style.display === 'block' ? 'none' : 'block';
+  $('agent-skill-new-name').focus();
+});
+$('agent-skill-create-cancel').addEventListener('click', function () { $('agent-skill-create').style.display = 'none'; });
+$('agent-skill-create-save').addEventListener('click', async function () {
   try {
-    const r = await api('/agent/skill/file?name=' + encodeURIComponent(name) + '&path=' + encodeURIComponent(relPath));
-    view.textContent = (r.truncated ? '（内容过长，已截断到前 100000 字）' : '') + r.content;
-  } catch (e) { view.textContent = '读取失败：' + e.message; }
-}
+    await post('/agent/skill/create', { name: $('agent-skill-new-name').value.trim(), description: $('agent-skill-new-desc').value.trim() });
+    toast('技能已创建（用户技能，可编辑）');
+    $('agent-skill-create').style.display = 'none';
+    $('agent-skill-new-name').value = ''; $('agent-skill-new-desc').value = '';
+    await renderSkillsPanel();
+  } catch (e) { toast(e.message, true); }
+});
+$('agent-skill-edit-save').addEventListener('click', async function () {
+  if (!agentSkillEdit) return;
+  try {
+    await post('/agent/skill/save', { name: agentSkillEdit.name, path: agentSkillEdit.path, content: $('agent-skill-edit-text').value });
+    toast('已保存（无需重启，下轮对话即生效）');
+    agentSkillEdit.content = $('agent-skill-edit-text').value;
+    $('agent-skill-editor').style.display = 'none';
+    $('agent-skill-view').style.display = 'block';
+    $('agent-skill-view').textContent = agentSkillEdit.content;
+  } catch (e) { toast(e.message, true); }
+});
+$('agent-skill-edit-cancel').addEventListener('click', function () {
+  $('agent-skill-editor').style.display = 'none';
+  $('agent-skill-view').style.display = 'block';
+});
 $('agent-input').addEventListener('input', function () {
   agentSkillsCache().then(function () { agentMentionUpdate(); });
 });

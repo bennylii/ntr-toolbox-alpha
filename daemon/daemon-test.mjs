@@ -692,7 +692,10 @@ const agentQueue = createJobQueue({
   resolveRunner: (job) => ({ translate: qTranslate, check: qCheck, glossary: qGlossary }[job]),
   log: quiet,
 });
-const agentSkills = createSkillCatalog({ roots: [path.join(repoRoot, 'skills')], log: quiet });
+const agentSkills = createSkillCatalog({
+  roots: [{ dir: path.join(repoRoot, 'daemon', '.tmp-skills-user'), source: 'user' }, { dir: path.join(repoRoot, 'skills'), source: 'builtin' }],
+  log: quiet,
+});
 const runWriteToolOnce = async (toolName, args, { approve = true, tools = writeTools } = {}) => {
   const q = `?toolcall=${toolName}&toolargs=${encodeURIComponent(JSON.stringify(args))}`;
   const scheduler = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW(`wt-${toolName}`, 'wtkey', q)], maxInFlight: 1 } });
@@ -1000,6 +1003,47 @@ await t('/agent/skill/file：读技能原文（404 文件不存在 / 400 路径�
     const unknown = await agentFetch(7367, '/agent/skill/file?name=nope-skill');
     assert.equal(unknown.ok, false, JSON.stringify(unknown));
   } finally { server.close(); }
+});
+await t('/agent/skill create|save|delete：用户技能免重启生效，内置只读', async () => {
+  const { server } = await mkAgentServer(7368, '', [doingTool]);
+  const userRoot = path.join(repoRoot, 'daemon', '.tmp-skills-user');
+  const rmTmp = () => { try { fs.rmSync(userRoot, { recursive: true, force: true }); } catch { /* ignore */ } };
+  rmTmp();
+  try {
+    const created = await agentFetch(7368, '/agent/skill/create', { name: 'e2e-user-skill', description: '测试用用户技能' });
+    assert.equal(created.ok, true, JSON.stringify(created));
+    const listed = await agentFetch(7368, '/agent/skills');
+    const entry = listed.skills.find((x) => x.name === 'e2e-user-skill');
+    assert.ok(entry, 'create 后免重启即可见（refresh 生效）: ' + JSON.stringify(listed.skills.map((x) => x.name)));
+    assert.equal(entry.source, 'user');
+    assert.equal(entry.writable, true);
+    const builtin = listed.skills.find((x) => x.name === 'glossary-workflow');
+    assert.equal(builtin.source, 'builtin');
+    assert.equal(builtin.writable, false);
+    const dup = await agentFetch(7368, '/agent/skill/create', { name: 'e2e-user-skill' });
+    assert.equal(dup.ok, false, '重复创建应 409: ' + JSON.stringify(dup));
+    const badName = await agentFetch(7368, '/agent/skill/create', { name: 'Bad_Name!' });
+    assert.equal(badName.ok, false, JSON.stringify(badName));
+    const saved = await agentFetch(7368, '/agent/skill/save', { name: 'e2e-user-skill', path: 'SKILL.md', content: '---\nname: e2e-user-skill\ndescription: 改过的描述\n---\n\n新正文' });
+    assert.equal(saved.ok, true, JSON.stringify(saved));
+    const readBack = await agentFetch(7368, '/agent/skill/file?name=e2e-user-skill');
+    assert.ok(String(readBack.content).includes('改过的描述'), String(readBack.content).slice(0, 80));
+    const ro = await agentFetch(7368, '/agent/skill/save', { name: 'glossary-workflow', path: 'SKILL.md', content: 'x' });
+    assert.equal(ro.ok, false, '内置技能保存应被拒: ' + JSON.stringify(ro));
+    const roDel = await agentFetch(7368, '/agent/skill/delete', { name: 'glossary-workflow' });
+    assert.equal(roDel.ok, false, '内置技能删除应被拒: ' + JSON.stringify(roDel));
+    const delSkillMd = await agentFetch(7368, '/agent/skill/delete', { name: 'e2e-user-skill', path: 'SKILL.md' });
+    assert.equal(delSkillMd.ok, false, 'SKILL.md 单删应被拒（包边界）: ' + JSON.stringify(delSkillMd));
+    const escape = await agentFetch(7368, '/agent/skill/save', { name: 'e2e-user-skill', path: '../evil.md', content: 'x' });
+    assert.equal(escape.ok, false, '路径越界应被拒: ' + JSON.stringify(escape));
+    const mention = await agentFetch(7368, '/agent/session', { title: 'pin2' })
+      .then((r) => agentFetch(7368, '/agent/message', { session: r.sessionId, message: '@e2e-user-skill 看一眼', approvalMode: 'auto' }));
+    assert.notEqual(mention.ok, false, '新建技能应可被 @点名（mentions 走 refresh）: ' + JSON.stringify(mention));
+    const del = await agentFetch(7368, '/agent/skill/delete', { name: 'e2e-user-skill' });
+    assert.equal(del.ok, true, JSON.stringify(del));
+    const after = await agentFetch(7368, '/agent/skills');
+    assert.ok(!after.skills.some((x) => x.name === 'e2e-user-skill'), '删除后应消失');
+  } finally { server.close(); rmTmp(); }
 });
 await t('@技能名：该轮系统提示注入技能正文（mock lastSystem 断言）', async () => {
   const { server } = await mkAgentServer(7365, '', [...writeTools, doingTool]);

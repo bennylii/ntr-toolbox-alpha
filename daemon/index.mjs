@@ -162,7 +162,13 @@ const jobQueue = createJobQueue({
   resolveRunner: (job) => ({ glossary: glossaryPipeline, check: checkPipeline, translate: pipeline, 'lg-import': lgImportRunner }[job]),
   log,
 });
-const skillCatalog = createSkillCatalog({ roots: [path.join(repoRoot, 'skills')], log });
+// 技能双根：user（daemon/skills-user，面板/agent 沙箱可写，覆盖同名内置）优先于 builtin（repo skills/，只读）
+const skillsUserRoot = path.join(repoRoot, 'daemon', 'skills-user');
+fs.mkdirSync(skillsUserRoot, { recursive: true });
+const skillCatalog = createSkillCatalog({
+  roots: [{ dir: skillsUserRoot, source: 'user' }, { dir: path.join(repoRoot, 'skills'), source: 'builtin' }],
+  log,
+});
 const readTools = createReadTools({ store, engine, makeClient, log });
 const agentLlm = createAgentLlm({ scheduler: agentScheduler, log });
 const agentEvents = createAgentEvents();
@@ -178,12 +184,13 @@ const agentLoop = createAgentLoop({
   options: {
     approvalMode: agentApprovalDefault,
     bookKey: typeof flags.book === 'string' ? flags.book : '',
-    extraSystem: skillCatalog.promptText(),
+    extraSystem: skillCatalog.promptText(),   // 兜底；loop 内每步优先 deps.skills.promptText()（技能可运行时增改）
     deps: {
       engine,
       makeClient,
       getProxy,
       skills: skillCatalog,
+      skillsUserRoot,
       enqueue: (payload) => jobQueue.enqueue(payload),
       queueBusy: () => jobQueue.busy(),
       exportsDir: path.join(repoRoot, 'daemon', 'exports'),
