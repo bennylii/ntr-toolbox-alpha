@@ -1,6 +1,6 @@
 # LinguaGacha（v0.125.0）与 daemon 翻译管线同文对比
 
-> 同一篇 300 行日文小说摘录，分别走 LinguaGacha v0.125.0 的官方 CLI 翻译流程和本仓库 `daemon/translate.mjs` 的真实翻译核心，两侧都指向假 LLM 端点（确定性格式化译文），因此对比的是**管线行为**（分段 / 提示词 / 术语注入 / 重试 / 预过滤 / 输出），不是译文质量。
+> 同一篇 300 行日文小说摘录，分别走 LinguaGacha v0.125.0 的官方 CLI 翻译流程和本仓库 `daemon/translate.mjs` 的真实翻译核心，两侧都指向假 LLM 端点（确定性格式化译文），因此对比的是**管线行为**（分段 / 提示词 / 术语注入 / 重试 / 预过滤 / 输出），不是译文质量。在管线对比之上，另做了 **Agent 模式与技能系统**的同维实测（见第五节）。
 >
 > - 复跑方法与证据文件：[`tools/lg-compare/`](../tools/lg-compare/README.md)（`artifacts/*.jsonl` 是两侧每个请求的完整提示词原文）
 > - LG 侧跑的是 `run_cli_job`（= LG CLI 模式完整流程：导入 → 术语表注入 → 批量翻译 → 导出），进程内装配（`workerExecution=in_process`），不需要 Electron
@@ -135,7 +135,55 @@ GF文庫 => GF文库
 4. **`<why>` 结构化思考**：强制模型先输出极简「语境/决策」块再给正文，解析侧剥除——对质量有可感知收益，且与 daemon 现有的可选思考指引兼容（可做成协议段）。
 5. **术语表 info 列**：LG 的 `#类型`（人名/地名/组织…）进提示词给模型类型线索；daemon 的站点术语格式固定 `{jp: zh}`，若未来扩展可考虑附带类型说明。
 
-## 五、复跑与产物索引
+## 五、Agent 模式与技能系统（实测）
+
+> 对比方法：LG 侧装配**真实** `AgentService`（零 Electron，照抄 `gui-backend-bootstrap` 的注入面），stub 扮演 agent 模型按剧本发 tool_calls（OpenAI 兼容 SSE，`delta.tool_calls` 增量），其余全真：真 `read_skill`（`builtin/skills/glossary`）→ 真 `workspace_run`（CodeAct 沙箱 `fork node --permission` 跑脚本）→ 真 `workspace_apply`（manual 审批挂起 → 驱动放行）→ 事务落 `rules` 表 → 真 `run_batch_item_translation`。daemon 侧用真实 `createAgentLoop` + 真 `skills/` 目录 + 真 decision broker，mock 的 `?toolcall=` 剧本按轮次返回工具调用。
+
+### 定位：编排者 vs 运维助手
+
+- **LG：agent 是生产管线编排者。** GUI 三个预设按钮（帮我提取术语/翻译全文/审校译文）本质是**技能入口**——发一句短指令，agent 读技能包（`glossary` / `translation`）后自主编排：提取走 `workspace_run` 跑技能脚本（≥3 轮自启发循环 + 种子账本）→ 变更写 `changes/glossary/creates.jsonl` → `workspace_apply` 直接写工程；翻译走 `run_batch_item_translation`（引擎直写）；审校读 workspace 的 `warnings` 数据集逐类判断 → `changes/items/updates.jsonl`。翻译引擎本体仍是确定性批量管线，但**触发与落库权在 agent 手里**。
+- **daemon：agent 是运维/管理助手**（system 第一句即定位「帮助用户管理站点上的书、术语表、翻译与质检」）。翻译/术语/质检管线本体确定性运行；agent 通过审批工具（`run_translate` / `run_glossary` / `glossary_apply` / `import_lg_result`）把任务派进同一条 FIFO 队列，**不能绕过队列**；workspace 变更域仅 rules/glossary/prompts（章节译文提交明确排除在工作区之外）。
+
+### 一轮循环
+
+| | LG | daemon |
+|---|---|---|
+| 循环宿主 | 托管给 `pi-coding-agent` SDK（`AgentSession`），产品侧只装配 5 个自定义工具 + 事件订阅 | 自研 `agent-loop`：压缩/裁剪 → 模型 → 顺序工具 → 审批 broker → 回填（`maxSteps=24`） |
+| 会话存储 | 内存态（`SessionManager.inMemory`），工程切换即换代，重启即丢 | 消息/工具结果/用量落 SQLite（可重放、重新生成、摘要压缩自研） |
+| 决策挂起 | `AgentDecisionCoordinator` 单例 pending（question / write_approval，后者只有 reject/allow_once） | decision broker（write 审批 preview 真实 diff；question 选项作答；默认 300s 超时） |
+
+### 工具对照（两侧实测清单）
+
+| 语义 | LG（5 个注册） | daemon（13 个注册） |
+|---|---|---|
+| 读技能 | `read_skill`（返回正文 + `base_url`，可在沙箱里 `import` 技能包内脚本） | `read_skill`（默认 SKILL.md，截 8000 字）+ `list_skills` |
+| 沙箱批处理 | `workspace_run`（fork `node --permission`，`ws.*` IPC 桥，预装 `@lg/*`、exceljs、mupdf 等） | `workspace_run`（同范式，零依赖；数据集快照每次 run 重建） |
+| 写工程 | `workspace_apply`（空参数；变更全在 `changes/**.jsonl`；manual 审批） | `workspace_apply`（同范式，域仅 rules/glossary/prompts）+ 审批工具组（`run_translate`/`run_glossary`/`glossary_apply`/`glossary_rollback`/`import_glossary`/`set_rule`/`set_prompt`…） |
+| 问询 | `ask_user`（2–3 项，**倒计时结束默认第一项**） | `ask_user`（2–4 项，挂起等待）+ `doing` 进度 |
+| 批量翻译 | `run_batch_item_translation`（scope all/items，引擎直写） | `run_translate`（入队 jobQueue） |
+| 联网搜索 | `web_search`（注入端口才注册；本次未注入） | — |
+| LG 互通 | — | `export_lg_source` / `import_lg_result` |
+
+### 技能系统
+
+- **同构约定**：目录 + `SKILL.md`（frontmatter `name` / `description` / `disable-model-invocation`）——daemon 的 `agent-skills.mjs` 自述「参考 LG 的技能包约定独立实现」；两侧都有隐藏宪章（`agent-charter`）与 `writing-guide` 前置路由（LG 的 glossary 技能与 daemon 的三个 workflow 技能都要求先加载 writing-guide）。
+- **注入方式**：LG 每轮在上下文最前插 `<available_skills>` XML 清单（隐藏技能不出现，实测 8 个可见包）；daemon 是纯文本「可用技能（需要时用 read_skill…）」清单，另有 **@点名内联**——`【用户点名技能：writing-guide】` + SKILL.md 全文（截 6000 字）直接进 system。
+- **数量与来源**：LG builtin 9 包 + 用户目录 `userdata/skills/`（**agent 用 `skill-creator` 技能自己解包安装 zip**，装完自动 refresh_skills）；daemon 仓库 `skills/` 8 包随仓库分发。
+
+### 实测证据（本轮，artifacts/ 可复跑）
+
+- **LG agent 一轮 = 7 个模型请求**：`read_skill`×3（真技能正文）→ `workspace_run`（沙箱 exit 0：读 `items/entries.jsonl` 300 行、写 `changes/glossary/creates.jsonl`）→ `workspace_apply`（manual 挂起 → allow_once → **3 条术语事务落 rules 表**，分配 entry_id）→ `run_batch_item_translation`（178 行 9 请求，其中 2 请求带 `src -> dst #info` 术语段——与 CLI 路径的命中激活语义完全一致）→ 终答。
+- **daemon agent 一轮 = 5 个模型请求**：`read_skill(glossary-workflow)`（真 SKILL.md）→ `doing` → `demo_write`（preview → 审批挂起 → allowed → 执行）→ `ask_user`（挂起 → 选项作答回填）→ 终答；system 含 8 包技能目录 + @writing-guide 点名内联全文。
+- **失败记录（诚实起见）**：LG 第一次跑 `workspace_apply` 被**真实 schema 校验拒绝**——create 变更除业务字段外必须带 `sort`（`-1` = 追加末尾）；修正后通过。审批挂起需显式 `agent_approval_mode: "manual"`（LG 默认 auto 直通，不产生 pendingDecision）。
+
+### 可借鉴点（agent 维度，仅记录未改码）
+
+1. **技能即预设**：LG 把 GUI 高频任务做成技能入口（点击=发指令）；daemon 的 translation-workflow / glossary-workflow 已是同思路，控制台加一排「技能快捷按钮」是低成本对齐。
+2. **技能带可执行脚本**：LG 的 `read_skill` 返回 `base_url` 让 agent 在沙箱里 `import` 技能包内的 `.mjs`（runner 把技能目录加进 `--allow-fs-read` 白名单）；daemon 技能包目前是纯文档——「技能带脚本 + 白名单」机制可参考。
+3. **ask_user 默认项**：LG 倒计时结束默认选第一项（无人值守也能推进）；daemon 挂起等到 300s 超时。控制台无人值守场景可考虑默认项。
+4. **审校分工同构**：LG「确定性 warnings 数据集 → agent 逐类判断 → changes/items」与 daemon「run_check 产提案 → agent 处置 close_proposal」是同一分工；daemon 的七码质检更结构化，LG 的 agent 自由度更大（能改译文本身）。
+
+## 六、复跑与产物索引
 
 见 [`tools/lg-compare/README.md`](../tools/lg-compare/README.md)。当前 `artifacts/` 即本文引用的那次运行：
 
@@ -144,3 +192,6 @@ GF文庫 => GF文库
 - `lg-out/lg-input.txt` + `lg-out/bilingual/lg-input.txt`：LG 导出的译文与双语
 - `daemon-requests.jsonl`：daemon 10 个请求的完整 system/user
 - `daemon-out.txt` / `daemon-out-bilingual.txt`：daemon 核心函数产出的译文与双语
+- `lg-agent-requests.jsonl`：LG agent 一轮 7 个请求全文（`<available_skills>` XML、5 工具 schema、tool_calls 序列、沙箱回执）
+- `lg-agent-summary.json` / `lg-agent-glossary.json` / `lg-agent-timeline.json`：agent 轮次汇总（7 请求/6 工具调用/审批 1 次）、落库术语 3 条、agent 时间线（含 workspace_apply 首次被 schema 拒绝的回执）
+- `daemon-agent-requests.jsonl` / `daemon-agent-summary.json` / `daemon-agent-timeline.json`：daemon agent 一轮 5 个请求全文（技能目录清单、13 工具、@点名内联）、轮次汇总（审批 1/提问 1）

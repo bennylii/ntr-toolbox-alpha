@@ -1,0 +1,15 @@
+{
+  "agent_requests": 7,
+  "translation_requests": 9,
+  "translation_requests_with_glossary": 2,
+  "glossary_rules_count": 3,
+  "write_approvals_resolved": 1,
+  "tool_call_sequence": [
+    "read_skill",
+    "read_skill",
+    "read_skill",
+    "workspace_run",
+    "workspace_apply",
+    "run_batch_item_translation"
+  ]
+}
