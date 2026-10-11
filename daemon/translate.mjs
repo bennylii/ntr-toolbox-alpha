@@ -105,6 +105,30 @@ export function parseTranslateAnswer(answer, originalLines) {
   return result;
 }
 
+// ---- 条目级对账解析（③ 补发重试用；语义与 parseTranslateAnswer 逐条一致，缺行不抛）----
+// 返回 { map: Map<index0, 已含前导空白的译文>, missing: number[]（缺失行 index0） }；
+// 空行不进 map/missing（调用方原样保留原文）。
+export function parseTranslateAnswerPartial(answer, originalLines) {
+  const lineContentMap = new Map();
+  for (const rawLine of String(answer || '').split('\n')) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) continue;
+    const match = trimmed.match(/^#(\d+)(?:[:：]|\s+)(.*)/);
+    if (match) lineContentMap.set(Number.parseInt(match[1], 10), match[2]);
+  }
+  const map = new Map();
+  const missing = [];
+  for (let i = 0; i < originalLines.length; i += 1) {
+    const originalLine = originalLines[i];
+    if (originalLine.trim().length === 0) continue;
+    const translated = lineContentMap.get(i + 1);
+    if (translated === undefined) { missing.push(i); continue; }
+    const heading = originalLine.match(/^(\s*)/)?.[1] ?? '';
+    map.set(i, heading + translated.trimStart());
+  }
+  return { map, missing };
+}
+
 // ---- 单段翻译（镜像 openai-translator 的重试/二分语义）----
 // call: (messages) => Promise<{ ok, content?, error? }>（由管线注入，测试可桩）
 async function translateLines(lines, context) {
@@ -119,6 +143,21 @@ async function translateLines(lines, context) {
     throw err;
   }
   return parseTranslateAnswer(String(result.content || ''), lines);
+}
+
+// 条目级对账单次请求：返回 { map, missing }（缺行不抛，供补发模式使用；请求失败仍抛）
+async function translateLinesPartial(lines, context) {
+  if (lines.length === 0) return { map: new Map(), missing: [] };
+  if (lines.every((l) => l.trim().length === 0)) return { map: new Map(), missing: [] };
+  if (context.signal && context.signal.aborted) throw new Error('aborted');
+  const messages = buildTranslateMessages(lines, context.glossary, { systemPrompt: context.systemPrompt, thinking: context.thinking });
+  const result = await context.call(messages);
+  if (!result || !result.ok) {
+    const err = new Error((result && result.error) || '请求失败');
+    if (result && result.retryAfterMs) err.retryAfterMs = result.retryAfterMs;   // 调度器重试耗尽后仍失败：给调用方等待依据
+    throw err;
+  }
+  return parseTranslateAnswerPartial(String(result.content || ''), lines);
 }
 
 // 二分拆分（对单行失败回退原文；与站点 binaryTranslate 相同）
@@ -148,10 +187,17 @@ export async function translateSegment(lines, context) {
   let retry = 0;
   let failBecauseLineNumberNotMatch = 0;
   const bump = () => { retry += 1; if (context.onRetry) context.onRetry(retry); };
+  // 条目级补发（③）：已拿到的行按原位保存；空行原样保留、不占编号。整段重试时重置回全量。
+  const resetPending = () => {
+    const got = lines.map((line) => (line.trim().length === 0 ? line : null));
+    return { got, pending: lines.map((line, idx) => ({ idx, line })).filter((p) => got[p.idx] === null) };
+  };
+  let { got, pending } = resetPending();
   while (retry < 3) {
-    let result;
+    let parsed;
     try {
-      result = await translateLines(lines, context);
+      // 只对缺失行重编号组段（buildTranslateMessages 语义不变：段内 #1..#M）
+      parsed = await translateLinesPartial(pending.map((p) => p.line), context);
     } catch (err) {
       const message = (err && err.message) || String(err);
       if (context.signal && context.signal.aborted) throw err;
@@ -163,20 +209,34 @@ export async function translateSegment(lines, context) {
       bump();
       continue;
     }
-    if (lines.length !== result.length) {
-      failBecauseLineNumberNotMatch += 1;
+    let hit = 0;
+    for (const [i, text] of parsed.map) {
+      if (i < 0 || i >= pending.length) continue;   // 越界编号忽略（模型多编/错编）
+      got[pending[i].idx] = text;
+      hit += 1;
+    }
+    if (hit === 0) {
+      // 全失败（一条编号都没对账上）→ 与旧「行数不匹配」路径同形：普通重试（不触发二分）
       log('输出错误：输出行数不匹配');
+      ({ got, pending } = resetPending());
       bump();
       continue;
     }
-    if (!detectChinese(result.join(' '))) {
+    pending = lines.map((line, idx) => ({ idx, line })).filter((p) => got[p.idx] === null);
+    if (pending.length > 0) {
+      log(`输出错误：缺少 ${pending.length} 行，下一轮只补发缺失行`);
+      bump();
+      continue;
+    }
+    if (!detectChinese(got.join(' '))) {
       log('输出错误：输出语言不是中文');
+      ({ got, pending } = resetPending());
       bump();
       continue;
     }
-    return result;
+    return got;
   }
-  // 与站点一致：只有"显式行数检查"连续 3 次失败才二分（解析抛"行数不匹配"走的是普通重试路径）
+  // 与站点一致：只有"显式行数检查"连续 3 次失败才二分（补发模式下解析缺行走补发路径，该计数不累积——可达性同旧实现）
   if (failBecauseLineNumberNotMatch === 3 && lines.length > 1) {
     return binaryTranslate(lines, context);
   }

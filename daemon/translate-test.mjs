@@ -70,6 +70,15 @@ await t('解析 #n: 行（含全角冒号）、保留前导空白、空行回原
 await t('缺失编号 → 抛"行数不匹配"', () => {
   assert.throws(() => T.parseTranslateAnswer('#1:甲', ['a', 'b']), /行数不匹配/);
 });
+await t('parseTranslateAnswerPartial：命中/缺失/空行语义与 parseTranslateAnswer 一致', () => {
+  const { map, missing } = T.parseTranslateAnswerPartial('#1:甲\n#3：丙', ['  a', 'b', '   ']);
+  assert.equal(map.get(0), '  甲', '保留原文前导空白');
+  assert.deepEqual(missing, [1], '空行不进缺失清单');
+  const full = T.parseTranslateAnswer('#1:甲\n#2:乙', ['  a', 'b']);
+  const part = T.parseTranslateAnswerPartial('#1:甲\n#2:乙', ['  a', 'b']);
+  assert.deepEqual([part.map.get(0), part.map.get(1)], full);
+  assert.deepEqual(part.missing, []);
+});
 await t('detectChinese：中文真、日文假、混排阈值', () => {
   assert.equal(T.detectChinese('你好，世界！'), true);
   assert.equal(T.detectChinese('こんにちは、世界'), false);
@@ -77,26 +86,68 @@ await t('detectChinese：中文真、日文假、混排阈值', () => {
 });
 
 console.log('== 重试 / 二分 ==');
-await t('translateSegment：成功后返回；行数不匹配重试后成功', async () => {
+await t('translateSegment：成功后返回；行数不匹配 → 只补缺失行后成功', async () => {
   let calls = 0;
   const ok = await T.translateSegment(['a', 'b'], { call: async () => ({ ok: true, content: '#1:甲\n#2:乙' }) });
   assert.deepEqual(ok, ['甲', '乙']);
   const flaky = await T.translateSegment(['a', 'b'], {
     call: async () => {
       calls += 1;
-      return calls === 1 ? { ok: true, content: '#1:甲' } : { ok: true, content: '#1:甲\n#2:乙' };
+      return calls === 1 ? { ok: true, content: '#1:甲' } : { ok: true, content: '#1:乙' };
     },
   });
   assert.deepEqual(flaky, ['甲', '乙']);
-  assert.equal(calls, 2, '第一次解析抛"行数不匹配"后重试');
+  assert.equal(calls, 2, '第一次缺 #2 → 第二轮只补发缺失行');
 });
-await t('translateSegment：连续失败 3 次 → 抛"翻译失败：重试次数过多"', async () => {
+await t('translateSegment：部分缺失只补缺失行（首轮 #1/#3 命中 → 补发请求只有 1 行）', async () => {
+  const users = [];
+  let retries = 0;
+  const result = await T.translateSegment(['a', 'b', 'c'], {
+    onRetry: (n) => { retries = n; },
+    call: async (messages) => {
+      users.push(messages[1].content);
+      if (users.length === 1) return { ok: true, content: '#1:甲\n#3:丙' };
+      return { ok: true, content: '#1:乙' };
+    },
+  });
+  assert.deepEqual(result, ['甲', '乙', '丙'], '输出长度恒等输入、顺序正确');
+  assert.equal(users.length, 2);
+  assert.equal([...users[1].matchAll(/^#\d+:/gm)].length, 1, users[1]);
+  assert.ok(users[1].includes('#1:b'), users[1]);
+  assert.equal(retries, 1);
+});
+await t('translateSegment：全失败（无编号）走旧路径 → 3 次整段重试后失败', async () => {
   let calls = 0;
   await assert.rejects(
-    () => T.translateSegment(['a', 'b'], { call: async () => { calls += 1; return { ok: true, content: '#1:甲' }; } }),
+    () => T.translateSegment(['a', 'b'], { call: async () => { calls += 1; return { ok: true, content: '没有编号的散文' }; } }),
     /翻译失败：重试次数过多/,
   );
   assert.equal(calls, 3);
+});
+await t('translateSegment：补发耗尽（单行补发仍拿不到）→ 3 次调用后失败', async () => {
+  let calls = 0;
+  await assert.rejects(
+    () => T.translateSegment(['a', 'b'], {
+      call: async (messages) => {
+        calls += 1;
+        const count = [...messages[1].content.matchAll(/^#\d+:/gm)].length;
+        return count >= 2 ? { ok: true, content: '#1:甲' } : { ok: true, content: '无编号' };
+      },
+    }),
+    /翻译失败：重试次数过多/,
+  );
+  assert.equal(calls, 3);
+});
+await t('translateSegment：空行原样保留、不占补发编号', async () => {
+  const users = [];
+  const result = await T.translateSegment(['a', '   ', 'c'], {
+    call: async (messages) => {
+      users.push(messages[1].content);
+      return { ok: true, content: '#1:甲\n#2:丙' };
+    },
+  });
+  assert.deepEqual(result, ['甲', '   ', '丙']);
+  assert.equal(users.length, 1, '空行不参与对账，无需补发');
 });
 await t('translateSegment：非中文输出重试（3 次后失败）', async () => {
   let calls = 0;
