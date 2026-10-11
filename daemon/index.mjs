@@ -191,6 +191,7 @@ const agentLoop = createAgentLoop({
       getProxy,
       skills: skillCatalog,
       skillsUserRoot,
+      skillsBuiltinRoot: path.join(repoRoot, 'skills'),   // 内置技能根：沙箱只读（技能自带脚本可 import）
       enqueue: (payload) => jobQueue.enqueue(payload),
       queueBusy: () => jobQueue.busy(),
       exportsDir: path.join(repoRoot, 'daemon', 'exports'),

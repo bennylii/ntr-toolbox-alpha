@@ -672,6 +672,8 @@ await t('read_skill / list_skills：技能目录注入与读取（含 references
   assert.ok(list.result.skills.some((s) => s.name === 'glossary-workflow'), JSON.stringify(list.result.skills.map((s) => s.name)));
   const read = await runToolOnce('read_skill', { name: 'glossary-workflow' }, { books: true });
   assert.ok(read.result.content.includes('写入门槛'), read.result.content.slice(0, 200));
+  assert.ok(String(read.result.baseUrl).startsWith('file:'), JSON.stringify(read.result.baseUrl));
+  assert.ok(read.result.baseUrl.endsWith('/'), read.result.baseUrl);
   const escape = await runToolOnce('read_skill', { name: 'glossary-workflow', path: '../x' });
   assert.equal(escape.ok, false, JSON.stringify(escape));
   assert.equal(escape.error, 'bad_path');

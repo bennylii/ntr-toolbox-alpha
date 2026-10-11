@@ -13,6 +13,10 @@ All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 - **站点请求传输层重试**：`SiteClient` 对网络层失败（`ECONNRESET` / `fetch failed` / 超时）默认重试 3 次（退避 300ms×n，`onRetry` 让 CLI 打出「站点请求失败，重试 n」）；HTTP 状态错误（401/400/404/5xx）不重试，语义不变（章节提交与术语表 PUT 都是内容幂等的整章/整表写）。墙内站点只经代理可达、链路抖动频繁——实测整本导入的逐章校验通过率由此从 115/167 升到 165–167/167；测试 daemon-test 129/0（+4 用例：重试后成功 / 耗尽即抛 / 401 不重试 / PUT 重试幂等）。
 - **网络代理（出网）**：控制台设置页新增「网络代理」区块（第八个）——站点 API、翻译池、助手/术语池与 Agent 工作区沙箱脚本的出网统一走本机代理（HTTP 绝对形式 + HTTPS CONNECT 隧道，支持 `user:pass@` 凭据）；**保存即生效**，无需重启（未用 Node 内置 `NODE_USE_ENV_PROXY`——它只在进程启动前解析且首值缓存）；直连列表默认 `127.0.0.1,localhost,::1`（mock/测试零影响，关闭时行为与旧版一致）；「测试」按钮做「直连 / 代理」对比探测（`POST /proxy/test`）；不支持 SOCKS5。
 
+### LG 对齐六项（②⑥①⑤③④）
+
+- **② 技能带可执行脚本**：`read_skill` 返回值新增 `baseUrl`（技能包目录的 `file:` URL）——agent 在 `workspace_run` 沙箱里可用 `await import(new URL('scripts/xxx.mjs', baseUrl).href)` 加载技能自带脚本（对齐 LG 的 `matchLiterals` 模式）；沙箱 execArgv 把内置技能根（repo `skills/`）加进 `--allow-fs-read` 白名单（只读——写内置包撞权限模型天然拒绝，用户技能根仍读写）。现有技能包全是纯文档，属纯使能基建（手测：白名单下 import 成功、去掉即 `ERR_ACCESS_DENIED`）。
+
 ### 连接与凭据
 
 - **控制台「从站点同步」按钮**（设置页「站点与凭据」）：点一下让站点页面把当前短效 token 推过来——`POST /auth/request` 置一条同步请求（5 分钟过期）→ 油猴在 daemon 探测里从 `/ping.pendingAuth` 看到标志后**绕过指纹去重**立即推一次凭据 → `/auth` 收到即清位；按钮在 35s 内等推送到达并回报结果（「已同步（UA · N 个翻译器）」／「未收到推送：确认站点页面已打开并且已登录」）。前提是站点页面开着且已登录——token 只存在站点页面 localStorage，daemon 无法自取；手工粘贴 token 入口保留。
