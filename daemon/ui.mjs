@@ -495,22 +495,22 @@ export const UI_HTML = `<!doctype html>
       <div class="muted">独立并发/限流，与翻译池互不抢并发门；建议助手/术语走支持 tools 的模型，翻译仍走逆向 Gemini 单线程。</div>
     </fieldset>
     <fieldset><legend>翻译池调度与限流</legend>
-      <label>并发上限 maxInFlight <input type="number" id="llm-max" min="1"></label>
+      <label>并发上限 maxInFlight <input type="number" id="llm-max" min="0"></label>
       <label>RPM <input type="number" id="llm-rpm" min="0"></label>
       <label>传输重试 <input type="number" id="llm-retries" min="0"></label>
       <label>提示词上限(字符) <input type="number" id="llm-prompt" min="1000"></label>
       <label><input type="checkbox" id="llm-strict"> 超限直接失败（strictPrompt）</label>
       <div><button class="btn" id="settings-save">保存</button></div>
-      <div class="muted">单线程 Gemini：maxInFlight=1。</div>
+      <div class="muted">单线程 Gemini：maxInFlight=1；填 0 = 自动伸缩（起步 4，连续成功逐步 +1，429/503 减半，上限 16）。</div>
     </fieldset>
     <fieldset><legend>助手池调度与限流</legend>
-      <label>并发上限 maxInFlight <input type="number" id="ag-max" min="1"></label>
+      <label>并发上限 maxInFlight <input type="number" id="ag-max" min="0"></label>
       <label>RPM <input type="number" id="ag-rpm" min="0"></label>
       <label>传输重试 <input type="number" id="ag-retries" min="0"></label>
       <label>提示词上限(字符) <input type="number" id="ag-prompt" min="1000"></label>
       <label><input type="checkbox" id="ag-strict"> 超限直接失败（strictPrompt）</label>
       <div><button class="btn" id="ag-llm-save">保存</button></div>
-      <div class="muted">默认与翻译池默认值相同；多 key 池在此直接配置即可，不必经油猴。</div>
+      <div class="muted">默认与翻译池默认值相同；多 key 池在此直接配置即可，不必经油猴。填 0 = 自动伸缩（起步 4，429/503 减半，上限 16）。</div>
     </fieldset>
     <fieldset><legend>助手参数（审批 / 步数 / 上下文预算）</legend>
       <label><input type="checkbox" id="ag-auto-mode"> 自动批准写入（auto；默认 manual 逐次审批）</label>
@@ -700,7 +700,7 @@ function renderStatus(status) {
   const pool = (name, s) => {
     if (!s) return kv(name, '未装配');
     const cooling = Object.values(s.byWorker || {}).filter((w) => (w.coolingMs || 0) > 0).length;
-    return kv(name, '并发上限 ' + (s.maxInFlight == null ? '?' : s.maxInFlight) + ' · 在途 ' + (s.inFlightNow || 0) +
+    return kv(name, (s.auto ? '并发自动（当前 ' + (s.maxInFlight == null ? '?' : s.maxInFlight) + '）' : '并发上限 ' + (s.maxInFlight == null ? '?' : s.maxInFlight)) + ' · 在途 ' + (s.inFlightNow || 0) +
       ' · workers ' + (s.workers || 0) + ' · 请求 ' + (s.requests || 0) + ' · 冷却 ' + cooling +
       ' · 传输重试 ' + (s.transportRetries || 0) +
       (s.maxObservedInFlight ? ' · 峰值 ' + s.maxObservedInFlight : '') +
@@ -1041,7 +1041,7 @@ $('ag-clear').addEventListener('click', async () => {
 $('ag-llm-save').addEventListener('click', async () => {
   try {
     await post('/settings', { agent: { llm: {
-      maxInFlight: Number($('ag-max').value) || 1,
+      maxInFlight: Math.max(0, Math.floor(Number($('ag-max').value) || 0)),
       rpm: Number($('ag-rpm').value) || 0,
       transportRetries: Number($('ag-retries').value) || 0,
       maxPromptChars: Number($('ag-prompt').value) || 12000,
@@ -1053,7 +1053,7 @@ $('ag-llm-save').addEventListener('click', async () => {
 $('settings-save').addEventListener('click', async () => {
   try {
     await post('/settings', { llm: {
-      maxInFlight: Number($('llm-max').value) || 1,
+      maxInFlight: Math.max(0, Math.floor(Number($('llm-max').value) || 0)),
       rpm: Number($('llm-rpm').value) || 0,
       transportRetries: Number($('llm-retries').value) || 0,
       maxPromptChars: Number($('llm-prompt').value) || 12000,

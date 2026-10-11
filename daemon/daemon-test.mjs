@@ -203,6 +203,36 @@ await t('调度器：用量按 run 落库（usage 表）', async () => {
   const totals = store.usageTotals(bookKey);
   assert.ok(totals.rows >= 1 && totals.requests > 0, JSON.stringify(totals));
 });
+await t('调度器：auto 档（maxInFlight=0）429 后许可减半（起步 4 → 2）', async () => {
+  await resetMock();
+  const sch = new LlmScheduler({
+    engine, store, log: quiet,
+    options: { workers: [mkW('au1', 'auk1', '?fail=429')], maxInFlight: 0, transportRetries: 0, cooldownSteps: [800] },
+  });
+  assert.equal(sch.stats().auto, true);
+  assert.equal(sch.stats().maxInFlight, 4, '自动档起步 4');
+  const res = await sch.call(HELLO);
+  assert.equal(res.ok, false, JSON.stringify(res));
+  assert.ok(/429/.test(res.error || ''), JSON.stringify(res));
+  assert.equal(sch.stats().maxInFlight, 2, JSON.stringify(sch.stats()));
+});
+await t('调度器：auto 档连续成功回升（autoRampEvery=2 → 3 次成功到 5）', async () => {
+  await resetMock();
+  const sch = new LlmScheduler({
+    engine, store, log: quiet,
+    options: { workers: [mkW('au2', 'auk2')], maxInFlight: 0, autoRampEvery: 2, transportRetries: 0 },
+  });
+  assert.equal(sch.stats().maxInFlight, 4);
+  for (let i = 0; i < 3; i += 1) {
+    const res = await sch.call(HELLO);
+    assert.equal(res.ok, true, JSON.stringify(res));
+  }
+  assert.equal(sch.stats().maxInFlight, 5, JSON.stringify(sch.stats()));
+  // 热切换回固定档：0 → 2 立即生效（不被 `|| 1` 吞）
+  sch.setOptions({ maxInFlight: 2 });
+  assert.equal(sch.stats().auto, false);
+  assert.equal(sch.stats().maxInFlight, 2);
+});
 await t('控制面：/auth 热更新 workers、/run 单队列串行', async () => {
   const sch = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW('z', 'zk')], maxInFlight: 1 } });
   const server = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline: null, scheduler: sch, port: 7346, log: quiet });

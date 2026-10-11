@@ -17,6 +17,7 @@ All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 
 - **② 技能带可执行脚本**：`read_skill` 返回值新增 `baseUrl`（技能包目录的 `file:` URL）——agent 在 `workspace_run` 沙箱里可用 `await import(new URL('scripts/xxx.mjs', baseUrl).href)` 加载技能自带脚本（对齐 LG 的 `matchLiterals` 模式）；沙箱 execArgv 把内置技能根（repo `skills/`）加进 `--allow-fs-read` 白名单（只读——写内置包撞权限模型天然拒绝，用户技能根仍读写）。现有技能包全是纯文档，属纯使能基建（手测：白名单下 import 成功、去掉即 `ERR_ACCESS_DENIED`）。
 - **⑥ quality-workflow 审校技能充实（纯内容）**：七码表每码补「取证命令」列；新增「审校循环」节——批量取证优先 `workspace_run` 扫 `warnings/entries.jsonl`（无绑书回落 `list_warnings` 分页）、自启发种子循环 + 种子账本 `work/review-seeds.json`（LG 同构：`completedRounds` + `seeds.{轮次:[{pattern, consumed}]}`，每轮必须更新、禁止跨轮补写、≥3 轮收敛）、处置映射（个别行 → 修句**提案**、整章 → `run_check` 复核后建议 `run_translate` expire 档、术语类 → 转 glossary-workflow、`RETRY_THRESHOLD` → 只读人工）、汇报规范（只挑重点码 + 落地率口径引用 acceptance-scan）；新增 `references/review.md` 七码逐节（判据 → 误报排除 → 处置）。红线写明：只产提案，不直写译文。
+- **⑤ 调度器自动并发伸缩（默认值变化）**：`maxInFlight` 填 **0 = 自动伸缩**（起步 4，连续成功 `autoRampEvery`（默认 10）次 +1，上限 16；429/503/`retryAfterMs` 减半，下限 1）——此前 0 被 `|| 1` 吞成 1。许可池改档抽 `_setAutoLimit` 供固定/自动共用，`setOptions({maxInFlight:0})` 可热切；`stats()` 在 auto 档显示当前动态许可（并带 `auto` 标志，控制台状态页显示「并发自动（当前 N）」）；修掉设置链路三处 0 被吞（index 两池初始值、`server.schedulerOptionsFrom`、控制台两个保存按钮 + 输入框 `min=0`），说明文案补「填 0 = 自动伸缩」。daemon-test +2（429 后 4 → 2；`autoRampEvery=2` 时 3 次成功 → 5，热切回固定档 2 立即生效）。
 
 ### 连接与凭据
 

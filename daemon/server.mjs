@@ -75,7 +75,8 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
 
   const llmConfig = () => store.getConfig('llm') || {};
   const schedulerOptionsFrom = (llm) => ({
-    ...(llm.maxInFlight !== undefined ? { maxInFlight: Math.max(1, Number(llm.maxInFlight) || 1) } : {}),
+    // maxInFlight 0 = 自动伸缩（起步 4，429/503 减半，上限 16）——不能被 `|| 1` 吞成 1
+    ...(llm.maxInFlight !== undefined ? { maxInFlight: Math.max(0, Math.floor(Number(llm.maxInFlight) || 0)) } : {}),
     ...(llm.rpm !== undefined ? { rpm: Math.max(0, Number(llm.rpm) || 0) } : {}),
     ...(llm.transportRetries !== undefined ? { transportRetries: Math.max(0, Number(llm.transportRetries) || 0) } : {}),
     ...(llm.maxPromptChars !== undefined ? { maxPromptChars: Math.max(1000, Number(llm.maxPromptChars) || 12000) } : {}),

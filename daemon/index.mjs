@@ -100,7 +100,7 @@ const scheduler = new LlmScheduler({
   engine, store, log,
   fetchImpl: proxyFetch,
   options: {
-    maxInFlight: Math.max(1, pickNum(flags['max-in-flight'], llmConfig.maxInFlight, 1)),
+    maxInFlight: Math.max(0, pickNum(flags['max-in-flight'], llmConfig.maxInFlight, 1)),   // 0 = 自动伸缩
     rpm: pickNum(flags.rpm, llmConfig.rpm, 0),
     transportRetries: pickNum(flags['transport-retries'], llmConfig.transportRetries, 3),
     maxPromptChars: Math.max(1000, pickNum(flags['max-prompt-chars'], llmConfig.maxPromptChars, 12000)),
@@ -117,7 +117,7 @@ const agentScheduler = new LlmScheduler({
   engine, store, log,
   fetchImpl: proxyFetch,
   options: {
-    maxInFlight: Math.max(1, pickNum(undefined, agentLlmCfg.maxInFlight, 1)),
+    maxInFlight: Math.max(0, pickNum(undefined, agentLlmCfg.maxInFlight, 1)),   // 0 = 自动伸缩
     rpm: pickNum(undefined, agentLlmCfg.rpm, 0),
     transportRetries: pickNum(undefined, agentLlmCfg.transportRetries, 3),
     maxPromptChars: Math.max(1000, pickNum(undefined, agentLlmCfg.maxPromptChars, 12000)),
