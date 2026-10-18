@@ -6,6 +6,16 @@ All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 
 自 v0.8.0-alpha.2 之后的增量（均已合入 main，未打 tag）：
 
+
+### 用户脚本
+
+- **「工作区备份」模块：站点工作区的翻译器 + 任务队列可导出/导入**（新模块 + 新覆盖层面板；契约 `docs/cleanroom/spec-02-helper-layer.md` §5.1/§5.2）。覆盖三个 localStorage 键 `workspace-gpt` / `workspace-gpt-pipeline` / `workspace-sakura`（老镜像域键名 `sakura-workspace` 也认，导入落到本域实际在用的键），可选把脚本自己的术语队列（IndexedDB）一起打包成一份文件。
+  - **文件格式 v1**：`{kind:'ntr-workspace-backup', version:1, sourceKeys, keysOmitted, stores:{gpt,gptPipeline,sakura}, scriptQueue?}`；数组元素逐字段原样带出（`concurrency`/`profile`/legacy `type`/记录 `progress`），除「不含 API key」的掩码外不做任何规范化 —— 导出→导入逐字段还原。
+  - **导入语义对齐站点**：翻译器按 id 合并（upsert）或整表替换；队列按 `task` 串对账 —— 同名且本地未完成 → 跳过、同名已完成 → 覆盖（站点 `workspaceJob.ts` 语义），`uncompletedJobs` 同 task 覆盖（站点 `addJobRecord` 语义）；**镜像站点的加载期迁移**（GPT 库丢 `type:'web'`、Sakura 库删 `testContext` 并把 `testSegLength` 转 `segLength`）；掩码备份的空 key **不吃掉本地凭据**；`assertWorkspaceBundle` 校验不过就一个字节都不写；应用前自动下载当前状态快照作回滚点。
+  - **面板**：概览（三个键的翻译器/待排队/已完成记录 + 术语队列任务数）、分区勾选导出（含/不含 key）、文件或粘贴导入、**预览差异**（新增/覆盖/不变/跳过/删除计数 + 跨域键映射与迁移提示 + 每条任务按站点 `TranslateTaskDescriptor` 渲染成可点书链接）、合并/整表替换两种模式。
+  - 顺带修掉一处判断缺陷：合并时「同 id 同内容」原本用 `JSON.stringify` 比较（比键序），换个写入顺序就会被误判成「覆盖」并白写一遍 —— 改为顺序无关深比较 `StorageUtils.deepEqual`。
+  - 测试：新增 `.e2e-workspace-backup.js` **40/40**（结构/忠实性/掩码与 key 保留/合并与替换/迁移镜像/跨域键映射/StorageEvent 派发/异常不写数据/面板通）；回归 `.e2e-translator-mgmt.js` 18/18、`.e2e-backup.js` 15/15、`.e2e-queue-glance.js` 9/9、`.e2e-workspace-sync.js` 29/29、`.e2e-translator-copy.js` 18/18、`.e2e-sync-storage.js` 7/7、`.e2e-panel-basics.js` 30/30、`engine-test.mjs` 98/0；`.e2e-config.js` 的「模块集合」基线原先取自**存储里那份（可能是旧版本的）配置**，加了新模块就会假红 —— 改为以当前实例（代码）的模块集为基线（该套件要钉的是「拿老配置重载后模块集合不丢不加」）。
+  - **真机验收（n.novelia.cc，9333 测试 profile + TM）**：按交付流程 `gen-dev` → TM 点「重新安装」→ `tools/.probe-tm-hash-ws.mjs` 取到的存储正文 sha256 与本机 dev 构建**整文件一致**。`tools/.probe-wb-live.js`（只读探针式验收脚本，跑完自动还原）在 `/workspace/gpt` 上面板点击驱动 **16/16**：概览读到真键名（本域只存在 `workspace-gpt`，另两键标注「本域无该键」）；导出（复制 JSON）与 localStorage 逐字段一致；**合成条目 + 合成 `StorageEvent` → 站点页面列表即时出现该翻译器与队列任务**（站点的 `useLocalStorage` 确实吃我们派发的事件——「写 localStorage 让站点感知」这条链路在真机成立）；删掉队列任务后导入快照**逐字段还原（含 key 与 record 的 `progress`）**；预览给出「队列 新增 1」与可点书链接；应用后站点列表照旧；**全程指向站点 origin 的非 GET 请求为 0**。测试后 `workspace-gpt` 还原为原值（45 字节空工作区）、下载的快照文件已删。注：测试期间该测试 profile 的站点会话失效（站点自己在 401 后清掉 `auth-v2`，页面转登录页）——与本次改动无关（新增代码零 auth 读写，已 grep 验证：新增段里 `auth` 出现 0 次），需要时在测试 profile 重新登录；日常 profile 不受影响。**事后查明**：那次 401 的真因是站点把会话键换成了 `web-kit:session:v1`（见上方「上游同步」①）——当时脚本只读 `auth-v2`，读到的是遗留旧值。
 ### daemon
 
 - **站点请求重试次数可调**：控制台设置页「站点与凭据 → 站点请求重试」0–8（`config.site.retries`，默认 3，保存即生效）；实测整本 167 章逐章抓取时约 1/3 请求首发失败、3 次重试每轮仍剩 2 章左右，调到 8 次基本清零。

@@ -48,6 +48,31 @@
 - `addJobs(key, jobs=[], createAt=now)`：按 task 与已有任务**去重**后追加（createAt 统一为调用时刻）。
 - `getUncompletedJobs(key)`：返回归一化后的 `uncompletedJobs` 数组。
 
+### 5.1 工作区备份（导出/导入；2026-10-12 追加，本仓库自研）
+站点侧权威定义：auto-novel `web/src/stores/key.ts`（键名）、`web/src/stores/useWorkspaceStore.ts`（形状与加载期迁移）、`web/src/model/Translator.ts`（worker/job 字段）、`web/src/stores/workspaceJob.ts`（同名任务语义）。
+- `WORKSPACE_SECTIONS` / `sectionByName(name)` / `workspaceStoreKey(name)`：分区表（`gpt`→`workspace-gpt`、`gptPipeline`→`workspace-gpt-pipeline`、`sakura`→`workspace-sakura` 且兼容老镜像域名键 `sakura-workspace`）。`workspaceStoreKey` 取「本域已存在的候选」，都不存在时 Sakura 用上面的域名分支常量、其余用第一个候选——导入永远落到本域实际在用的键。
+- `readWorkspaceRaw(name)` / `normalizeWorkspace(data)`：读 + 归一化（三个数组必在，与 `_getData` 同容忍策略）。
+- `deepEqual(a, b)`：顺序无关深比较（`JSON.stringify` 比键序，会把「同一份数据、换个写入顺序」误判成覆盖并白写一遍）。
+- `exportWorkspace({sections, includeKeys})`：产出备份 bundle（格式见 §5.2）；`includeKeys=false` 时 worker 的 `key` 置空并置 `keysOmitted: true`。
+- `assertWorkspaceBundle(raw)`：整体校验（kind/version/stores/分区名/三个数组必须是数组），不合法即抛——调用方据此保证「一个字节都不写」。
+- `migrateImportedWorker(section, worker)`：站点加载期迁移的镜像——GPT 分区丢 `type:'web'`，Sakura 分区删 `testContext`、`testSegLength`→`segLength`。
+- `planWorkspaceImport(bundle, {mode})`：纯计算的导入计划（预览与实际写入共用同一份，保证「预览即所得」），含分类计数与提示（跨域键映射、跳过项、保留 key、越界值仅提示等）。
+- `importWorkspace(bundle, {mode})`：校验 → 计划 → 逐键 `_getData`（三个数组之外的原样字段保留本地）+ 改写三个数组 + `_setData`（自带合成 StorageEvent）；返回分类计数与 `keysWritten`。
+
+### 5.2 工作区备份文件格式（v1）
+```
+{ kind: 'ntr-workspace-backup', version: 1, exportedAt, origin, hostname,
+  sourceKeys: { gpt, gptPipeline, sakura }, keysOmitted,
+  stores: { gpt: { workers, jobs, uncompletedJobs }, gptPipeline: {…}, sakura: {…} },
+  scriptQueue?: { version, exportedAt, jobs } }
+```
+- 分区名用语义名，实际 localStorage 键名记在 `sourceKeys`（导入按语义名落到**本域**的键 → 跨镜像域迁移天然可用，也不会凭空多建一个键）。
+- 数组元素**逐字段原样带出**（含 `concurrency`、`profile`、legacy `type`、record 的 `progress`/`finishAt`）；除掩码外不做任何规范化。
+- 队列身份 = `task` 串；合并语义对齐站点：同名且本地未完成 → 跳过，同名已完成 → 覆盖；`uncompletedJobs` 按站点 `addJobRecord` 语义（同 task 覆盖）。
+- 掩码备份导入时：空 key 且本地同 id 有 key → **保留本地 key**（不覆盖成空）。
+- `scriptQueue` = 脚本自身术语队列（IndexedDB）既有 `exportBackup()` 的产物，导入复用 `importBackup()`。
+- 导入只写本机 localStorage，不向站点发任何写请求。
+
 ## 6. 与旧实现的刻意差异
 - 仅结构与命名另起；可观测行为（含 `removeAllWorkers` 只保留排除名单这一反直觉语义、`newNumberSetting` 的 `||0`）逐条保持——都有定格测试钉住。
 - 死代码移除：`StorageUtils.updateUrl`（零引用）、`webSearchApi` 里四个从未使用的文案映射表（typeMap/levelMap/translateMap/sortMap）。

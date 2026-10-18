@@ -1,12 +1,13 @@
 # spec-04：上游模块定义段（10 个模块的 settings + run）
 
-重构对象：`defaultModules` 里上游的 10 个模块定义（约 930 行）。分叉自有的 6 个模块（AI提取术语表、导入术语表(KWG)、回滚术语表、术语队列、复制翻译器到BETA工作区、工作区翻译器自动同步）不动。
+重构对象：`defaultModules` 里上游的 10 个模块定义（约 930 行）。分叉自有的 7 个模块（AI提取术语表、导入术语表(KWG)、回滚术语表、术语队列、复制翻译器到BETA工作区、工作区翻译器自动同步、工作区备份）不动。
 等价验证：`.e2e-translator-mgmt.js`（18）、`.e2e-collect-tasks.js`（15）、`.e2e-auto-retry.js`（14）、`.e2e-fill-paginate.js`（20）、`.e2e-web/wenku-dryrun.js`、`.e2e-sync-storage.js`、`.e2e-panel-basics.js`（控件/图标）+ 全套 e2e。
 模块名/设置名/白名单保持不变（配置存储与面板按这些字符串对号）。
 
 ## 1. 添加翻译器（两个模块）
 - 添加Sakura翻译器（whitelist `/workspace/sakura`）：设置 数量(number,5)/名称(string,'NTR translator ')/链接(string,'https://sakura-share.one')/bind。run → `StorageUtils.addSakuraWorker(名称, 链接, 数量)`。
 - 添加GPT翻译器（whitelist `/workspace/gpt`）：设置 数量/名称/模型('deepseek-chat')/链接('https://api.deepseek.com')/Key('sk-wait-for-input')/bind。run → `StorageUtils.addGPTWorker(名称, 模型, 链接, Key, 数量)`。
+  - 注记（2026-10-12，对 site 源码 auto-novel 核对）：站点 `GptWorker` 已无 `type` 字段（`web/src/model/Translator.ts`，提交 `6a49aca6` 移除 web 模式），我们写入的 `type:'api'` 在站点侧被原样保留但忽略；`workspace-gpt-pipeline` 的 worker 另有 `concurrency`/`profile` 两个字段（我们只写基础字段，站点读时按默认值补）。
 
 ## 2. 删除翻译器（whitelist `/workspace`）
 设置 确认删除(boolean,true)/排除(string,'共享,本机,AutoDL')/bind。run：
@@ -73,3 +74,9 @@
   1. 手动点击清零计数：`tagName === 'button'`（小写永假）→ 大小写不敏感比较，清零真正生效；
   2. 「重启翻译器」开关：`设置值 || 3`（false 短路成 3，关不掉）→ 布尔直读（`=== true`），关闭即不再触发重启。
   对应 `.e2e-auto-retry.js` 的 F/G/H 段断言已同步改写为修复后行为。
+
+## 11. 工作区备份（2026-10-12 追加；本仓库自研，非上游移植）
+- 模块名「工作区备份」；`type:'onclick'`；**无 whitelist**（localStorage 按域共享，站点域内任意页面可用）；设置 `导出含 API key`(boolean,true)/`bind`。run → 打开覆盖层面板 `#ntr-workspace-backup-overlay`。
+- 面板：概览（三个工作区键的翻译器/待排队/已完成记录 + 脚本术语队列任务数）／导出（分区勾选、含 key 开关、导出为文件、复制 JSON、只读 JSON textarea）／导入（模式 合并|整表替换、选择文件|粘贴、预览差异、应用导入；应用前自动下载当前状态快照作回滚点 + confirm）。
+- 语义与文件格式：见 `spec-02-helper-layer.md` §5.1/§5.2（`StorageUtils`）。预览里每条任务按站点 `TranslateTaskDescriptor` 格式渲染成可点书链接（`web/{provider}/{novel}` → `/novel/{provider}/{novel}`，`wenku/{novel}` → `/wenku/{novel}`）。
+- 定格的必须是**站点侧 ABI**：`e2e` 直接打 `_NTRGlossaryDev.StorageUtils`（同一份实现）+ `runModule('工作区备份')` 驱动面板（`.e2e-workspace-backup.js`，48 项，含 B0 段 7 项 BETA 双仓分写）；面板 DOM id 前缀 `wb-`（`wb-summary`/`wb-sec-*`/`wb-export-file`/`wb-copy`/`wb-export-json`/`wb-mode`/`wb-pick`/`wb-preview`/`wb-apply`/`wb-import-json`/`wb-preview-box`/`wb-close`）。

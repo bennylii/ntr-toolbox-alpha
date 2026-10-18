@@ -2092,6 +2092,22 @@
         },
     };
 
+    // 站点工作区（翻译器 + 任务队列）的备份/恢复：导出/导入本机 localStorage 的
+    // workspace-gpt / workspace-gpt-pipeline / workspace-sakura（「GPT工作区BETA」的任务队列也存在 workspace-gpt 里），
+    // 可选打包脚本自己的术语队列（IndexedDB）。契约与文件格式：docs/cleanroom/spec-02-helper-layer.md §5
+    const moduleWorkspaceBackup = {
+        name: '工作区备份',
+        type: 'onclick',
+        // 不限页面：localStorage 按域共享（缺省 whitelist = 站点域内全部页面可用）
+        settings: [
+            newBooleanSetting('导出含 API key', true),
+            newStringSetting('bind', 'none'),
+        ],
+        run: async function (cfg) {
+            openWorkspaceBackupPanel({ includeKeys: getModuleSetting(cfg, '导出含 API key') !== false });
+        },
+    };
+
     // 把老工作区 workspace-gpt 与「GPT工作区BETA」workspace-gpt-pipeline 的翻译器当成同一份配置（按 id 映射），
     // 三路合并后写回两边：base = 上次同步的结果（存在我们自己的 ntr-workspace-sync，站点键不碰）。
     //   · 只在一边出现的翻译器 → 复制到另一边
@@ -2268,6 +2284,7 @@
         moduleGlossaryRollback,
         moduleGlossaryQueue,
         moduleCopyWorkersToBeta,
+        moduleWorkspaceBackup,
         moduleDaemonSync,
         moduleWorkspaceSync,
         moduleSyncStorage,
@@ -7607,6 +7624,646 @@
         static async getUncompletedJobs(key) {
             return (await this._getData(key)).uncompletedJobs;
         }
+
+        // -----------------------------------
+        // 工作区备份（导出/导入）
+        // 契约：docs/cleanroom/spec-02-helper-layer.md §5
+        // 站点侧权威定义（auto-novel）：键名 web/src/stores/key.ts；形状与「加载期迁移」web/src/stores/useWorkspaceStore.ts；
+        // worker/job 字段 web/src/model/Translator.ts；同名任务语义 web/src/stores/workspaceJob.ts
+        // -----------------------------------
+        static WORKSPACE_SECTIONS = [
+            { name: 'gpt', label: 'GPT 工作区', keys: ['workspace-gpt'] },
+            { name: 'gptPipeline', label: 'GPT BETA 工作区', keys: ['workspace-gpt-pipeline'] },
+            // 老镜像域的 Sakura 键名是 sakura-workspace（本站点为 workspace-sakura）：两者都认，导入落到本域实际的键
+            { name: 'sakura', label: 'Sakura 工作区', keys: ['workspace-sakura', 'sakura-workspace'] },
+        ];
+
+        static sectionByName(name) {
+            return this.WORKSPACE_SECTIONS.find((s) => s.name === name) || null;
+        }
+
+        // 本域实际使用的键：优先第一个已存在的候选；都不存在时 Sakura 用脚本既有的域分支常量，
+        // 其余用第一个候选（导入落到「本域实际在用」的键，跨镜像域迁移不会凭空多出一个键）
+        static workspaceStoreKey(name) {
+            const def = this.sectionByName(name);
+            if (!def) return null;
+            const has = def.keys.find((k) => { try { return localStorage.getItem(k) !== null; } catch (e) { return false; } });
+            if (has) return has;
+            return name === 'sakura' ? this.sakura : def.keys[0];
+        }
+
+        static readWorkspaceRaw(name) {
+            const key = this.workspaceStoreKey(name);
+            if (!key) return null;
+            let raw = null;
+            try { raw = localStorage.getItem(key); } catch (e) { }
+            if (raw === null) return null;
+            try {
+                const data = JSON.parse(raw);
+                return data && typeof data === 'object' ? data : null;
+            } catch (e) { return null; }
+        }
+
+        // 三个数组必在（站点 Workspace 形状）；非数组视为缺失
+        static normalizeWorkspace(data) {
+            const src = data && typeof data === 'object' ? data : {};
+            return {
+                workers: Array.isArray(src.workers) ? src.workers : [],
+                jobs: Array.isArray(src.jobs) ? src.jobs : [],
+                uncompletedJobs: Array.isArray(src.uncompletedJobs) ? src.uncompletedJobs : [],
+            };
+        }
+
+        // 导出：分区名用语义名（gpt/gptPipeline/sakura），实际键名记在 sourceKeys（跨镜像域导入靠它提示）
+        static async exportWorkspace({ sections = this.WORKSPACE_SECTIONS.map((s) => s.name), includeKeys = true } = {}) {
+            const picked = (Array.isArray(sections) ? sections : []).filter((n) => this.sectionByName(n));
+            const stores = {};
+            const sourceKeys = {};
+            let keysOmitted = false;
+            for (const name of picked) {
+                sourceKeys[name] = this.workspaceStoreKey(name);
+                const store = this.normalizeWorkspace(this.readWorkspaceRaw(name));
+                if (!includeKeys) {
+                    store.workers = store.workers.map((w) => {
+                        if (w && typeof w === 'object' && Object.prototype.hasOwnProperty.call(w, 'key')) {
+                            keysOmitted = true;
+                            return Object.assign({}, w, { key: '' });
+                        }
+                        return w;
+                    });
+                }
+                stores[name] = store;
+            }
+            return {
+                kind: 'ntr-workspace-backup',
+                version: 1,
+                exportedAt: Date.now(),
+                origin: location.origin,
+                hostname: location.hostname,
+                sourceKeys,
+                keysOmitted,
+                stores,
+            };
+        }
+
+        // 顺序无关的深比较：JSON.stringify 依赖键序，同一份数据换个写入顺序会被误判成「覆盖」（并白写一遍）
+        static deepEqual(a, b) {
+            if (a === b) return true;
+            if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false;
+            if (Array.isArray(a) !== Array.isArray(b)) return false;
+            if (Array.isArray(a)) {
+                if (a.length !== b.length) return false;
+                return a.every((v, i) => this.deepEqual(v, b[i]));
+            }
+            const keysA = Object.keys(a);
+            const keysB = Object.keys(b);
+            if (keysA.length !== keysB.length) return false;
+            return keysA.every((k) => Object.prototype.hasOwnProperty.call(b, k) && this.deepEqual(a[k], b[k]));
+        }
+
+        // 整体校验：任何一步不过就抛错，调用方保证「一个字节都不写」
+        static assertWorkspaceBundle(raw) {
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('备份内容不是对象');
+            if (raw.kind !== 'ntr-workspace-backup') throw new Error(`不是工作区备份文件（kind=${raw.kind === undefined ? '缺失' : raw.kind}）`);
+            const version = Number(raw.version);
+            if (!Number.isFinite(version) || version < 1) throw new Error('备份缺少版本号');
+            if (version > 1) throw new Error(`备份版本 ${version} 高于本脚本支持的 1：请先更新脚本`);
+            if (!raw.stores || typeof raw.stores !== 'object' || Array.isArray(raw.stores)) throw new Error('备份缺少 stores');
+            const names = Object.keys(raw.stores);
+            if (names.length === 0) throw new Error('备份里没有任何分区');
+            for (const name of names) {
+                if (!this.sectionByName(name)) throw new Error(`未知分区：${name}`);
+                const store = raw.stores[name];
+                if (!store || typeof store !== 'object' || Array.isArray(store)) throw new Error(`分区 ${name} 不是对象`);
+                for (const field of ['workers', 'jobs', 'uncompletedJobs']) {
+                    if (store[field] !== undefined && !Array.isArray(store[field])) throw new Error(`分区 ${name}.${field} 不是数组`);
+                }
+            }
+            return raw;
+        }
+
+        // 站点加载期迁移的镜像（useWorkspaceStore.ts:124-163）：
+        // GPT 库丢 type==='web'（站点已淘汰该模式）；Sakura 库删 testContext、testSegLength→segLength
+        static migrateImportedWorker(section, worker) {
+            if (!worker || typeof worker !== 'object' || Array.isArray(worker)) return { worker: null, skippedWeb: false, migrated: false };
+            const w = Object.assign({}, worker);
+            if (section !== 'sakura' && w.type === 'web') return { worker: null, skippedWeb: true, migrated: false };
+            let migrated = false;
+            if (section === 'sakura') {
+                if (w.testContext !== undefined) { delete w.testContext; migrated = true; }
+                if (w.segLength === undefined && w.testSegLength !== undefined) { w.segLength = w.testSegLength; migrated = true; }
+                if (w.testSegLength !== undefined) { delete w.testSegLength; migrated = true; }
+            }
+            return { worker: w, skippedWeb: false, migrated };
+        }
+
+        // 导入计划（纯计算，不写）：预览与实际写入共用同一份，保证「预览即所得」
+        static planWorkspaceImport(bundle, { mode = 'merge' } = {}) {
+            this.assertWorkspaceBundle(bundle);
+            const replace = mode === 'replace';
+            const counts = {
+                workersAdded: 0, workersUpdated: 0, workersSame: 0, workersRemoved: 0,
+                workersSkippedWeb: 0, workersInvalid: 0, workersMigrated: 0, keysKept: 0, keysMissing: 0,
+                jobsAdded: 0, jobsSkipped: 0, jobsReplaced: 0, jobsRemoved: 0,
+                recordsAdded: 0, recordsReplaced: 0, recordsRemoved: 0,
+            };
+            const sections = [];
+            const notes = [];
+            for (const [name, rawStore] of Object.entries(bundle.stores || {})) {
+                const def = this.sectionByName(name);
+                if (!def) continue;
+                const key = this.workspaceStoreKey(name);
+                const local = this.normalizeWorkspace(this.readWorkspaceRaw(name));
+                const incoming = this.normalizeWorkspace(rawStore);
+
+                const workers = { added: [], updated: [], same: [], removed: [], skippedWeb: [], invalid: [], keysKept: [], missingKey: [], migrated: 0 };
+                let nextWorkers;
+                if (replace) {
+                    nextWorkers = [];
+                    for (const raw of incoming.workers) {
+                        const m = this.migrateImportedWorker(name, raw);
+                        if (m.skippedWeb) { workers.skippedWeb.push(String((raw && raw.id) || '')); continue; }
+                        if (!m.worker || m.worker.id === undefined || m.worker.id === '') { workers.invalid.push(String((raw && raw.id) || '')); continue; }
+                        if (m.migrated) workers.migrated += 1;
+                        nextWorkers.push(m.worker);
+                    }
+                    const nextIds = new Set(nextWorkers.map((w) => w.id));
+                    workers.removed = local.workers.filter((w) => w && !nextIds.has(w.id)).map((w) => String(w.id));
+                } else {
+                    nextWorkers = local.workers.slice();
+                    for (const raw of incoming.workers) {
+                        const m = this.migrateImportedWorker(name, raw);
+                        if (m.skippedWeb) { workers.skippedWeb.push(String((raw && raw.id) || '')); continue; }
+                        if (!m.worker || m.worker.id === undefined || m.worker.id === '') { workers.invalid.push(String((raw && raw.id) || '')); continue; }
+                        if (m.migrated) workers.migrated += 1;
+                        const w = m.worker;
+                        const i = nextWorkers.findIndex((x) => x && x.id === w.id);
+                        // 掩码备份（导出时关掉「包含 API key」）：空 key 不吃掉本地凭据
+                        if (i >= 0 && !w.key && nextWorkers[i] && nextWorkers[i].key) {
+                            w.key = nextWorkers[i].key;
+                            workers.keysKept.push(String(w.id));
+                        } else if (!w.key) {
+                            workers.missingKey.push(String(w.id));
+                        }
+                        if (i < 0) { nextWorkers.push(w); workers.added.push(String(w.id)); }
+                        else if (this.deepEqual(nextWorkers[i], w)) { workers.same.push(String(w.id)); }
+                        else { nextWorkers[i] = w; workers.updated.push(String(w.id)); }
+                    }
+                }
+
+                const incomingJobs = incoming.jobs.filter((j) => j && typeof j === 'object' && typeof j.task === 'string' && j.task !== '');
+                const jobs = { added: 0, skipped: 0, replaced: 0, removed: 0, list: [] };
+                const jobEntry = (j, action) => ({ task: j.task, description: typeof j.description === 'string' ? j.description : '', action });
+                let nextJobs;
+                if (replace) {
+                    nextJobs = incomingJobs.map((j) => Object.assign({}, j));
+                    const nextTasks = new Set(nextJobs.map((j) => j.task));
+                    jobs.removed = local.jobs.filter((j) => j && !nextTasks.has(j.task)).length;
+                    jobs.added = nextJobs.length;
+                    jobs.list = nextJobs.map((j) => jobEntry(j, '新增'));
+                } else {
+                    nextJobs = local.jobs.slice();
+                    for (const j of incomingJobs) {
+                        const i = nextJobs.findIndex((x) => x && x.task === j.task);
+                        if (i < 0) { nextJobs.push(Object.assign({}, j)); jobs.added += 1; jobs.list.push(jobEntry(j, '新增')); continue; }
+                        // 站点语义（workspaceJob.ts:3-21）：同名且本地未完成 → 拒绝；同名已完成 → 替换
+                        if (nextJobs[i].finishAt === undefined) { jobs.skipped += 1; jobs.list.push(jobEntry(j, '跳过（同名未完成）')); continue; }
+                        nextJobs[i] = Object.assign({}, j); jobs.replaced += 1; jobs.list.push(jobEntry(j, '覆盖'));
+                    }
+                }
+
+                const incomingRecords = incoming.uncompletedJobs.filter((j) => j && typeof j === 'object' && typeof j.task === 'string' && j.task !== '');
+                const records = { added: 0, replaced: 0, removed: 0 };
+                let nextRecords;
+                if (replace) {
+                    nextRecords = incomingRecords.map((j) => Object.assign({}, j));
+                    const nextTasks = new Set(nextRecords.map((j) => j.task));
+                    records.removed = local.uncompletedJobs.filter((j) => j && !nextTasks.has(j.task)).length;
+                    records.added = nextRecords.length;
+                } else {
+                    // 站点 addJobRecord 就是「同 task 删旧再 push」：这里等价为覆盖
+                    nextRecords = local.uncompletedJobs.slice();
+                    for (const j of incomingRecords) {
+                        const i = nextRecords.findIndex((x) => x && x.task === j.task);
+                        if (i < 0) { nextRecords.push(Object.assign({}, j)); records.added += 1; }
+                        else { nextRecords[i] = Object.assign({}, j); records.replaced += 1; }
+                    }
+                }
+
+                const writes = replace
+                    ? true   // 替换模式即使结果为空也要写（这才是「整表替换」）
+                    : (workers.added.length + workers.updated.length + jobs.added + jobs.replaced + records.added + records.replaced) > 0;
+
+                counts.workersAdded += workers.added.length;
+                counts.workersUpdated += workers.updated.length;
+                counts.workersSame += workers.same.length;
+                counts.workersRemoved += workers.removed.length;
+                counts.workersSkippedWeb += workers.skippedWeb.length;
+                counts.workersInvalid += workers.invalid.length;
+                counts.workersMigrated += workers.migrated;
+                counts.keysKept += workers.keysKept.length;
+                counts.keysMissing += workers.missingKey.length;
+                counts.jobsAdded += jobs.added;
+                counts.jobsSkipped += jobs.skipped;
+                counts.jobsReplaced += jobs.replaced;
+                counts.jobsRemoved += jobs.removed;
+                counts.recordsAdded += records.added;
+                counts.recordsReplaced += records.replaced;
+                counts.recordsRemoved += records.removed;
+
+                const srcKey = (bundle.sourceKeys || {})[name];
+                if (srcKey && srcKey !== key) notes.push(`${def.label}：备份来自键「${srcKey}」，写入本域键「${key}」`);
+                if (workers.skippedWeb.length > 0) notes.push(`跳过 ${workers.skippedWeb.length} 个旧 web 模式翻译器（type:'web'，站点加载时本就会丢弃）`);
+                if (workers.invalid.length > 0) notes.push(`跳过 ${workers.invalid.length} 个没有 id 的翻译器`);
+                if (workers.migrated > 0) notes.push(`按站点的加载期迁移转换了 ${workers.migrated} 个旧字段（testSegLength→segLength / 删 testContext）`);
+                if (workers.keysKept.length > 0) notes.push(`${workers.keysKept.length} 个空 key 条目保留了本地凭据（掩码备份不覆盖本地 key）`);
+                if (workers.missingKey.length > 0) notes.push(`${workers.missingKey.length} 个条目没有 key 且本地无可保留：导入后需在站点里补 key`);
+                if (name === 'sakura' && !nextWorkers.some((w) => w && w.id === '共享')) {
+                    notes.push('Sakura：导入结果里没有「共享」条目 —— 站点下次加载会按默认值补回（useWorkspaceStore 的 migrate）');
+                }
+                const outOfRange = [];
+                for (const w of nextWorkers) {
+                    const concurrency = Number(w && w.concurrency);
+                    if (Number.isFinite(concurrency) && (concurrency < 1 || concurrency > 100)) outOfRange.push(`${w.id}.concurrency=${w.concurrency}`);
+                    if (w && w.segLength !== undefined && Number(w.segLength) < 100) outOfRange.push(`${w.id}.segLength=${w.segLength}`);
+                }
+                if (outOfRange.length > 0) notes.push(`值超出站点界面范围（仅提示，仍原样导入）：${outOfRange.slice(0, 6).join('、')}${outOfRange.length > 6 ? ` …共 ${outOfRange.length} 处` : ''}`);
+
+                sections.push({ name, label: def.label, key, writes, nextWorkers, nextJobs, nextRecords, workers, jobs, records });
+            }
+            return { mode: replace ? 'replace' : 'merge', sections, counts, notes };
+        }
+
+        // 应用导入：先整体校验 + 计算计划，再逐键写入（_setData 自带合成 StorageEvent）
+        static async importWorkspace(bundle, { mode = 'merge' } = {}) {
+            const plan = this.planWorkspaceImport(bundle, { mode });
+            let keysWritten = 0;
+            for (const section of plan.sections) {
+                if (!section.writes) continue;
+                const data = await this._getData(section.key);   // 保留本地其它字段（三个数组之外的原样不动）
+                data.workers = section.nextWorkers;
+                data.jobs = section.nextJobs;
+                data.uncompletedJobs = section.nextRecords;
+                await this._setData(section.key, data);
+                keysWritten += 1;
+            }
+            return Object.assign({}, plan.counts, { keysWritten, plan });
+        }
+    }
+
+    // -----------------------------------
+    // 工作区备份面板（模块「工作区备份」的界面）：概览 / 导出 / 导入预览与应用
+    // 契约：docs/cleanroom/spec-02-helper-layer.md §5（文件格式、合并与替换语义、掩码与 key 保留、跨域键映射）
+    // -----------------------------------
+    function openWorkspaceBackupPanel({ includeKeys = true } = {}) {
+        GlossaryUI.ensureStyles();
+        const prev = document.getElementById('ntr-workspace-backup-overlay');
+        if (prev) prev.remove();
+        const TEXTAREA_CSS = 'width:100%;min-height:84px;background:#1b1b1b;color:#BBB;border:1px solid #3a3a3a;border-radius:4px;padding:6px 8px;font-family:Consolas,monospace;font-size:11px;box-sizing:border-box';
+        const el = (tag, cls, text) => {
+            const node = document.createElement(tag);
+            if (cls) node.className = cls;
+            if (text !== undefined) node.textContent = text;
+            return node;
+        };
+        const hint = (text) => {
+            const node = el('div', null, text);
+            node.style.cssText = 'font-size:11px;color:#888;margin:4px 0';
+            return node;
+        };
+        const box = (legendText) => {
+            const wrap = el('div');
+            wrap.style.cssText = 'border:1px solid #333;border-radius:8px;padding:8px 10px';
+            const legend = el('div', null, legendText);
+            legend.style.cssText = 'color:#DDD;font-weight:bold;font-size:12px;margin-bottom:6px';
+            wrap.appendChild(legend);
+            return wrap;
+        };
+
+        const overlay = el('div', 'ntr-g-overlay');
+        overlay.id = 'ntr-workspace-backup-overlay';
+        const card = el('div', 'ntr-g-card');
+        overlay.appendChild(card);
+
+        const head = el('div', 'ntr-g-head');
+        head.appendChild(el('div', 'ntr-g-title', '工作区备份'));
+        const statsEl = el('div', 'ntr-g-stats');
+        statsEl.id = 'wb-stats';
+        head.appendChild(statsEl);
+        card.appendChild(head);
+
+        const body = el('div', 'ntr-g-body');
+        body.style.cssText = 'padding:10px 14px;display:flex;flex-direction:column;gap:10px';
+        card.appendChild(body);
+
+        // ---- 概览 ----
+        const overview = box('概览（本机 localStorage；localStorage 按域共享，站点任意页面都能读）');
+        const table = el('table');
+        table.id = 'wb-summary';
+        const thead = el('thead');
+        const headRow = el('tr');
+        ['分区', '键名', '翻译器', '待排队', '已完成记录'].forEach((t) => headRow.appendChild(el('th', null, t)));
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+        const tbody = el('tbody');
+        table.appendChild(tbody);
+        overview.appendChild(table);
+        overview.appendChild(hint('「GPT工作区BETA」的翻译器在 workspace-gpt-pipeline，但它的任务队列与老工作区共用 workspace-gpt；Sakura 工作区两者都在 workspace-sakura。'));
+        body.appendChild(overview);
+
+        // ---- 导出 ----
+        const exportBox = box('导出');
+        const mkCheck = (parent, id, labelText, checked) => {
+            const lab = el('label');
+            lab.style.cssText = 'display:inline-flex;align-items:center;gap:4px;margin:2px 14px 2px 0;font-size:12px;color:#BBB';
+            const cb = el('input');
+            cb.type = 'checkbox';
+            cb.id = id;
+            cb.checked = checked;
+            lab.appendChild(cb);
+            lab.appendChild(el('span', null, labelText));
+            parent.appendChild(lab);
+            return cb;
+        };
+        const secRow = el('div');
+        const secInputs = {};
+        for (const s of StorageUtils.WORKSPACE_SECTIONS) secInputs[s.name] = mkCheck(secRow, `wb-sec-${s.name}`, s.label, true);
+        secInputs.queue = mkCheck(secRow, 'wb-sec-queue', '脚本术语队列（IndexedDB）', true);
+        exportBox.appendChild(secRow);
+        const keysRow = el('div');
+        const keysCb = mkCheck(keysRow, 'wb-keys', '包含 API key（明文写入文件）', includeKeys === true);
+        exportBox.appendChild(keysRow);
+        const exportBtns = el('div');
+        exportBtns.style.cssText = 'margin-top:6px;display:flex;gap:8px;flex-wrap:wrap';
+        const btnExportFile = el('button', 'ntr-g-btn primary', '导出为文件');
+        btnExportFile.id = 'wb-export-file';
+        const btnCopy = el('button', 'ntr-g-btn', '复制 JSON');
+        btnCopy.id = 'wb-copy';
+        exportBtns.appendChild(btnExportFile);
+        exportBtns.appendChild(btnCopy);
+        exportBox.appendChild(exportBtns);
+        const exportTa = el('textarea');
+        exportTa.id = 'wb-export-json';
+        exportTa.readOnly = true;
+        exportTa.style.cssText = TEXTAREA_CSS;
+        exportBox.appendChild(exportTa);
+        exportBox.appendChild(hint('备份文件只应留在本机：里面是站点工作区的翻译器（含端点，默认含 key）与任务队列。'));
+        body.appendChild(exportBox);
+
+        // ---- 导入 ----
+        const importBox = box('导入');
+        const modeRow = el('div');
+        modeRow.style.cssText = 'font-size:12px;color:#BBB;margin-bottom:6px';
+        const modeSel = el('select');
+        modeSel.id = 'wb-mode';
+        modeSel.style.cssText = 'background:#232323;border:1px solid #3a3a3a;color:#CCC;border-radius:4px;padding:3px 6px;margin-left:6px';
+        [['merge', '合并（默认：按 id 覆盖同名，其余保留）'], ['replace', '整表替换（该分区按备份原样覆盖）']].forEach(([value, labelText]) => {
+            const opt = el('option', null, labelText);
+            opt.value = value;
+            modeSel.appendChild(opt);
+        });
+        modeRow.appendChild(el('span', null, '模式'));
+        modeRow.appendChild(modeSel);
+        importBox.appendChild(modeRow);
+        const importTa = el('textarea');
+        importTa.id = 'wb-import-json';
+        importTa.placeholder = '把备份 JSON 粘到这里（或点「选择文件」）';
+        importTa.style.cssText = TEXTAREA_CSS;
+        importBox.appendChild(importTa);
+        const fileInput = el('input');
+        fileInput.type = 'file';
+        fileInput.accept = '.json,application/json';
+        fileInput.id = 'wb-file';
+        fileInput.style.display = 'none';
+        importBox.appendChild(fileInput);
+        const importBtns = el('div');
+        importBtns.style.cssText = 'margin-top:6px;display:flex;gap:8px;flex-wrap:wrap';
+        const btnPick = el('button', 'ntr-g-btn', '选择文件');
+        btnPick.id = 'wb-pick';
+        const btnPreview = el('button', 'ntr-g-btn', '预览差异');
+        btnPreview.id = 'wb-preview';
+        const btnApply = el('button', 'ntr-g-btn primary', '应用导入');
+        btnApply.id = 'wb-apply';
+        btnApply.disabled = true;
+        [btnPick, btnPreview, btnApply].forEach((b) => importBtns.appendChild(b));
+        importBox.appendChild(importBtns);
+        const previewBox = el('div');
+        previewBox.id = 'wb-preview-box';
+        previewBox.style.cssText = 'margin-top:6px';
+        importBox.appendChild(previewBox);
+        importBox.appendChild(hint('导入只写本机 localStorage，不向站点发任何写请求；应用前会自动下载一份当前状态快照作回滚点。'));
+        body.appendChild(importBox);
+
+        const foot = el('div', 'ntr-g-foot');
+        const footHint = el('div', 'ntr-g-warn');
+        footHint.id = 'wb-foot-hint';
+        const btnClose = el('button', 'ntr-g-btn', '关闭');
+        btnClose.id = 'wb-close';
+        foot.appendChild(footHint);
+        foot.appendChild(btnClose);
+        card.appendChild(foot);
+        document.body.appendChild(overlay);
+
+        let pending = null;
+
+        // 任务串解析（与站点 TranslateTaskDescriptor.parse 一致）：web/{provider}/{novel}?… / wenku/{novel}/{volume}?… / local/{volume}?…
+        const describeTask = (task) => {
+            const text = String(task || '');
+            const [path, query] = text.split('?');
+            const level = new URLSearchParams(query || '').get('level') || '';
+            const parts = path.split('/');
+            const suffix = level ? ` · ${level}` : '';
+            try {
+                if (parts[0] === 'web' && parts[1] && parts[2]) return { text: `${parts[1]}/${parts[2]}${suffix}`, url: `/novel/${parts[1]}/${parts[2]}` };
+                if (parts[0] === 'wenku' && parts[1]) return { text: `${parts[1]}/${decodeURIComponent(parts[2] || '')}${suffix}`, url: `/wenku/${parts[1]}` };
+                if (['local', 'personal', 'personal2'].includes(parts[0]) && parts[1]) return { text: `${parts[0]} ${decodeURIComponent(parts[1])}${suffix}`, url: '' };
+            } catch (e) { /* 编码异常的任务串按原样显示 */ }
+            return { text, url: '' };
+        };
+
+        const renderSummary = async () => {
+            tbody.textContent = '';
+            for (const s of StorageUtils.WORKSPACE_SECTIONS) {
+                const key = StorageUtils.workspaceStoreKey(s.name);
+                let exists = false;
+                try { exists = localStorage.getItem(key) !== null; } catch (e) { }
+                const data = StorageUtils.normalizeWorkspace(StorageUtils.readWorkspaceRaw(s.name));
+                const tr = el('tr');
+                tr.appendChild(el('td', null, s.label));
+                tr.appendChild(el('td', null, key));
+                tr.appendChild(el('td', null, exists ? String(data.workers.length) : '（本域无该键）'));
+                tr.appendChild(el('td', null, String(data.jobs.length)));
+                tr.appendChild(el('td', null, String(data.uncompletedJobs.length)));
+                tbody.appendChild(tr);
+            }
+            let queueCount = null;
+            try { queueCount = (await GlossaryQueue.list()).length; } catch (e) { queueCount = null; }
+            const tr = el('tr');
+            tr.appendChild(el('td', null, '脚本术语队列'));
+            tr.appendChild(el('td', null, 'IndexedDB ntr-glossary'));
+            tr.appendChild(el('td', null, queueCount === null ? '读取失败' : `任务 ${queueCount}`));
+            tr.appendChild(el('td', null, ''));
+            tr.appendChild(el('td', null, ''));
+            tbody.appendChild(tr);
+            statsEl.textContent = `${location.hostname} · 站点工作区备份（翻译器 + 队列）`;
+            footHint.textContent = '导入只动本机 localStorage；「合并」不会删条目，「整表替换」才会。';
+        };
+
+        const composeBundle = async () => {
+            const sections = StorageUtils.WORKSPACE_SECTIONS.map((s) => s.name).filter((n) => secInputs[n].checked);
+            const bundle = await StorageUtils.exportWorkspace({ sections, includeKeys: keysCb.checked === true });
+            if (secInputs.queue.checked) {
+                try { bundle.scriptQueue = await GlossaryQueue.exportBackup(); }
+                catch (e) { NotificationUtils.showWarning(`术语队列导出失败（已跳过）：${(e && e.message) || e}`); }
+            }
+            return bundle;
+        };
+
+        const planScriptQueue = async (queueBackup) => {
+            if (!queueBackup || !Array.isArray(queueBackup.jobs)) return null;
+            const localIds = new Set((await GlossaryQueue.list()).map((j) => j.id));
+            let added = 0, skipped = 0, invalid = 0;
+            for (const job of queueBackup.jobs) {
+                if (!job || !job.id || !job.target || !job.options) { invalid += 1; continue; }
+                if (localIds.has(job.id)) { skipped += 1; continue; }
+                added += 1;
+            }
+            return { total: queueBackup.jobs.length, added, skipped, invalid };
+        };
+
+        const renderPreview = (plan, queuePlan) => {
+            previewBox.textContent = '';
+            const c = plan.counts;
+            const line1 = el('div', null, `翻译器：新增 ${c.workersAdded} · 覆盖 ${c.workersUpdated} · 不变 ${c.workersSame} · 删除 ${c.workersRemoved} · 跳过旧 web ${c.workersSkippedWeb} · 迁移 ${c.workersMigrated} · 保留本地 key ${c.keysKept}`);
+            line1.style.cssText = 'font-size:12px;color:#DDD;margin:4px 0';
+            const line2 = el('div', null, `队列：新增 ${c.jobsAdded} · 覆盖 ${c.jobsReplaced} · 跳过同名未完成 ${c.jobsSkipped} · 删除 ${c.jobsRemoved}；已完成记录：新增 ${c.recordsAdded} · 覆盖 ${c.recordsReplaced} · 删除 ${c.recordsRemoved}`);
+            line2.style.cssText = 'font-size:12px;color:#DDD;margin:0 0 4px';
+            previewBox.appendChild(line1);
+            previewBox.appendChild(line2);
+            if (queuePlan) previewBox.appendChild(hint(`术语队列：共 ${queuePlan.total} 条 → 新增 ${queuePlan.added} · 跳过已有 ${queuePlan.skipped}${queuePlan.invalid ? ` · 无效 ${queuePlan.invalid}` : ''}`));
+            for (const note of plan.notes) previewBox.appendChild(hint(note));
+            for (const sec of plan.sections) {
+                const secLine = el('div', null, `【${sec.label}】键 ${sec.key}${sec.writes ? '' : '（无需写入）'}`);
+                secLine.style.cssText = 'font-size:12px;color:#BBB;margin:6px 0 2px';
+                previewBox.appendChild(secLine);
+                const bits = [];
+                if (sec.workers.added.length) bits.push(`新增翻译器 ${sec.workers.added.join('、')}`);
+                if (sec.workers.updated.length) bits.push(`覆盖翻译器 ${sec.workers.updated.join('、')}`);
+                if (sec.workers.removed.length) bits.push(`删除翻译器 ${sec.workers.removed.join('、')}`);
+                if (sec.workers.same.length) bits.push(`不变 ${sec.workers.same.length} 个`);
+                if (bits.length) previewBox.appendChild(hint(bits.join('；')));
+                if (sec.jobs.list.length) {
+                    const list = el('div');
+                    list.style.cssText = 'font-size:11px;color:#999;margin:2px 0 4px';
+                    sec.jobs.list.slice(0, 20).forEach((item) => {
+                        const desc = describeTask(item.task);
+                        const rowLine = el('div');
+                        rowLine.appendChild(el('span', null, `队列 ${item.action}：`));
+                        if (desc.url) {
+                            const a = el('a', null, desc.text);
+                            a.href = desc.url;
+                            a.target = '_blank';
+                            a.rel = 'noreferrer';
+                            a.style.color = '#7ab87a';
+                            rowLine.appendChild(a);
+                        } else {
+                            rowLine.appendChild(el('span', null, desc.text));
+                        }
+                        if (item.description) rowLine.appendChild(el('span', null, `（${item.description}）`));
+                        list.appendChild(rowLine);
+                    });
+                    if (sec.jobs.list.length > 20) list.appendChild(el('div', null, `…共 ${sec.jobs.list.length} 条`));
+                    previewBox.appendChild(list);
+                }
+            }
+        };
+
+        btnExportFile.onclick = async () => {
+            try {
+                const bundle = await composeBundle();
+                const text = JSON.stringify(bundle, null, 2);
+                exportTa.value = text;
+                GlossaryUI.downloadText(`ntr-workspace-backup.${Date.now()}.json`, text);
+                NotificationUtils.showSuccess(`已导出工作区备份${bundle.keysOmitted ? '（不含 API key）' : '（含 API key，别外传）'}`);
+            } catch (e) { NotificationUtils.showError(`导出失败：${(e && e.message) || e}`); }
+        };
+        btnCopy.onclick = async () => {
+            try {
+                const text = JSON.stringify(await composeBundle(), null, 2);
+                exportTa.value = text;
+                await GlossaryUI.copyText(text);
+            } catch (e) { NotificationUtils.showError(`复制失败：${(e && e.message) || e}`); }
+        };
+        btnPick.onclick = () => fileInput.click();
+        fileInput.onchange = async () => {
+            const file = fileInput.files && fileInput.files[0];
+            fileInput.value = '';
+            if (!file) return;
+            try {
+                importTa.value = await file.text();
+                NotificationUtils.showSuccess(`已读入 ${file.name}：点「预览差异」查看将发生的变化`);
+            } catch (e) { NotificationUtils.showError(`读取失败：${(e && e.message) || e}`); }
+        };
+        btnPreview.onclick = async () => {
+            pending = null;
+            btnApply.disabled = true;
+            previewBox.textContent = '';
+            let bundle;
+            try { bundle = JSON.parse(importTa.value || ''); }
+            catch (e) { NotificationUtils.showError(`JSON 解析失败：${(e && e.message) || e}`); return; }
+            try { StorageUtils.assertWorkspaceBundle(bundle); }
+            catch (e) { NotificationUtils.showError(`备份校验失败：${(e && e.message) || e}`); return; }
+            let plan;
+            try { plan = StorageUtils.planWorkspaceImport(bundle, { mode: modeSel.value }); }
+            catch (e) { NotificationUtils.showError(`导入计划失败：${(e && e.message) || e}`); return; }
+            let queuePlan = null;
+            try { queuePlan = await planScriptQueue(bundle.scriptQueue); } catch (e) { queuePlan = null; }
+            pending = { bundle, plan, queuePlan };
+            renderPreview(plan, queuePlan);
+            const hasWrites = plan.sections.some((s) => s.writes) || Boolean(queuePlan && queuePlan.added > 0);
+            btnApply.disabled = !hasWrites;
+            if (!hasWrites) NotificationUtils.showWarning('没有可导入的内容：合并模式下没有新增/覆盖项（要覆盖请切「整表替换」）');
+        };
+        btnApply.onclick = async () => {
+            if (!pending) return;
+            const { bundle, plan, queuePlan } = pending;
+            const c = plan.counts;
+            const modeText = modeSel.value === 'replace' ? '整表替换' : '合并';
+            let snapshotOk = true;
+            try {
+                const snapshot = await StorageUtils.exportWorkspace({ includeKeys: true });
+                GlossaryUI.downloadText(`ntr-workspace-backup.${Date.now()}-pre-import.json`, JSON.stringify(snapshot, null, 2));
+            } catch (e) { snapshotOk = false; }
+            const lines = [
+                `以「${modeText}」导入到本机 localStorage？`,
+                `翻译器：新增 ${c.workersAdded} / 覆盖 ${c.workersUpdated} / 不变 ${c.workersSame} / 删除 ${c.workersRemoved}`,
+                `队列：新增 ${c.jobsAdded} / 覆盖 ${c.jobsReplaced} / 跳过同名未完成 ${c.jobsSkipped} / 删除 ${c.jobsRemoved}`,
+            ];
+            if (queuePlan) lines.push(`术语队列：新增 ${queuePlan.added} / 跳过已有 ${queuePlan.skipped}`);
+            lines.push(snapshotOk ? '（已下载一份当前状态快照作回滚点）' : '（快照下载失败：没有回滚文件，请自行确认）');
+            if (!confirm(lines.join('\n'))) { NotificationUtils.showWarning('已取消导入'); return; }
+            try {
+                const result = await StorageUtils.importWorkspace(bundle, { mode: modeSel.value });
+                let queueAdded = 0;
+                if (bundle.scriptQueue && Array.isArray(bundle.scriptQueue.jobs)) queueAdded = await GlossaryQueue.importBackup(bundle.scriptQueue);
+                NotificationUtils.showSuccess(`导入完成：写入 ${result.keysWritten} 个键；翻译器 +${result.workersAdded}/改 ${result.workersUpdated}/删 ${result.workersRemoved}；队列 +${result.jobsAdded}/改 ${result.jobsReplaced}；术语队列 +${queueAdded}`);
+                pending = null;
+                btnApply.disabled = true;
+                previewBox.textContent = '';
+                importTa.value = '';
+                await renderSummary();
+            } catch (e) {
+                NotificationUtils.showError(`导入失败：${(e && e.message) || e}${snapshotOk ? '（可用刚下载的快照回滚）' : ''}`);
+            }
+        };
+        btnClose.onclick = () => {
+            document.removeEventListener('keydown', onKey);
+            overlay.remove();
+        };
+        const onKey = (e) => { if (e.key === 'Escape') btnClose.onclick(); };
+        document.addEventListener('keydown', onKey);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) btnClose.onclick(); });
+        renderSummary();
     }
 
     // 轻量 toast（clean-room 重写，契约见 docs/cleanroom/spec-01-config-notifications.md §2）：
@@ -8742,6 +9399,7 @@
         GlossaryQueue,
         GlossaryLog,
         SiteCheck,
+        StorageUtils,
         resolveGlossaryWorkers,
         resolveGlossaryTarget,
         loadGlossarySourceText,
