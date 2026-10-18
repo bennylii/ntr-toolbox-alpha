@@ -12,7 +12,7 @@ expire/normal/all 档位、`oldGlossaryId === glossaryId` 跳过），并修复�
 
 - Node ≥ 24（用内置 `node:sqlite`；实验性警告无害）；
 - 一个 OpenAI 兼容的 LLM 端点（与工作区 GPT 翻译器同源即可）；
-- 站点凭据：在站点页面点油猴模块「**Daemon 连接**」（推荐），或 `node daemon/index.mjs auth <token>`。
+- 站点凭据：在站点页面点油猴模块「**Daemon 连接**」（推荐），或 `node daemon/index.mjs auth <token>`。站点 2026-10 起会话键是 `web-kit:session:v1`（旧 `auth-v2` 只作回落），油猴侧按 `web-kit:session:v1` → `auth-v2` → `auth` 顺序取——读到的是哪个键，控制台站点自检与提示里会写出来（见 `docs/upstream-sync.md` ①）。
 
 ## 命令
 
@@ -210,7 +210,9 @@ node daemon/index.mjs import-lg --book <key> --txt <LG结果.txt> --manifest <�
 ```
 
 - **兼容前提**（来自 LG 源码）：LG 的 TXT 格式一行一条 item、空行也是条目、写出逐行 join（空译文回退原文）→ 结果 txt 的行数与行号和输入天然一致。因此**不要在 LG 里增删行、不要开启会改行数的处理**；
-- **也吃站点「下载原文」格式**：站点简介页「下载原文」拿到的是 `mode=jp` 整本导出（书名/作者/标签/统计 → `############` → 简介，之后每章 `# 标题` + 空行 + 正文），LG 翻完仍是同格式。控制台「导入 LG 译文」/CLI `import-lg` 会在**行数不符且文本像站点导出**时自动抓站点原文、按「标题后 count 段」逐章 sha1 对齐（卷/分组标题占两行的 ±2 偏移窗口；逐段空/非空模式校验；任一章对不上即拒绝），校验报告会显示「↻ 已识别站点导出格式（mode=jp），并抓站点原文逐章 sha1 对齐 N 章」，队列 stats 带 `converted`。抓整本原文是一次 2MB 级请求，代理链路抖动时会分轮重试，全轮失败会把原因写进错误（「…（站点格式自动对齐失败：fetch failed——代理链路抖动时稍后重跑）」）；契约格式路径零额外请求。离线转换/排查用 `node tools/.lg-import-sitefmt.mjs --book <key> --zh <LG译文.txt> --manifest <清单.json>`（同一内核）；
+- **也吃站点「下载原文」格式**：站点简介页「下载原文」拿到的是 `mode=jp` 整本导出（书名/作者/标签/统计 → `############` → 简介，之后每章 = `# 标题` + 空行 + 正文；**2026-10 起标题前另有两个空行**，旧版没有——两种都能对齐），LG 翻完仍是同格式。控制台「导入 LG 译文」/CLI `import-lg` 会在**行数不符且文本像站点导出**时自动抓站点原文、逐章 sha1 对齐（块作用域前向扫描定位原文块，标题前空行数 0/1/2 与卷/分组标题块都能吸收；逐段空/非空模式校验；任一章对不上即拒绝），校验报告会显示「↻ 已识别站点导出格式（mode=jp），并抓站点原文逐章 sha1 对齐 N 章」，队列 stats 带 `converted`。抓整本原文是一次 2MB 级请求，代理链路抖动时会分轮重试，全轮失败会把原因写进错误（「…（站点格式自动对齐失败：fetch failed——代理链路抖动时稍后重跑）」）；契约格式路径零额外请求。离线转换/排查用 `node tools/.lg-import-sitefmt.mjs --book <key> --zh <LG译文.txt> --manifest <清单.json>`（同一内核）；
+  - **缺译标记章**：部分翻译的站点导出里，未译章写成一行标记（web：`GPT翻译缺失。`/`百度|有道|Sakura翻译缺失。`，丢章 `该章节缺失。`；文库：`// 该分段翻译缺失。`）。识别后按清单 `count` 展开空行，校验时判「该章没有译文…跳过上传」——已译章照常导入，不再整本被拒；正文里正常出现的「…翻译缺失。」文本不会误判；
+  - **文库不走这条路**：站点对文库禁用 `mode=jp`、下载逐卷且导出无标题块结构（章序还是 `sorted()`）——命中站点格式时**不发请求**，直接提示改用本工具「导出原文」的契约格式 txt；文库的导入路径就是契约格式；
 - **也吃「折叠空行版」站点格式**：有些来路的站点导出译文把**连续空行折成了单个空行**（行数与站点原文不同构，严格模式按绝对行号切片必然错位，整本被拒）。现在严格模式失败后**自动回落「块序 + 非空行映射」**：原文块仍按标题后 `count` 行 sha1 硬定位（块内锚定，卷/分组标题不越界），译文块按块序号取，要求两侧非空行数一致，再把译文非空行按序铺回原文段落数组（空段落原位回填空串）；硬校验不打折（块数一致 / 逐章原文 sha1 / 逐章非空行数一致 / 重建行数 == 清单行数），任一章不过即整体拒绝。报告标注 `convertMode`（`strict` / `loose`）与「已识别站点导出格式（折叠空行版）：按块序 + 非空行映射对齐 N 章」；
 - **提交后回读校验**（控制台项目卡「回读校验」按钮 / 队列 `lg-readback`）：把站点**已提交**的整本译文拉回来（`/file?mode=zh&translations=gpt`，11MB 级一次请求）与本地 txt 逐章比对非空行——本地侧支持契约格式（按清单 `start/count` 切片）与站点导出格式（按 `# 标题` 块序）；站点侧章节块按序对应清单章节（缺清单则抓 TOC），两侧章节数不符即拒绝。报告给「N/M 章一致」+ 不一致章的首差行（本地 ↔ 站点片段）+ 站点侧假名残留行数，结果落 `runs(job='lg-readback')`；站点标题与本地译名不同译法也能对上（这就是不按标题比对的原因）；
 - **断点续跑 + 401 监测**：逐章提交成功后把「章 id + 译文内容 sha」写进 `chunks`（`lg-import-state`，`forgetBook` 会清），**重跑自动跳过内容一致的已完成章**（内容变了 sha 变 → 自然重传，自愈），进度显示「断点跳过 N 章」，回读面板/项目详情显示「断点：已提交 N 章」（`GET /lg/import-state`）。401 不再被逐章 catch 吞成「章节获取失败」：先原地退避重试 2 次（8s，覆盖会话抖动），仍 401 则**中止本批**、置 `book.state='need-auth'`、**自动置 `authRequest`**（等于帮你点了「从站点同步」，站点页面开着时油猴 ≤5s 重推新 token）、进度打 `phase:'need-auth'`、run 记 failed（`stats.needAuth`）；控制台项目卡显示红色「凭据失效」+「重新同步凭据」，导入面板给出「继续提交（跳过已完成章）」按钮，任务页队列行直接显示 `progress.message`；
@@ -224,7 +226,10 @@ node daemon/index.mjs import-lg --book <key> --txt <LG结果.txt> --manifest <�
 ## 真机契约备忘（mock 已同步改严）
 
 - `GET /api/novel/{p}/{id}/file` 必须带 `filename` 参数，缺了 404（`createFileUrl` 的 `filename` 无默认值）；
-- `/file` 的 `mode=jp` 是站点「下载原文」整本导出（头部 → `############` → 每章 `# 标题` + 空行 + 正文，章块间 3 空行、卷/分组标题各占两行）——LG 译文自动对齐靠它，见「LG 译文对齐导入」段；
+- `/file` 的 `mode=jp` 是站点「下载原文」整本导出（头部 → `############` → 每章 `# 标题` + 空行 + 正文，章块间 3 空行、卷/分组标题各占两行；**2026-10 起标题前另有两个空行**）——LG 译文自动对齐靠它，见「LG 译文对齐导入」段；**文库没有整本原文导出**（`mode=jp` 被服务端拒绝、下载逐卷 `/api/wenku/{id}/file/{volumeId}`）；
+- 文库 `POST .../translate-v2/{t}` 只返回 `{glossaryId, toc:[{chapterId, glossaryId?}]}`（无 `glossaryUuid`/`glossary`/标题）——`SiteClient` 已把 toc 项的 `glossaryId` 归一成 `glossaryUuid`、书级 `glossaryId` 作为当前版本，`normal`/`expire` 档在文库上才有意义；
+- 术语表 `PUT .../glossary` 是整表替换：**内容没变时上游主动返 400**（web `修改为空` / 文库 `术语表没有改变`）——`SiteClient` 按幂等成功处理，其它 400 照旧报错；
+- 401 有两义：带 `WWW-Authenticate: Bearer error="invalid_token"` = 凭据失效（`code='unauthorized'`，触发 need-auth 自愈）；无该头 = 封禁/权限不足（`code='forbidden'`，不触发 need-auth、不重试）。术语表写入需 member 且注册满 30 天；
 - web 版 `POST .../translate-v2/{t}/chapter-task/{ch}` 的 `sync` 查询参数必填（缺了 404；
   `sync=true` 仅站点「同步原文」档使用，翻译链路固定 `false`）；
 - HTTPS 站点页面 fetch 本机 daemon 走 Chrome 本地网络访问（LNA/PNA）：daemon 已在 CORS 预检里回

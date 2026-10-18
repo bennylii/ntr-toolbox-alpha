@@ -35,7 +35,9 @@
 - 不去重、不排队、不限制并发条数（每条独立计时）。
 
 ## 3. 会话 token（initToken）
-1. 读 `localStorage['auth-v2']`：JSON 且含真值 `token` → 返回它（站点当前会话格式，短效 access token）。
-2. 读不到再读 `localStorage['auth']`：JSON 且 `profile.token` 真值 → 返回（历史格式，token 已停更，仅作回落）。
-3. 都没有 → 返回 `null`。任何解析异常按「读不到」处理。
-4. 构造时调用一次存入 `this.token`；SiteCheck 的「会话存储」检查复用同一入口。
+读 `readSiteToken()`（`SITE_SESSION_SOURCES` 表驱动，按序取第一个能读到的 token，返回 `{token, key}`）：
+1. `localStorage['web-kit:session:v1']`：JSON 且含真值 `token` → 返回它（**站点 2026-10 起的会话键**，`@novelia/web-kit` 存 `{token, adminMode}`，无旧键迁移；上游证据见 `docs/upstream-sync.md` ①）。
+2. 读不到再读 `localStorage['auth-v2']`：JSON 且含真值 `token` → 返回（上一代格式，短效 access token；站点换键后只是遗留值）。
+3. 再读 `localStorage['auth']`：JSON 且 `profile.token` 真值 → 返回（历史格式，token 已停更，仅作回落）。
+4. 都没有 → 返回 `null`。任何解析异常按「读不到」处理。
+5. 构造时调用一次存入 `this.token`；SiteCheck 的「会话存储（站点会话键）」检查复用同一入口，并**回报命中的键名**（读不到时列出全部三个键名）。Daemon 连接模块的 `daemonReadToken()` 走同一条链。

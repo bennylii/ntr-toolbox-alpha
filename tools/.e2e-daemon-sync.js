@@ -1,4 +1,4 @@
-// 「Daemon 连接」：模块注册 + /ping 探测 + auth-v2 凭据/翻译器推送 + 状态行/角标（对测试 stub，端口 7343）
+// 「Daemon 连接」：模块注册 + /ping 探测 + 站点会话凭据（web-kit:session:v1 → auth-v2 → auth 回落链）/翻译器推送 + 状态行/角标（对测试 stub，端口 7343）
 // 跑法（两步）：
 //   1) 起 stub：node tools/.run-daemon-stub.mjs
 //   2) cdp open http://127.0.0.1:8790/novel/mock-src + inject 后 evalf 本文件
@@ -100,6 +100,39 @@ try {
   const d2 = await fetch('http://127.0.0.1:7343/last').then((r) => r.json());
   check('标志已被推送清掉 → 再次 tick 不重复', d2.__count === 1, d2.__count);
 
+  // 6) 会话键回落链（站点 2026-10 起用 web-kit:session:v1，见 docs/upstream-sync.md ①）：
+  //    新键单独存在 → 读到它；新旧并存 → 新键优先；只剩历史 auth → 仍能读
+  localStorage.removeItem('ntr-daemon-auth-fp');
+  const origWk = localStorage.getItem('web-kit:session:v1');
+  const origLegacy = localStorage.getItem('auth');
+  const syncOnce = async () => {
+    await fetch('http://127.0.0.1:7343/reset', { method: 'POST' });
+    await mod.run(mod);
+    for (let i = 0; i < 20; i += 1) {
+      await sleep(200);
+      const c = await fetch('http://127.0.0.1:7343/last').then((r) => r.json());
+      if (c.__count >= 1) return c;
+    }
+    return null;
+  };
+  localStorage.removeItem('auth-v2');
+  localStorage.setItem('web-kit:session:v1', JSON.stringify({ token: 'e2e-token-wk-1', adminMode: false }));
+  check('新键 web-kit:session:v1 单独存在 → initToken 读到', box.initToken() === 'e2e-token-wk-1', box.initToken());
+  const s1 = await syncOnce();
+  check('推送用的是新键里的 token', !!s1 && s1.token === 'e2e-token-wk-1', s1 && s1.token);
+
+  localStorage.setItem('auth-v2', JSON.stringify({ token: 'e2e-token-legacy-2' }));
+  check('新旧并存 → 新键优先', box.initToken() === 'e2e-token-wk-1', box.initToken());
+  localStorage.removeItem('web-kit:session:v1');
+  check('新键消失 → 回落 auth-v2', box.initToken() === 'e2e-token-legacy-2', box.initToken());
+  localStorage.removeItem('auth-v2');
+  localStorage.setItem('auth', JSON.stringify({ profile: { token: 'e2e-token-ancient-3' } }));
+  check('只剩历史 auth → 读 profile.token', box.initToken() === 'e2e-token-ancient-3', box.initToken());
+  localStorage.setItem('auth-v2', JSON.stringify({ token: 'e2e-token-auto-1' }));
+  localStorage.removeItem('auth');
+  if (origWk === null) localStorage.removeItem('web-kit:session:v1'); else localStorage.setItem('web-kit:session:v1', origWk);
+  if (origLegacy === null) localStorage.removeItem('auth'); else localStorage.setItem('auth', origLegacy);
+
   // 还原种子数据
   localStorage.removeItem('ntr-daemon-auth-fp');
   if (origAuth === null) localStorage.removeItem('auth-v2'); else localStorage.setItem('auth-v2', origAuth);
@@ -108,6 +141,6 @@ try {
   out.errors.push(String((e && e.stack) || e));
 } finally {
   mo.disconnect();
-  out.notes.push('cleanup: auth-v2 与 Daemon 地址已还原');
+  out.notes.push('cleanup: 会话键（web-kit:session:v1 / auth-v2 / auth）与 Daemon 地址已还原');
 }
 return JSON.stringify(out, null, 1);

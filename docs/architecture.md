@@ -68,7 +68,9 @@
 4. `PUT .../glossary` 全量替换（写前快照 + 写后回读校验）；
 5. `GET .../file?mode=jp-zh&filename=…`（`filename` 必填，缺了 404；另有 `mode=jp`（站点「下载原文」整本导出）与 `mode=zh`（整本译文，回扫/验收用），daemon 用它们做站点格式自动对齐与导入后比对）。
 
-鉴权 = `Authorization: Bearer <auth-v2.token>`；站点 API **不使用 Cookie**（refresh cookie 是 HttpOnly 且属站点域，daemon 无法也无需持有）。
+鉴权 = `Authorization: Bearer <站点会话 token>`。会话键：站点 2026-10 起改用 `@novelia/web-kit` 存会话（键名 `web-kit:session:v1`，值 `{token, adminMode}`，**无旧键迁移**），我们按 `web-kit:session:v1` → `auth-v2` → `auth`（`auth.profile.token`）的顺序取（油猴侧 `readSiteToken()`，三处链路共用；见 spec-11）；站点 API **不使用 Cookie**（refresh cookie 是 HttpOnly 且属站点域，daemon 无法也无需持有）。
+
+401 有两义：带 `WWW-Authenticate: Bearer error="invalid_token"` → 真凭据失效（`code='unauthorized'`，触发 need-auth 自愈链路）；无该头 → 封禁/权限不足（`code='forbidden'`，不触发 need-auth、不中止不重试）。术语表 PUT 的「内容没变 → 400」（web `修改为空` / 文库 `术语表没有改变`）按**幂等成功**处理。证据与处置见 `docs/upstream-sync.md` ⑦⑧。
 
 传输层重试：站点在墙内只经代理可达、链路抖动（`ECONNRESET` / `fetch failed` / 超时）频繁，`SiteClient` 对**网络层失败**默认重试 3 次（退避 300ms×n，`onRetry` 回调让 CLI 打出「站点请求失败，重试 n/3」；次数在控制台「站点与凭据」可调 0–8，存 `config.site.retries`）；**HTTP 状态错误（401/400/404/5xx 响应）不重试**，语义不变——章节提交与术语表 PUT 都是内容幂等的整章/整表写，重试安全。实测整本导入的校验通过率由此从 115/167 章升到 165–167/167（同一代理链路）。
 
@@ -114,7 +116,7 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 
 - **术语表**：`glossary-io` 双向 JSON（导入含引擎审计与 regex→规则分流）。
 - **译文**：`export-src`（GUI 同款）导出「一行一段」纯文本 + 对齐清单（每章 `start/count/jpSha1`）→ LinguaGacha 翻译（txt 天然保行号）→ `import-lg`/GUI「导入 LG 译文」按清单切片回章，**三层校验**（总行数 / 每章行数+空行模式 / 源 sha1）后按 §4.1-3 契约提交；GUI 里以 `lg-import` 队列任务跑，进度经队列 progress 通道实时回显。（规格 `docs/cleanroom/spec-13`）
-- **也接受站点「下载原文」格式**：站点 `mode=jp` 整本导出（头部 → `############` → 简介，之后每章 `# 标题` + 空行 + 正文）经 LG 翻译后仍是同格式，会在「行数不符 + 文本像站点导出」时自动抓原文逐章 sha1 对齐（±2 偏移窗口容忍卷/分组标题占两行、逐段空/非空模式；任一章不过即拒绝），契约格式路径零额外请求；抓原文是 2MB 级请求，失败分轮重试并把原因带进错误。纯函数 `convertSiteFormat`/`fetchSiteExportLines`/`alignLgResult` 在 `lg-align.mjs`（四处调用点共用：`/lg/verify`、`lg-import` runner、CLI、Agent 工具）。
+- **也接受站点「下载原文」格式**：站点 `mode=jp` 整本导出（头部 → `############` → 简介，之后每章 `# 标题` + 空行 + 正文；上游 `11fbbb9f` 起标题前另有两个空行）经 LG 翻译后仍是同格式，会在「行数不符 + 文本像站点导出」时自动抓原文逐章 sha1 对齐（**块作用域前向扫描**定位原文块——标题前空行数 0/1/2 与卷/分组标题块都能吸收；逐段空/非空模式；任一章不过即拒绝），契约格式路径零额外请求；抓原文是 2MB 级请求，失败分轮重试并把原因带进错误。纯函数 `convertSiteFormat`/`fetchSiteExportLines`/`alignLgResult` 在 `lg-align.mjs`（四处调用点共用：`/lg/verify`、`lg-import` runner、CLI、Agent 工具）。**缺译标记章**（`GPT/百度/有道/Sakura翻译缺失。`、`该章节缺失。`、文库的 `// 该分段翻译缺失。`）按清单 `count` 展开空行、提交侧跳过（不污染已译章）。**文库不走这条路**：站点禁用 `mode=jp`、下载逐卷且无标题块结构 → 命中即报错提示改用契约格式 txt。
 - **折叠空行版回落（`convertSiteFormatLoose`）**：有些来路的站点格式译文把连续空行折成单个空行（与站点原文不同构，绝对行号切片必然错位）。严格模式失败后自动回落「块序 + 非空行映射」：`splitBlocks` 按 `# 标题` 切块、块内锚定定位原文块（sha1 命中且块内剩余行全空）、译文块按块序号取、要求两侧非空行数一致，再把译文非空行按序铺回原文段落数组（空段落回填空串）；块数/逐章 sha1/非空行数/重建行数四项硬校验不打折，报告带 `convertMode: 'strict'|'loose'`。真数据实测：`web:syosetu/n5731ie`（449 章 / 462 块）折叠空行版译文经此路径重建，与站点实际内容逐章 **449/449 一致**。
 - **提交后回读校验（`verifySubmitted` + `lg-readback` 队列任务）**：抓站点 `mode=zh&translations=gpt` 整本译文（`getBookZhText`，一次 11MB 级请求）与本地 txt 逐章比对非空行——本地侧支持契约格式（按清单切片）与站点导出格式（块序），站点侧「有正文的块」按序对应章节（缺清单抓 TOC），两侧章节数不符即拒绝；输出 N/M 章一致 + 不一致章首差行 + 站点侧假名残留行数，落 `runs(job='lg-readback')`，GUI 项目卡「回读校验」按钮/导入面板入口，`GET /lg/import-state` 回显断点（已提交 N 章）。
 - **断点续跑与 401 收口**：逐章提交成功后把「章 id + 译文内容 sha」写 `chunks`（`lg-import-state`），重跑跳过内容一致的已完成章（内容变则 sha 变 → 自动重传）；`verifyImport`/`applyImportReport` 对 401 先退避重试 2 次，仍失败即中止本批并返回 `needAuth`/`stopped:'need-auth'`（不再逐章吞成「章节获取失败」），runner 置 `book.state='need-auth'`、自动置 `authRequest`（触发油猴重推凭据）、进度打 `phase:'need-auth'`，GUI 出「继续提交」入口。
@@ -182,9 +184,9 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 | 用户脚本引擎 | `tools/engine-test.mjs` | mock 8788 |
 | 油猴页面流 | `tools/.e2e-*.js`（inject）+ `tools/.run-suite.mjs` | mock 8788/8790 + CDP 车道 |
 | daemon 纯函数 | quality / translate / processors / prompt / glossary-io / lg-align / agent / agent-skills `-test.mjs` | 无 |
-| daemon 冒烟 | `daemon/daemon-test.mjs`（129 例：管线/调度/质检/Agent/会话操作/工作区/LG 导入（含站点 mode=jp 自动对齐）/站点请求重试/连接/托盘端口） | mock 8790 |
-| 浏览器 e2e | `.e2e-agent-ui.js`（助手页）、`.e2e-agent-session-ops.js`（会话操作）、`.e2e-lg-gui.js`（导入 GUI：mock 车道一把 43 项；真机分阶段 `__LG_GUI_TEST` + `cdp setfiles` 真实文件）、`.e2e-daemon-sync.js`（连接/自动同步） | mock 8790 + stub 7343 + CDP 车道 |
 | daemon 代理 | `daemon/proxy-test.mjs`（本地回环测试代理 + 自签证书 fixture；含 curl 兜底：回落成功 / 开关关闭 / noRetry 不触发 / curl 走代理） | 无 |
+| daemon 冒烟 | `daemon/daemon-test.mjs`（151 例：管线/调度/质检/Agent/会话操作/工作区/LG 导入（含站点 mode=jp 自动对齐）/站点请求重试/连接/术语表 400 幂等/401 分类/托盘端口） | mock 8790 |
+| 浏览器 e2e | `.e2e-agent-ui.js`（助手页）、`.e2e-agent-session-ops.js`（会话操作）、`.e2e-lg-gui.js`（导入 GUI：mock 车道一把 51 项；真机分阶段 `__LG_GUI_TEST` + `cdp setfiles` 真实文件）、`.e2e-daemon-sync.js`（连接/自动同步，23 项）、`.e2e-workspace-backup.js`（工作区备份 + BETA 双仓分写，48 项） | mock 8790 + stub 7343 + CDP 车道 |
 | 真机 | TM 重装（sha256 整文件比对）→ 实站全流程 | 测试 profile + LNA 旗标 |
 
 ## 8. 版本与发布

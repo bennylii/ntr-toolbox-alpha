@@ -59,10 +59,24 @@ export class SiteClient {
     }
   }
 
+  // 401 在上游承载三种含义（Authentication.kt）：token 非法/过期、账号封禁、权限不足
+  // （术语表写入要求 member 且注册满 30 天）。token 问题带 WWW-Authenticate: Bearer error="invalid_token"
+  // （缺 Authorization 头时是裸 `Bearer`）——凡是 Bearer 挑战都算凭据问题；封禁/权限不足是裸 401，
+  // 按「权限问题」报，否则会把用户引去反复重同步凭据，而真正的原因是权限。
+  static async #unauthorizedError(res) {
+    const challenge = String((res.headers && res.headers.get && res.headers.get('www-authenticate')) || '');
+    let body = '';
+    try { body = await res.text(); } catch { }
+    if (/^\s*Bearer/i.test(challenge) || /Token不合法或者过期/.test(body)) {
+      return SiteClient.#httpError('401 未授权：站点凭据失效，请重新同步凭据', 'unauthorized');
+    }
+    return SiteClient.#httpError(`401 无权限：账号被限制或权限不足${body ? `（${String(body).slice(0, 80)}）` : ''}——术语表写入需 member 且注册满 30 天`, 'forbidden');
+  }
+
   async #json(pathname, options) {
     return this.#withRetries(pathname, async () => {
       const res = await this.fetchRaw(pathname, options);
-      if (res.status === 401) throw SiteClient.#httpError('401 未授权：token 失效，请重新同步凭据', 'unauthorized');
+      if (res.status === 401) throw await SiteClient.#unauthorizedError(res);
       if (!res.ok) {
         const detail = await res.text().catch(() => '');
         throw SiteClient.#httpError(`HTTP ${res.status} ${pathname}${detail ? `：${String(detail).slice(0, 120)}` : ''}`);
@@ -74,7 +88,7 @@ export class SiteClient {
   async getText(pathname) {
     return this.#withRetries(pathname, async () => {
       const res = await this.fetchRaw(pathname);
-      if (res.status === 401) throw SiteClient.#httpError('401 未授权：token 失效，请重新同步凭据', 'unauthorized');
+      if (res.status === 401) throw await SiteClient.#unauthorizedError(res);
       if (!res.ok) throw SiteClient.#httpError(`HTTP ${res.status} ${pathname}`);
       return res.text();
     });
@@ -84,10 +98,18 @@ export class SiteClient {
     const pathname = book.kind === 'web'
       ? `/api/novel/${book.providerId}/${book.novelId}/glossary`
       : `/api/wenku/${book.novelId}/glossary`;
-    // 整表替换，内容幂等：传输失败重试安全
+    // 整表替换。注意上游对「内容没变」是主动返 400（web「修改为空」/文库「术语表没有改变」），
+    // 那不是失败：内容一致本来就等价于写成功，且「服务端已写入但响应丢失」的重试也会走到这里。
+    // 语义出处见 docs/upstream-sync.md ⑦
     return this.#withRetries(pathname, async () => {
       const res = await this.fetchRaw(pathname, { method: 'PUT', body: glossary });
-      if (res.status === 401) throw SiteClient.#httpError('401 未授权：token 失效，请重新同步凭据', 'unauthorized');
+      if (res.status === 401) throw await SiteClient.#unauthorizedError(res);
+      if (res.status === 400) {
+        const detail = (await res.text().catch(() => '')).trim();
+        // 全等匹配（上游只有这两句）：将来别处复用同词也不会被误判成「内容一致」
+        if (detail === '修改为空' || detail === '术语表没有改变') return true;   // 内容一致 = 已是目标状态
+        throw SiteClient.#httpError(`写入术语表失败 HTTP 400${detail ? `：${detail.slice(0, 120)}` : ''}`);
+      }
       if (!res.ok) {
         const detail = await res.text().catch(() => '');
         throw SiteClient.#httpError(`写入术语表失败 HTTP ${res.status}${detail ? `：${String(detail).slice(0, 120)}` : ''}`);
@@ -118,7 +140,15 @@ export class SiteClient {
     const out = [];
     for (const volume of volumes) {
       const task = await this.#json(`/api/wenku/${book.novelId}/translate-v2/${translatorId}/${encodeURIComponent(volume.volumeId)}`);
-      out.push({ volumeId: volume.volumeId, toc: task.toc || [], glossaryUuid: task.glossaryUuid || '', glossary: task.glossary || {} });
+      // 文库的字段名是 glossaryId（书级一个、逐章一个），语义与 web 的 glossaryUuid 相同：
+      // 逐章缺失（上游 explicitNulls=false，未译章省略该键）= 从未用当前术语表翻过。
+      // 照搬 web 形状会让 planTargets 把「未译」当成「已翻过」→ normal/expire 档在文库上失灵。
+      const toc = (task.toc || []).map((item) => (
+        item.glossaryUuid !== undefined || item.glossaryId === undefined
+          ? item
+          : { ...item, glossaryUuid: item.glossaryId }
+      ));
+      out.push({ volumeId: volume.volumeId, toc, glossaryUuid: task.glossaryId || '', glossary: {} });
     }
     return out;
   }

@@ -74,6 +74,30 @@
         }
         return out;
     };
+
+    // 站点会话 token 的存放位置（按新→旧回落）：
+    //   web-kit:session:v1 —— 站点 2026-10 起改用 @novelia/web-kit 存会话，值是 {token, adminMode}
+    //   auth-v2              —— 上一版站点会话，同形状
+    //   auth                —— 更早的历史格式 {profile:{token}}，早已停更，只在前两者都缺时回落
+    // 三处（initToken / daemon 凭据同步 / 健康检查）共用这一份；出处见 docs/upstream-sync.md
+    const SITE_SESSION_SOURCES = [
+        { key: 'web-kit:session:v1', pick: (d) => d.token || null },
+        { key: 'auth-v2', pick: (d) => d.token || null },
+        { key: 'auth', pick: (d) => (d.profile && d.profile.token) || null },
+    ];
+    const readSiteToken = () => {
+        for (const src of SITE_SESSION_SOURCES) {
+            let raw = null;
+            try { raw = localStorage.getItem(src.key); } catch (e) { continue; }
+            if (!raw) continue;
+            try {
+                const token = src.pick(JSON.parse(raw) || {});
+                if (token) return { token, key: src.key };
+            } catch (e) { /* 键在但内容不是 JSON：继续回落下一个 */ }
+        }
+        return { token: null, key: '' };
+    };
+
     // 「翻译器」选择框的选项（id 就是添加时填的名字）
     // '' = 全部（按顺序轮换）；函数形式是为了每次渲染/打开设置时重新读取（工作区里新增的翻译器不用刷新页面）
     const workspaceTranslatorOptions = () => {
@@ -154,6 +178,7 @@
                 getModuleSetting(cfg, '链接') || '',
                 getModuleSetting(cfg, 'Key') || '',
                 getModuleSetting(cfg, '数量') || 1,
+                (StorageUtils.keysForPath(location.pathname) || {}).workers || null,
             );
         },
     };
@@ -168,9 +193,8 @@
             newStringSetting('bind', 'none'),
         ],
         run: async function (cfg) {
-            // 工作区键按页面 URL 收尾判定；两者都不是就无事可做
-            const key = location.href.endsWith('gpt') ? StorageUtils.gpt
-                : (location.href.endsWith('sakura') ? StorageUtils.sakura : null);
+            // 工作区键按当前页面判定（BETA 页的 worker 在 workspace-gpt-pipeline）；都不是就无事可做
+            const key = (StorageUtils.keysForPath(location.pathname) || {}).workers;
             if (!key) return;
 
             const excludeList = (getModuleSetting(cfg, '排除') || '').split(',').filter(Boolean);
@@ -184,7 +208,7 @@
                 }
             }
             await StorageUtils.removeAllWorkers(key, excludeList);
-            NotificationUtils.showSuccess(key === StorageUtils.gpt ? '已删除 GPT 翻译器' : '已删除 Sakura 翻译器');
+            NotificationUtils.showSuccess(key === StorageUtils.sakura ? '已删除 Sakura 翻译器' : '已删除 GPT 翻译器');
         },
     };
 
@@ -684,8 +708,8 @@
             newBooleanSetting('仅清空已完成', false),
         ],
         run: async function (cfg) {
-            const key = window.location.pathname.includes('workspace/sakura') ? StorageUtils.sakura
-                : (window.location.pathname.includes('workspace/gpt') ? StorageUtils.gpt : null);
+            // 队列键：sakura 仓自用；GPT 两个页面（老工作区与 BETA）共用 workspace-gpt 的 jobs
+            const key = (StorageUtils.keysForPath(window.location.pathname) || {}).jobs;
             if (!key) {
                 NotificationUtils.showError('无法确定工作区类型');
                 return;
@@ -1548,7 +1572,7 @@
         },
     };
 
-    // 同步 Daemon：把站点凭据（auth-v2 token）与工作区 GPT 翻译器配置推给本地 daemon
+    // 同步 Daemon：把站点凭据（站点会话键里的 token，见 SITE_SESSION_SOURCES）与工作区 GPT 翻译器配置推给本地 daemon
     // （daemon 用它们调站点 API 与 LLM；token 短时效，这里随时可重新同步）
     // 验收回扫：纯本地计算（不调 LLM、不写站点）——拿术语表 x 原文 x 译文 算落地率
     const moduleAcceptanceScan = {
@@ -1898,7 +1922,7 @@
     };
     const DAEMON_FP_KEY = 'ntr-daemon-auth-fp';
     const daemonReadToken = () => {
-        // 优先复用工具箱的 initToken 回落链（auth-v2 → auth.profile），再兜底直读
+        // 优先复用工具箱的 initToken 回落链（web-kit:session:v1 → auth-v2 → auth.profile），再兜底直读
         try {
             const box = window._NTRToolBox;
             if (box && typeof box.initToken === 'function') {
@@ -1906,7 +1930,7 @@
                 if (t) return t;
             }
         } catch (e) { }
-        try { return (JSON.parse(localStorage.getItem('auth-v2')) || {}).token || ''; } catch (e) { return ''; }
+        try { return readSiteToken().token || ''; } catch (e) { return ''; }
     };
     const daemonFingerprint = (token, workers) => JSON.stringify({ token, workers, origin: window.location.origin });
     // 共用推送：manual（手动点）/ auto（30s tick 自动）同一条路径；silent 时不弹成功/失败通知
@@ -1930,7 +1954,7 @@
         const token = daemonReadToken();
         if (!token) {
             daemonSetStatus(cfg, `在线 ${ping.version || ''} · 未同步（读不到站内凭据，请先登录）`);
-            if (!silent) NotificationUtils.showError('读不到站点凭据（auth-v2 / auth）：请先在站点登录');
+            if (!silent) NotificationUtils.showError('读不到站点凭据（web-kit:session:v1 / auth-v2 / auth）：请先在站点登录');
             return { ok: false, error: 'no_token' };
         }
         const workers = readWorkspaceGptWorkers();
@@ -2547,10 +2571,13 @@
                     : { status: 'warn', detail: '找不到 #ntr-panel（面板没挂上或被移除）' },
             },
             {
-                id: 'auth', name: '会话存储（auth-v2）', site: true,
-                run: () => (scriptRef && scriptRef.initToken && scriptRef.initToken())
-                    ? { status: 'ok', detail: '已读到会话 token' }
-                    : { status: 'warn', detail: '读不到 auth-v2 / auth 里的 token：未登录，或站点会话存储键已变动（接口会 401）' },
+                id: 'auth', name: '会话存储（站点会话键）', site: true,
+                run: () => {
+                    if (!scriptRef || typeof scriptRef.initToken !== 'function' || !scriptRef.initToken()) {
+                        return { status: 'warn', detail: '读不到 web-kit:session:v1 / auth-v2 / auth 里的 token：未登录，或站点会话存储键已变动（接口会 401）' };
+                    }
+                    return { status: 'ok', detail: `已读到会话 token（${readSiteToken().key}）` };
+                },
             },
             {
                 id: 'workspace-gpt', name: '工作区翻译器存储', site: true,
@@ -7517,13 +7544,28 @@
         // n.novelia.cc 与老镜像域的工作区键名不同；gpt 两域同名
         static sakura = location.hostname === 'n.novelia.cc' ? 'workspace-sakura' : 'sakura-workspace';
         static gpt = 'workspace-gpt';
+        static gptPipeline = 'workspace-gpt-pipeline';
+
+        // 当前页面该读写哪两个键：worker 列表与任务队列在上游不一定同仓
+        // BETA 页 /workspace/gpt-pipeline 的 worker 在 workspace-gpt-pipeline，
+        // 任务队列却仍与老工作区共用 workspace-gpt（上游 GptPipelineWorkspace.vue:41-45）
+        static keysForPath(pathname) {
+            const p = String(pathname || '');
+            if (p.includes('workspace/sakura')) return { workers: this.sakura, jobs: this.sakura };
+            if (p.includes('workspace/gpt-pipeline')) return { workers: this.gptPipeline, jobs: this.gpt };
+            if (p.includes('workspace/gpt')) return { workers: this.gpt, jobs: this.gpt };
+            return null;
+        }
 
         // 面板停在工作区页时由主循环调用：读出再写回，顺带把缺的数组字段补齐
         static async update() {
-            const key = window.location.pathname.includes('workspace/sakura') ? this.sakura
-                : (window.location.pathname.includes('workspace/gpt') ? this.gpt : null);
-            if (!key) return;
-            await this._setData(key, await this._getData(key));
+            const keys = this.keysForPath(window.location.pathname);
+            if (!keys) return;
+            await this._setData(keys.workers, await this._getData(keys.workers));
+            // BETA 页两个仓各归各：BETA 仓此前从没被我们碰过，站点侧的 worker 变更我们看不到
+            if (keys.jobs !== keys.workers) {
+                await this._setData(keys.jobs, await this._getData(keys.jobs));
+            }
         }
 
         static async _setData(key, data) {
@@ -7582,12 +7624,14 @@
             await this._setData(this.sakura, data);
         }
 
-        static async addGPTWorker(id, model, endpoint, key, amount = null) {
-            const data = await this._getData(this.gpt);
+        static async addGPTWorker(id, model, endpoint, key, amount = null, storeKey = null) {
+            // BETA 页加的翻译器要进 BETA 的 worker 仓；其它页面沿用老工作区
+            const target = storeKey || this.gpt;
+            const data = await this._getData(target);
             const total = amount ?? -1;
             const ids = (total === -1) ? [id] : Array.from({ length: total }, (_, i) => `${id}${i + 1}`);
             ids.forEach((workerId) => this._upsertWorker(data, { id: workerId, type: 'api', model, endpoint, key }));
-            await this._setData(this.gpt, data);
+            await this._setData(target, data);
         }
 
         static async removeWorker(key, id) {
@@ -8416,26 +8460,10 @@
         }
 
         // 会话 token（clean-room 重写，契约见 docs/cleanroom/spec-01-config-notifications.md §3）：
-        // auth-v2 是站点当前会话（{token, adminMode}，短效 token + refresh cookie 续期）；
-        // auth 是历史格式（{profile:{token}}），停更已久，只在 auth-v2 缺失时回落
+        // 站点当前会话在 'web-kit:session:v1'（{token, adminMode}，短效 token + refresh cookie 续期），
+        // 'auth-v2' 是上一版站点会话，'auth'（{profile:{token}}）更早、早已停更——按新到旧回落
         initToken() {
-            const extract = (raw, pick) => {
-                try {
-                    const parsed = JSON.parse(raw);
-                    return parsed ? pick(parsed) : null;
-                } catch (e) { return null; }
-            };
-            const v2 = localStorage.getItem('auth-v2');
-            if (v2) {
-                const token = extract(v2, (d) => d.token || null);
-                if (token) return token;
-            }
-            const legacy = localStorage.getItem('auth');
-            if (legacy) {
-                const token = extract(legacy, (d) => (d.profile && d.profile.token) || null);
-                if (token) return token;
-            }
-            return null;
+            return readSiteToken().token || null;
         }
 
         // ---------- 配置存取（clean-room 重写，行为规格：docs/cleanroom/spec-01-config-notifications.md §1） ----------

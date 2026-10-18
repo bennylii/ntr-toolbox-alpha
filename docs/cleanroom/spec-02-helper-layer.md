@@ -1,7 +1,7 @@
 # spec-02：helper 层（设置工厂 / 白名单 / SettingUtils / TaskUtils / StorageUtils）
 
 重构对象：上游四个工具类 + 顶层设置工厂与白名单函数（约 400 行）。
-等价验证：`.e2e-auto-retry.js`、`.e2e-storage-utils.js`、`.e2e-panel-basics.js`、`.e2e-translator-mgmt.js`、`.e2e-collect-tasks.js` + 全套 e2e。
+等价验证：`.e2e-auto-retry.js`、`.e2e-storage-utils.js`、`.e2e-panel-basics.js`、`.e2e-translator-mgmt.js`、`.e2e-collect-tasks.js` + 全套 e2e；`keysForPath` 的 BETA 双仓分写由 `.e2e-workspace-backup.js` B0 段 7 项定格（含 `history.pushState` 切页后 `update()` 双仓分写、`addGPTWorker` 落到 pipeline 仓）。
 公共 API 名全部保留（模块定义与面板直接调用）：`new*Setting`、`getModuleSetting`、`isModuleEnabledByWhitelist`、`SettingUtils`、`TaskUtils`、`StorageUtils`。
 
 ## 1. 设置工厂与读取
@@ -37,12 +37,13 @@
 - `clickButtons(name='')`：页面全部 button，`name===''` 或 textContent includes(name) 时派发可冒泡 click。
 
 ## 5. StorageUtils（全部静态；数据键与站点工作区约定对齐）
-- 键名域名分支：`sakura` = hostname 是 n.novelia.cc → `workspace-sakura`，否则 `sakura-workspace`；`gpt` → 恒 `workspace-gpt`。
+- 键名域名分支：`sakura` = hostname 是 n.novelia.cc → `workspace-sakura`，否则 `sakura-workspace`；`gpt` → 恒 `workspace-gpt`；`gptPipeline` → 恒 `workspace-gpt-pipeline`。
+- `keysForPath(pathname)`（2026-10-17 追加，对上游 `64d6f805` 的核对）：按路径返回该页 **worker 仓 / 任务仓** 两个键——`workspace/sakura` → `{workers: sakura, jobs: sakura}`；`workspace/gpt-pipeline`（BETA 页）→ `{workers: gptPipeline, jobs: gpt}`；`workspace/gpt` → `{workers: gpt, jobs: gpt}`；其它路径 → `null`（不改动任何仓）。上游 BETA 页就是「worker 读 pipeline 仓、任务队列与老工作区共用 `workspace-gpt`」，证据见 `docs/upstream-sync.md` ②。
 - `_getData(key)`：JSON.parse 失败 → console.error + **移除损坏键**；返回结构永远补齐 `{workers:[], jobs:[], uncompletedJobs:[]}` 三个数组字段。
 - `_setData(key, data)`：序列化写回 + 派发合成 `StorageEvent`（带 key/newValue/url/storageArea）——站点页与同页监听者靠它感知变更。
-- `update()`：pathname 含 workspace/sakura → sakura 键、含 workspace/gpt → gpt 键，其他路径 no-op；内容读出再写回（等价于一次归一化 round-trip）。由主循环在 href 变化时调用。
+- `update()`：取 `keysForPath(pathname)`；`null` → no-op；否则**先写 workers 仓**，与 jobs 仓不同时**再写 jobs 仓**（内容读出再写回，等价于一次归一化 round-trip）。由主循环在 href 变化时调用。
 - `addSakuraWorker(id, endpoint, amount=null, prevSegLength=500, segLength=500)`：amount null/-1 → 单个 `id`；否则 `id+1..id+amount` 逐个。worker 形状 `{id, endpoint, prevSegLength, segLength}`；**同 id 覆盖不新增**。
-- `addGPTWorker(id, model, endpoint, key, amount=null)`：同上，worker 形状 `{id, type:'api', model, endpoint, key}`。
+- `addGPTWorker(id, model, endpoint, key, amount=null, storeKey=null)`：同上，worker 形状 `{id, type:'api', model, endpoint, key}`；`storeKey` 缺省时按 `keysForPath` 取 workers 仓（BETA 页写 `workspace-gpt-pipeline`），显式传入则用传入值。
 - `removeWorker(key, id)`：删单个 id。`removeAllWorkers(key, exclude=[])`：**只保留 id 在 exclude 里的**。
 - `addJob(key, task, description, createAt=now)`：无条件追加 `{task, description, createAt}`。
 - `addJobs(key, jobs=[], createAt=now)`：按 task 与已有任务**去重**后追加（createAt 统一为调用时刻）。

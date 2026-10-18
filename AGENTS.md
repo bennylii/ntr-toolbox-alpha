@@ -15,6 +15,7 @@ debug-env/                     离线站点页面替身（无网络也能开发/
 tools/                         开发/测试脚本（.gen-dev/.engine-test/.run-suite/.run-daemon-stub/.probe-tm-hash-ws/.probe-empty-paragraphs/.lg-import-sitefmt/.e2e-daemon-sync/.e2e-token-sync/.e2e-*/.pack-*）
 docs/architecture.md           ★ 架构总览（组件图/数据模型/子系统/设计决策/测试矩阵）——新会话先读这个
 docs/cleanroom/                行为规格 spec-01..13（全部已实施）
+docs/upstream-sync.md          auto-novel 站点源码对齐基线（pin commit + 历次核对结论；「上游又更新了」先读这个再动手）
 docs/                          管线说明（html + png）
 skills/                        Agent 技能包（SKILL.md；daemon 运行时读取）
 keywordgacha/                  KeywordGacha 原项目（junction → C:\cache\keywordgacha；用户 fork 独立仓库，不入库）
@@ -68,6 +69,7 @@ README.md                     使用说明（命令/控制台/托盘/各专项�
 | 查版本 / 发布 | `CHANGELOG.md`；发布流程见下方「交付流程」 |
 | KeywordGacha 上游（术语管线的出处，含 auto-novel 术语表导出） | `keywordgacha/`（junction 挂载的独立 fork 仓库，不入本库） |
 | LinguaGacha 上游（调度/质检/处理链/提示词/LG 互通的借鉴出处） | `linguagacha/`（junction 挂载，pin `MANUAL_BUILD_v0.125.0`——spec-06..10 引用的就是这一版；源码在 `src/` 下） |
+| auto-novel 站点源码（站点契约出处）／「上游更新了」怎么核对 | `docs/upstream-sync.md`（对齐基线 pin + 权威文件清单 + 历次结论与处置 + 下次同步步骤；本地 clone `C:\Users\bennyli\auto-novel`，只 `git fetch` 不 merge） |
 | 和 LG 流程做同文对比（管线行为/提示词证据/复跑） | `tools/lg-compare/`（两侧可复跑驱动 + 请求全量落盘的 artifacts；结论在 `docs/lg-compare.md`） |
 
 ## 常用命令
@@ -131,6 +133,8 @@ CDP_PORT=9334 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8789
 
 ## 已知陷阱
 
+- **站点会话键换过**：2026-10 起是 `web-kit:session:v1`（`{token, adminMode}`，无旧键迁移），旧键 `auth-v2` 只作回落。读 token 一律走 `readSiteToken()`（user.js）/ `SITE_SESSION_SOURCES`，**别再写死 `auth-v2`**——写死会让 daemon 拿不到凭据、全线 401。核对结论见 `docs/upstream-sync.md` ①。
+- **BETA 页 worker 仓与任务仓不是一个键**：`/workspace/gpt-pipeline` 的 workers 在 `workspace-gpt-pipeline`、jobs 在 `workspace-gpt`（共用）；按路径取键一律用 `StorageUtils.keysForPath()`，别用「href 以 gpt 结尾」这类单键判定（`docs/upstream-sync.md` ②）。
 - **队列 init 的 2.5s 定时器**：初始化后约 2.5 秒会把 `running` 任务改成 `pending`（不受「自动续跑」设置门控），并可能触发 `runLoop()`。测试套件要么在内存里把「自动续跑」置 false 并还原，要么在开头 `await sleep(2800)` 等它先跑完。
 - **mock 的 429 会触发引擎冷却**（几秒内不再发请求），想要"失败"请用 `?fail=empty`（不冷却）。
 - **`Q.put()` 不会触发队列面板重绘**：写库后要 `await Q.openPanel(); await sleep(400);` 或 `refreshPanel()` 才能点到新行的按钮。

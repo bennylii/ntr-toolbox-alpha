@@ -2089,19 +2089,65 @@ await t('SiteClient 重试：耗尽即抛（不无限重试）', async () => {
   assert.equal(seq.calls(), 3, '1 次原始 + 2 次重试');
 });
 
-await t('SiteClient 重试：HTTP 状态错误不重试（401 保留 unauthorized 码，只发 1 次）', async () => {
-  const seq = flakyFetch([new Response('nope', { status: 401 })]);
+await t('SiteClient 重试：HTTP 状态错误不重试（裸 401 → forbidden 码，只发 1 次）', async () => {
+  // 上游 401 三义：只有带 WWW-Authenticate invalid_token 的才算凭据问题（见下一条），裸 401 按权限/封禁
+  const seq = flakyFetch([new Response('无权限', { status: 401 })]);
   const c = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: seq.fn, retries: 3, retryDelayMs: 1 });
-  await assert.rejects(() => c.getNovel('s', 'n'), (e) => e.code === 'unauthorized');
+  await assert.rejects(() => c.getNovel('s', 'n'), (e) => e.code === 'forbidden');
   assert.equal(seq.calls(), 1);
 });
 
-await t('SiteClient 重试：写术语表 PUT 传输失败重试后成功（内容幂等）', async () => {
+await t('SiteClient 重试：写术语表 PUT 传输失败重试后成功', async () => {
   const seq = flakyFetch([netErr, new Response('', { status: 200 })]);
   const c = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: seq.fn, retries: 2, retryDelayMs: 1 });
   const ok = await c.putGlossaryRaw({ kind: 'web', providerId: 'syosetu', novelId: 'n1' }, { a: 'b' });
   assert.equal(ok, true);
   assert.equal(seq.calls(), 2);
+});
+
+await t('SiteClient：术语表 PUT「内容没变」400（修改为空 / 术语表没有改变）按成功处理', async () => {
+  const web = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: async () => new Response('修改为空', { status: 400 }), retries: 0 });
+  assert.equal(await web.putGlossaryRaw({ kind: 'web', providerId: 's', novelId: 'n1' }, { a: 'b' }), true);
+  const wk = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: async () => new Response('术语表没有改变', { status: 400 }), retries: 0 });
+  assert.equal(await wk.putGlossaryRaw({ kind: 'wenku', novelId: 'w1' }, { a: 'b' }), true);
+  // 其它 400 仍是失败（别把真错误吞掉）
+  const other = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: async () => new Response('术语表条目过长', { status: 400 }), retries: 0 });
+  await assert.rejects(() => other.putGlossaryRaw({ kind: 'web', providerId: 's', novelId: 'n1' }, { a: 'b' }), /HTTP 400/);
+});
+
+await t('SiteClient：401 带 WWW-Authenticate invalid_token → unauthorized（凭据问题，走 need-auth）', async () => {
+  const res = new Response('Token不合法或者过期', { status: 401, headers: { 'www-authenticate': 'Bearer error="invalid_token"' } });
+  const c = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: async () => res.clone(), retries: 0 });
+  await assert.rejects(() => c.getNovel('s', 'n1'), (e) => e.code === 'unauthorized' && /重新同步凭据/.test(e.message));
+});
+
+await t('SiteClient：401 不带该头 → forbidden（封禁/权限不足，不误导去重同步凭据）', async () => {
+  const c = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: async () => new Response('无权限', { status: 401 }), retries: 0 });
+  await assert.rejects(() => c.getNovel('s', 'n1'), (e) => e.code === 'forbidden' && /无权限/.test(e.message) && /30 天/.test(e.message));
+});
+
+await t('SiteClient：401 裸 Bearer 挑战（缺 Authorization 头的变体）也算 unauthorized', async () => {
+  const res = new Response('Token不合法或者过期', { status: 401, headers: { 'www-authenticate': 'Bearer' } });
+  const c = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: async () => res.clone(), retries: 0 });
+  await assert.rejects(() => c.getNovel('s', 'n1'), (e) => e.code === 'unauthorized' && /重新同步凭据/.test(e.message));
+});
+
+await t('mock 保真：两条 401 车道经真实 HTTP 分流（mock-token-bad → unauthorized / mock-forbidden → forbidden）', async () => {
+  const bad = new SiteClient({ origin: MOCK, token: 'x', engine, retries: 0 });
+  await assert.rejects(() => bad.getNovel('mock', 'mock-token-bad'), (e) => e.code === 'unauthorized' && /重新同步凭据/.test(e.message));
+  const forb = new SiteClient({ origin: MOCK, token: 'x', engine, retries: 0 });
+  await assert.rejects(() => forb.getNovel('mock', 'mock-forbidden'), (e) => e.code === 'forbidden' && /无权限/.test(e.message));
+});
+
+await t('mock 保真：术语表 PUT 内容未变 → 400，客户端按成功处理（真实站点语义）', async () => {
+  const key = `web:mock/mock-import-put-${RUN}`;
+  store.upsertBook({ key, kind: 'web', providerId: 'mock', novelId: `mock-import-put-${RUN}`, origin: MOCK, title: '' });
+  const client = makeClient(store.getBook(key));
+  const glossary = { 'アリス': '爱丽丝' };
+  assert.equal(await client.putGlossaryRaw(store.getBook(key), glossary), true);
+  assert.equal(await client.putGlossaryRaw(store.getBook(key), glossary), true, '第二次同内容 → 400「修改为空」也算成功');
+  const put = await fetch(`${MOCK}/__stats`).then((r) => r.json());
+  assert.deepEqual(put.lastGlossaryPut.body, glossary);
 });
 
 console.log(`\n通过 ${pass}，失败 ${fail}`);

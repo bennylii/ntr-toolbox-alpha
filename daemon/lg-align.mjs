@@ -108,6 +108,10 @@ export function looksLikeSiteFormat(lines) {
 // （随后 verifyImport 的空/非空模式校验会把它判成不可提交，只跳过这一章）。
 const MISSING_TRANSLATION_MARKER = /^(?:(?:百度|有道|GPT|Sakura)翻译缺失。|该章节缺失。|\/\/\s*该分段翻译缺失。)$/;
 export const isMissingTranslationMarker = (line) => MISSING_TRANSLATION_MARKER.test(String(line == null ? '' : line).trim());
+
+// 文库没有整本原文导出（站点禁用 mode=jp、下载逐卷、导出无标题块结构）——站点格式自动对齐对它不成立
+const WENKU_NO_SITE_EXPORT = '文库小说没有整本原文导出接口（站点禁用 mode=jp，下载按卷）——文库请用本工具「导出原文」得到的契约格式 txt 导入';
+
 // 站点格式译文 → 契约行数组。逐章 sha1 硬校验 + 逐段空/非空模式校验，任一章不过即失败（宁可拒绝，不导错位数据）。
 // 返回 { ok:true, lines, chapters:[{chapterId,title,count,fileStart,titlePos,untranslated}], untranslated }
 //    | { ok:false, reason }
@@ -122,29 +126,66 @@ export function convertSiteFormat({ zhLines, jpLines, manifest }) {
   const chapters = [];
   const lines = [];
   let untranslated = 0;
+  let zhDrift = 0;   // 译文相对原文累计短掉的行数（缺译标记章造成）
   for (const entry of entries) {
-    if (!/^#\s/.test(String(jp[pos] ?? ''))) {
+    if (!/^#\s/.test(jp[pos] ?? '')) {
       return fail(`清单第 ${entry.chapterId} 章（${entry.title || ''}）前找不到标题行（站点原文与清单不同步？）`);
     }
-    const titlePos = pos;
-    pos += 2;                       // 标题行 + 紧随其后的结构空行
-    let hit = -1;                   // 规则偏移；卷/分组标题顶掉两行时在 ±2 窗口内找回
-    for (const cand of [pos, pos - 1, pos + 1, pos - 2, pos + 2]) {
-      if (cand < 0) continue;
-      const block = jp.slice(cand, cand + entry.count);
-      if (block.length === entry.count && sha1(block.join('\n')) === entry.jpSha1) { hit = cand; break; }
+    // 定位本章正文：标题行本身可能被卷/分组标题顶掉（它们也占一个「# 标题」块但没有章节条目），
+    // 且上游 c11cdbfe 起标题前还会多两个空行——固定偏移与 ±2 窗口都会失配。
+    // 改成：逐个标题试，在「本标题到下一个标题之间」向前扫到原文块 sha1 命中为止（不跨块）。
+    let titlePos = -1;
+    let hit = -1;
+    while (pos < jp.length) {
+      let next = pos + 1;
+      while (next < jp.length && !/^#\s/.test(jp[next])) next += 1;
+      const bound = Math.min(next, jp.length);
+      for (let cand = pos + 1; cand + entry.count <= bound; cand += 1) {
+        const block = jp.slice(cand, cand + entry.count);
+        if (block.length === entry.count && sha1(block.join('\n')) === entry.jpSha1) { titlePos = pos; hit = cand; break; }
+      }
+      if (hit >= 0) break;
+      pos = next;   // 这个标题不是本章（卷/分组标题），换下一个
     }
     if (hit < 0) return fail(`清单第 ${entry.chapterId} 章（${entry.title || ''}）原文块对不上（站点原文已更新，或文件与导出时不是同一份）`);
-    if (zh.length < hit + entry.count) return fail(`译文文件行数不足（第 ${entry.chapterId} 章要到第 ${hit + entry.count} 行，实有 ${zh.length} 行）`);
     const jpBlock = jp.slice(hit, hit + entry.count);
-    const zhBlock = zh.slice(hit, hit + entry.count);
+    // 译文侧的位置要减掉此前「缺译标记章」造成的行数差（标记章在译文里只占
+    // 「标记行 + 空行」两行，原文占 count 行），否则标记之后的每一章都会错位
+    const zhPos = hit - zhDrift;
+    // 站点可能为多个译者各写一行标记（parallel 导出）：逐行吃掉「标记 + 空行」
+    const consumeMarkerRun = (start) => {
+      let used = 0;
+      while (isMissingTranslationMarker(zh[start + used])) {
+        used += 1;
+        if (String(zh[start + used] ?? '').trim() === '') used += 1;
+      }
+      return used;
+    };
+    // 标记章整章只占「标记 + 结构空行」——正文首行恰好等于标记串时不能误判，故要求标记之后
+    // （跳过空行）紧跟另一个标记或下一个「# 标题」（EOF 也算）；否则按普通切片走（会走逐段模式校验，
+    // 对不上就整本拒绝，绝不会把真译文清成空章）。
+    const markerRunLooksReal = (start) => {
+      let after = start + consumeMarkerRun(start);
+      while (after < zh.length && String(zh[after]).trim() === '') after += 1;
+      return after >= zh.length || isMissingTranslationMarker(zh[after]) || /^#\s/.test(String(zh[after]));
+    };
+    const marked = isMissingTranslationMarker(zh[zhPos]) && markerRunLooksReal(zhPos);
+    let zhBlock;
+    if (marked) {
+      zhBlock = new Array(entry.count).fill('');
+      untranslated += jpBlock.filter((l) => String(l).trim() !== '').length;
+      zhDrift += entry.count - consumeMarkerRun(zhPos);
+    } else {
+      if (zh.length < zhPos + entry.count) return fail(`译文文件行数不足（第 ${entry.chapterId} 章要到第 ${zhPos + entry.count} 行，实有 ${zh.length} 行）`);
+      zhBlock = zh.slice(zhPos, zhPos + entry.count);
+    }
     for (let i = 0; i < entry.count; i += 1) {
       const jpEmpty = String(jpBlock[i] || '').trim() === '';
       const zhEmpty = String(zhBlock[i] || '').trim() === '';
-      if (jpEmpty !== zhEmpty) return fail(`清单第 ${entry.chapterId} 章第 ${i + 1} 段空/非空模式与原文不符（译文与站点原文不是同一份导出？）`);
+      if (!marked && jpEmpty !== zhEmpty) return fail(`清单第 ${entry.chapterId} 章第 ${i + 1} 段空/非空模式与原文不符（译文与站点原文不是同一份导出？）`);
       if (!jpEmpty && zhBlock[i] === jpBlock[i]) untranslated += 1;
     }
-    chapters.push({ chapterId: entry.chapterId, title: entry.title || '', count: entry.count, fileStart: hit, titlePos, untranslated });
+    chapters.push({ chapterId: entry.chapterId, title: entry.title || '', count: entry.count, fileStart: hit, titlePos, untranslated, missing: marked });
     for (const l of zhBlock) lines.push(l);
     pos = hit + entry.count;
     while (pos < jp.length && String(jp[pos]) === '') pos += 1;   // 章块之间的结构空行
@@ -155,7 +196,6 @@ export function convertSiteFormat({ zhLines, jpLines, manifest }) {
   return { ok: true, lines, chapters, untranslated };
 }
 
-// 站点整本原文（mode=jp）→ 行数组（站点格式译文的对齐基准；web 版可用，文库版站点没这个接口）
 // 按 `# 标题` 切块（块 = 标题行 + 其后直到下一个标题行的所有行）。站点整本导出（jp/zh 两侧）与
 // 「折叠空行版」译文都用它定位章节；块序号在两侧一一对应（卷/分组标题自身也占一块）。
 // 返回 [{ title, titlePos, lines }]
@@ -238,7 +278,15 @@ export function convertSiteFormatLoose({ zhLines, jpLines, manifest }) {
   }
   return { ok: true, lines, chapters, untranslated, blankCollapsed: true };
 }
+
+// 站点整本原文（mode=jp）→ 行数组（站点格式译文的对齐基准）
+// 只有 web 有这个接口：文库对 mode=jp 直接抛「文库小说不允许日语下载」，下载也是逐卷的
+// （zh / zh-jp / jp-zh，见 docs/upstream-sync.md ⑤），而且文库 txt 没有标题与头部、逐行正文，
+// 连「块序号一一对应」的前提都不成立——所以文库走契约格式（导出原文 → LG → 导入）
 export async function fetchSiteExportLines(client, book) {
+  if (book.kind !== 'web') {
+    throw new Error(WENKU_NO_SITE_EXPORT);
+  }
   const q = new URLSearchParams({ mode: 'jp', translationsMode: 'parallel', type: 'txt', filename: `jp.${book.novelId}.txt` });
   return splitResultLines(await client.getText(`/api/novel/${book.providerId}/${book.novelId}/file?${q}`));
 }
@@ -257,6 +305,10 @@ export async function alignLgResult({ client, book, manifest, resultLines, log =
   }
   if (lines.length === (manifest.linesTotal || 0)) return { lines, converted: false, convertMode: '', note: '' };
   if (!looksLikeSiteFormat(lines)) return { lines, converted: false, convertMode: '', note: '' };
+  // 文库没有整本原文导出接口（站点禁用 mode=jp）——这条路对它不成立，直接失败，不空转退避重试
+  if (book && book.kind && book.kind !== 'web') {
+    return { lines, converted: false, convertMode: '', note: '', alignError: WENKU_NO_SITE_EXPORT };
+  }
   const total = Math.max(1, Math.floor(Number(rounds) || 1));
   let lastError = '';
   for (let round = 1; round <= total; round += 1) {
@@ -294,7 +346,10 @@ export async function verifyImport({ resultLines, manifest, getChapter, authRetr
   const total = manifest.linesTotal || 0;
   if (lines.length !== total) {
     // 文库没有整本原文导出接口，站点格式那条自动对齐路径对它不成立——直接说清正确来路，别让用户对着「行数不符」猜
-    return { ok: false, globalError: `行数不符：结果 ${lines.length} 行，清单 ${total} 行（行号无法对齐，拒绝导入）`, chapters: [], untranslated: 0, okCount: 0, total: (manifest.chapters || []).length };
+    const wenkuHint = ((manifest.book && manifest.book.kind) || '') === 'wenku'
+      ? '（若是站点导出的文库 txt：站点对文库禁用 mode=jp、下载按卷且未译章写成「// 该分段翻译缺失。」——请改用本工具「导出原文」得到的契约格式 txt）'
+      : '';
+    return { ok: false, globalError: `行数不符：结果 ${lines.length} 行，清单 ${total} 行（行号无法对齐，拒绝导入）${wenkuHint}`, chapters: [], untranslated: 0, okCount: 0, total: (manifest.chapters || []).length };
   }
   const out = [];
   let untranslated = 0;
@@ -333,12 +388,18 @@ export async function verifyImport({ resultLines, manifest, getChapter, authRetr
       } else if (sha1(jp.join('\n')) !== entry.jpSha1) {
         reason = '站点原文与导出时不一致（源站更新/漂移）';
       } else {
+        let dstAllEmpty = true;
+        let srcHasContent = false;
         for (let i = 0; i < entry.count; i += 1) {
           const srcEmpty = String(jp[i] || '').trim() === '';
           const dstEmpty = String(range[i] || '').trim() === '';
+          if (!dstEmpty) dstAllEmpty = false;
+          if (!srcEmpty) srcHasContent = true;
           if (srcEmpty !== dstEmpty) { reason = `第 ${entry.start + i + 1} 行空/非空模式不一致（疑似行错位）`; break; }
           if (!srcEmpty && range[i] === jp[i]) untranslated += 1;
         }
+        // 整章都没译文（站点导出里就是一行「X翻译缺失。」占位）：说清楚，别报成行错位
+        if (reason && dstAllEmpty && srcHasContent) reason = '该章没有译文（站点导出里是「翻译缺失」标记），跳过上传';
       }
     }
     const ok = reason === '';

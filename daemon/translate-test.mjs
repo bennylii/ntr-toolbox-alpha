@@ -275,4 +275,41 @@ await t('translateSegment：首轮与补发请求都带上下文（③ 补发也
   assert.ok(users[1].includes('#1:b'), '补发只含缺失行（重编号）');
 });
 
+console.log('== 站点客户端：文库 translate-v2 字段归一（glossaryId → glossaryUuid） ==');
+await t('文库：未译章（上游省略键）判 fresh、已译章带 uuid、书级 glossaryId 作为当前版本', async () => {
+  const { SiteClient } = await import(pathToFileURL(path.join(here, 'site-client.mjs')).href);
+  const { TranslationPipeline } = await import(pathToFileURL(path.join(here, 'translate-pipeline.mjs')).href);
+  const json = (obj) => new Response(JSON.stringify(obj), { status: 200, headers: { 'content-type': 'application/json' } });
+  const fetchImpl = async (url) => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname === '/api/wenku/wk1') return json({ volumeJp: [{ volumeId: 'v1' }, { volumeId: 'v2' }] });
+    if (pathname === '/api/wenku/wk1/translate-v2/gpt/v1') {
+      // 真实文库形状：书级 glossaryId + 逐章 glossaryId；未译章（c2）上游 explicitNulls=false → 键被省略
+      return json({ glossaryId: 'g-current', toc: [{ chapterId: 'c1', glossaryId: 'g-old' }, { chapterId: 'c2' }] });
+    }
+    if (pathname === '/api/wenku/wk1/translate-v2/gpt/v2') {
+      return json({ glossaryId: 'g-current', toc: [{ chapterId: 'c3', glossaryId: 'g-current' }] });
+    }
+    return new Response('', { status: 404 });
+  };
+  const client = new SiteClient({ origin: 'http://site', token: 't', fetchImpl, retries: 0 });
+  const tasks = await client.getTranslateTasks({ kind: 'wenku', novelId: 'wk1' }, 'gpt');
+  assert.equal(tasks.length, 2);
+  assert.equal(tasks[0].volumeId, 'v1');
+  assert.equal(tasks[0].glossaryUuid, 'g-current', '书级 glossaryId 当作当前术语表版本');
+  assert.equal(tasks[0].toc[0].glossaryUuid, 'g-old');
+  assert.equal(tasks[0].toc[1].glossaryUuid, undefined, '未译章保持「无键」= fresh');
+
+  const p = new TranslationPipeline({ options: {} });
+  const normal = p.planTargets(tasks[0].toc, { glossaryUuid: tasks[0].glossaryUuid, volumeId: 'v1', level: 'normal' });
+  assert.deepEqual(normal.map((x) => x.chapterId), ['c2'], 'normal 档只翻没翻过的');
+  const expire = p.planTargets(tasks[0].toc, { glossaryUuid: tasks[0].glossaryUuid, volumeId: 'v1', level: 'expire' });
+  assert.deepEqual(expire.map((x) => x.chapterId), ['c1', 'c2'], 'expire 档把用旧术语表翻过的也算上');
+  const all = p.planTargets(tasks[0].toc, { glossaryUuid: tasks[0].glossaryUuid, volumeId: 'v1', level: 'all' });
+  assert.deepEqual(all.map((x) => x.chapterId), ['c1', 'c2']);
+  const v2 = p.planTargets(tasks[1].toc, { glossaryUuid: tasks[1].glossaryUuid, volumeId: 'v2', level: 'expire' });
+  assert.deepEqual(v2.map((x) => x.chapterId), [], '术语表没变过的章不进 expire 档');
+});
+
 console.log(`\n通过 ${pass}，失败 ${fail}`);
+if (fail > 0) process.exit(1);

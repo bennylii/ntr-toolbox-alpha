@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { buildSourceExport, manifestOf, splitResultLines, verifyImport, convertSiteFormat, convertSiteFormatLoose, splitBlocks, looksLikeSiteFormat, alignLgResult, applyImportReport, verifySubmitted, manifestFingerprint, chapterContentSha, createLgImportRunner, createLgReadbackRunner, fetchSiteExportLines, LG_IMPORT_STATE_KEY, MANIFEST_VERSION } from './lg-align.mjs';
+import { buildSourceExport, manifestOf, splitResultLines, verifyImport, convertSiteFormat, convertSiteFormatLoose, splitBlocks, looksLikeSiteFormat, alignLgResult, applyImportReport, verifySubmitted, manifestFingerprint, chapterContentSha, createLgImportRunner, createLgReadbackRunner, fetchSiteExportLines, isMissingTranslationMarker, LG_IMPORT_STATE_KEY, MANIFEST_VERSION } from './lg-align.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -124,14 +124,20 @@ await t('章节获取失败 → 该章 ✗ 且不上传', async () => {
 
 // ---- 站点导出格式（mode=jp）自动对齐 ----
 // 站点格式夹具：头部 + ############ + 简介，之后每章 `# 标题` + 空行 + 段落，章块之间 3 行结构空行；
-// 开头额外放一个没有章节条目的「卷标题」占两行（真实站点导出里就是这样，靠 ±2 偏移窗口兜）
+// 开头额外放一个没有章节条目的「卷标题」占两行（真实站点导出里就是这样）
+// leadBlanks：上游 c11cdbfe 起每个 toc 项标题前先写两个空行（auto-novel 提交 11fbbb9f）；
+//            旧导出没有这个前缀，两种都必须能对齐（站点没换版本时用户手里的旧文件照样能用）
 const SITE_HEAD = ['书名', '', '作者[mock]', '', '标签 / 测试 /', '总计: 3 / GPT: 3', '', '############', '简介一句。', '', '', ''];
-const siteFormat = (paragraphsOf, groups = []) => {
+const siteFormat = (paragraphsOf, groups = [], opts = {}) => {
+  const lead = opts.leadBlanks === undefined ? 2 : opts.leadBlanks;
+  const missing = opts.missing || [];
   const lines = [...SITE_HEAD];
+  const titleOf = (text) => { for (let i = 0; i < lead; i += 1) lines.push(''); lines.push(text, ''); };
   for (const ch of CHAPTERS) {
-    if (groups.includes(ch.chapterId)) lines.push(`# 卷 ${ch.chapterId}`, '');
-    lines.push(`# ${ch.title}`, '');
-    for (const p of paragraphsOf(ch)) lines.push(p);
+    if (groups.includes(ch.chapterId)) titleOf(`# 卷 ${ch.chapterId}`);
+    titleOf(`# ${ch.title}`);
+    if (missing.includes(ch.chapterId)) lines.push('GPT翻译缺失。', '');
+    else for (const p of paragraphsOf(ch)) lines.push(p);
     lines.push('', '', '');
   }
   return lines;
@@ -154,11 +160,12 @@ await t('转换：头部/卷标题/结构空行都不误伤，输出行数=清�
   assert.deepEqual(conv.chapters.map((c) => [c.chapterId, c.count]), [['t1', 6], ['t2', 4], ['t3', 3]]);
   // 折出的契约行 = 契约格式的译文行（逐行等价）
   assert.deepEqual(conv.lines, translate(splitResultLines(BUILT.text)));
-  // 章块起点单调递增；卷标题占两行 → 该章靠 ±2 偏移窗口兜回
+  // 章块起点单调递增；卷/分组标题占位时本章靠「块内 sha1 扫描」找回，标题记的是本章自己的标题行
   const starts = conv.chapters.map((c) => c.fileStart);
   assert.deepEqual(starts, [...starts].sort((a, b) => a - b), JSON.stringify(starts));
   const t2 = conv.chapters.find((c) => c.chapterId === 't2');
-  assert.equal(t2.fileStart, t2.titlePos + 4, JSON.stringify(t2));
+  assert.equal(jp[t2.titlePos], '# 章 二', JSON.stringify(t2));
+  assert.equal(t2.fileStart, t2.titlePos + 2, JSON.stringify(t2));
 });
 await t('转换：译文块空/非空模式与原文不符 → 明确拒绝（不输出错位数据）', () => {
   const jp = siteFormat((ch) => ch.paragraphs);
@@ -264,6 +271,98 @@ await t('convertSiteFormatLoose：原文块对不上（站点已更新）→ 拒
   assert.equal(conv.ok, false, JSON.stringify(conv));
   assert.ok(/t3/.test(conv.reason), conv.reason);
 });
+await t('格式代差：上游新增「标题前两空行」前后都能对齐（严格模式块内扫描，不依赖固定偏移）', () => {
+  const jpOld = siteFormat((ch) => ch.paragraphs, ['t2'], { leadBlanks: 0 });
+  const zhOld = siteFormat((ch) => translate(ch.paragraphs), ['t2'], { leadBlanks: 0 });
+  const old = convertSiteFormat({ zhLines: zhOld, jpLines: jpOld, manifest: MANIFEST });
+  assert.equal(old.ok, true, JSON.stringify(old));
+  assert.deepEqual(old.lines, translate(splitResultLines(BUILT.text)));
+  const jpNew = siteFormat((ch) => ch.paragraphs, ['t2'], { leadBlanks: 2 });
+  const zhNew = siteFormat((ch) => translate(ch.paragraphs), ['t2'], { leadBlanks: 2 });
+  const neu = convertSiteFormat({ zhLines: zhNew, jpLines: jpNew, manifest: MANIFEST });
+  assert.equal(neu.ok, true, JSON.stringify(neu));
+  assert.deepEqual(neu.lines, translate(splitResultLines(BUILT.text)));
+});
+await t('缺译标记（web「GPT翻译缺失。」）：整章铺空行，其余章照常对齐（严格模式）', () => {
+  const jp = siteFormat((ch) => ch.paragraphs, ['t2']);
+  const zh = siteFormat((ch) => translate(ch.paragraphs), ['t2'], { missing: ['t2'] });
+  const conv = convertSiteFormat({ zhLines: zh, jpLines: jp, manifest: MANIFEST });
+  assert.equal(conv.ok, true, JSON.stringify(conv));
+  const t2 = conv.chapters.find((c) => c.chapterId === 't2');
+  assert.equal(t2.missing, true, JSON.stringify(t2));
+  assert.equal(t2.untranslated, 3, 't2 的 3 个非空段都算未译');
+  const rebuilt = conv.lines.slice(BUILT.chapters[1].start, BUILT.chapters[1].start + BUILT.chapters[1].count);
+  assert.deepEqual(rebuilt, ['', '', '', ''], JSON.stringify(rebuilt));
+  assert.deepEqual(conv.lines.slice(0, 6), translate(CHAPTERS[0].paragraphs));
+});
+await t('缺译标记：折叠空行版（宽松模式）同样识别', () => {
+  const jp = siteFormat((ch) => ch.paragraphs, ['t2']);
+  const zh = collapseBlanks(siteFormat((ch) => translate(ch.paragraphs), ['t2'], { missing: ['t3'] }));
+  const conv = convertSiteFormatLoose({ zhLines: zh, jpLines: jp, manifest: MANIFEST });
+  assert.equal(conv.ok, true, JSON.stringify(conv));
+  const t3 = conv.chapters.find((c) => c.chapterId === 't3');
+  assert.equal(t3.missing, true, JSON.stringify(t3));
+  assert.equal(conv.untranslated, 2);
+  assert.deepEqual(conv.lines.slice(10), ['', '', '']);
+});
+await t('缺译标记：只有标记行才算空章（正文里出现「翻译缺失」字样不误判）', () => {
+  const jp = siteFormat((ch) => ch.paragraphs);
+  const zh = siteFormat((ch) => (ch.chapterId === 't1' ? ['これでGPT翻译缺失。の話は終わり。', ...translate(ch.paragraphs).slice(1)] : translate(ch.paragraphs)));
+  const conv = convertSiteFormat({ zhLines: zh, jpLines: jp, manifest: MANIFEST });
+  assert.equal(conv.ok, true, JSON.stringify(conv));
+  assert.equal(conv.chapters.find((c) => c.chapterId === 't1').missing, false);
+  assert.equal(conv.untranslated, 0);
+});
+await t('缺译标记：正文首行恰好等于标记串但后面有真译文 → 不误判（后瞻：标记后必须紧跟标记或标题）', () => {
+  const jp = siteFormat((ch) => ch.paragraphs, ['t2']);
+  const t2Lines = ['GPT翻译缺失。', ...translate(CHAPTERS[1].paragraphs).slice(1)];
+  const zh = siteFormat((ch) => (ch.chapterId === 't2' ? t2Lines : translate(ch.paragraphs)), ['t2']);
+  const conv = convertSiteFormat({ zhLines: zh, jpLines: jp, manifest: MANIFEST });
+  assert.equal(conv.ok, true, JSON.stringify(conv));
+  const t2 = conv.chapters.find((c) => c.chapterId === 't2');
+  assert.equal(t2.missing, false, '不能当成缺译章（否则整章被清空并跳过上传）');
+  assert.equal(t2.untranslated, 0);
+  assert.deepEqual(conv.lines.slice(BUILT.chapters[1].start, BUILT.chapters[1].start + BUILT.chapters[1].count), t2Lines);
+  assert.deepEqual(conv.lines.slice(BUILT.chapters[2].start), translate(CHAPTERS[2].paragraphs), '后续章不受错误 zhDrift 影响');
+});
+await t('文库：整本原文导出不存在 → 明确报错、不发请求', async () => {
+  let calls = 0;
+  const client = { getText: async () => { calls += 1; return ''; } };
+  const book = { key: 'wenku:x', kind: 'wenku', novelId: 'x' };
+  await assert.rejects(() => fetchSiteExportLines(client, book), /文库小说没有整本原文导出接口/);
+  assert.equal(calls, 0, '不该发出必然 400 的请求');
+  const web = { key: 'web:mock/x', kind: 'web', providerId: 'mock', novelId: 'x' };
+  assert.deepEqual(await fetchSiteExportLines(client, web), []);
+  assert.equal(calls, 1);
+});
+await t('alignLgResult：文库命中站点格式 → 直接失败、不空转退避重试（0 请求、不等待）', async () => {
+  let calls = 0;
+  const client = { getText: async () => { calls += 1; return ''; } };
+  const book = { key: 'wenku:x', kind: 'wenku', novelId: 'x' };
+  const manifest = manifestOf(book, BUILT);
+  const t0 = Date.now();
+  const r = await alignLgResult({ client, book, manifest, resultLines: [...SITE_HEAD, '# 章 一', '', 'x'], rounds: 3, roundDelayMs: 2000 });
+  assert.equal(r.converted, false);
+  assert.ok(/文库小说没有整本原文导出接口/.test(r.alignError || ''), r.alignError);
+  assert.equal(calls, 0, '不该发请求');
+  assert.ok(Date.now() - t0 < 300, `不该按轮次退避等待（用了 ${Date.now() - t0}ms）`);
+});
+await t('verifyImport：文库行数不符 → 附上「请用导出原文的契约格式」提示', async () => {
+  const manifest = manifestOf({ key: 'wenku:x', kind: 'wenku', novelId: 'x' }, BUILT);
+  const r = await verifyImport({ resultLines: ['a'], manifest, getChapter: identityGet });
+  assert.equal(r.ok, false);
+  assert.ok(/行数不符/.test(r.globalError) && /该分段翻译缺失/.test(r.globalError), r.globalError);
+});
+await t('verifyImport：整章无译文（标记铺空）→ 只跳过该章，理由说清', async () => {
+  const jp = siteFormat((ch) => ch.paragraphs, ['t2']);
+  const zh = siteFormat((ch) => translate(ch.paragraphs), ['t2'], { missing: ['t2'] });
+  const conv = convertSiteFormat({ zhLines: zh, jpLines: jp, manifest: MANIFEST });
+  const r = await verifyImport({ resultLines: conv.lines, manifest: MANIFEST, getChapter: identityGet });
+  assert.equal(r.ok, false);
+  const t2 = r.chapters.find((c) => c.chapterId === 't2');
+  assert.ok(/没有译文/.test(t2.reason), t2.reason);
+  assert.equal(r.okCount, 2, JSON.stringify(r.chapters.map((c) => [c.chapterId, c.ok, c.reason])));
+});
 
 await t('alignLgResult：严格失败 → 自动回落折叠空行版（convertMode=loose）', async () => {
   const client = { getText: async () => siteFormat((ch) => ch.paragraphs, ['t2']).join('\n') };
@@ -300,6 +399,23 @@ await t('verifyImport：401 → 立即中止、needAuth、已校验章带回', a
   assert.ok(/401/.test(report.globalError), report.globalError);
   assert.equal(report.chapters.length, 1, '中止前只校验了第 1 章（不再逐章发无效请求）');
   assert.equal(report.okCount, 1);
+});
+await t('verifyImport：权限类 401（forbidden）→ 不当成凭据失效（不中止、不重试、报原由）', async () => {
+  let t2Calls = 0;
+  const report = await verifyImport({
+    resultLines: translate(splitResultLines(BUILT.text)),
+    manifest: MANIFEST,
+    getChapter: async (id) => {
+      if (id === 't2') { t2Calls += 1; const e = new Error('401 无权限：账号被限制或权限不足——术语表写入需 member 且注册满 30 天'); e.code = 'forbidden'; throw e; }
+      return { paragraphJp: chapterStore.get(id), glossaryId: GLOSSARY_ID };
+    },
+    authRetryAttempts: 2, authRetryDelayMs: 0,
+  });
+  assert.equal(report.needAuth, undefined, '权限问题不该触发 need-auth（重推凭据也没用）');
+  assert.equal(t2Calls, 1, '不该退避重试权限错误');
+  assert.equal(report.okCount, 2, '只跳过该章，其余照常');
+  const t2 = report.chapters.find((c) => c.chapterId === 't2');
+  assert.ok(/无权限/.test(t2.reason), t2.reason);
 });
 await t('verifyImport：401 抖动 → 退避重试后继续（不误判为凭据失效）', async () => {
   let first = true;
@@ -398,6 +514,21 @@ await t('verifySubmitted：本地文件既非契约也非站点格式 → global
   const r = await verifySubmitted({ client: readbackClient(siteZh), book: { key: 'web:mock/x', kind: 'web', providerId: 'mock', novelId: 'x' }, resultLines: ['随便几行', '不对'] });
   assert.equal(r.ok, false);
   assert.ok(/无法逐章比对/.test(r.globalError), r.globalError);
+});
+await t('verifySubmitted：两侧都是缺译标记但标记不同（百度 vs GPT）→ 如实报不一致（不折叠成空蒙混）', async () => {
+  const book = { key: 'web:mock/x', kind: 'web', providerId: 'mock', novelId: 'x' };
+  const siteZh = siteFormat((ch) => translate(ch.paragraphs), [], { missing: ['t2'] });
+  // 本地同结构，但 t2 写的是另一家的标记
+  const local = siteFormat((ch) => translate(ch.paragraphs));
+  local.splice(local.indexOf('# 章 二') + 2, 4, '百度翻译缺失。', '', '', '');
+  const r = await verifySubmitted({ client: readbackClient(siteZh), book, resultLines: local });
+  assert.equal(r.ok, false, JSON.stringify(r.mismatches));
+  assert.equal(r.okCount, 2);
+  assert.equal(r.mismatches[0].chapterId, 't2');
+  // 同标记（两侧都是「GPT翻译缺失。」）仍算一致
+  const r2 = await verifySubmitted({ client: readbackClient(siteZh), book, resultLines: siteZh });
+  assert.equal(r2.ok, true, JSON.stringify(r2.mismatches));
+  assert.equal(r2.okCount, 3);
 });
 
 console.log('== runner：断点续跑 / 401 need-auth ==');

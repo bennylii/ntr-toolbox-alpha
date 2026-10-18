@@ -41,6 +41,40 @@ try {
         && S.workspaceStoreKey('gptPipeline') === 'workspace-gpt-pipeline'
         && S.workspaceStoreKey('sakura') === 'sakura-workspace');
 
+    // ---------- B0. 页面 → 键的归属（BETA 的 worker 与任务队列分属两个键）----------
+    // 上游 auto-novel @c11cdbfe：GptPipelineWorkspace.vue 里 workerStore=gpt-pipeline、jobStore=translatorId('gpt')
+    const kfp = (p) => S.keysForPath(p);
+    check('键归属：/workspace/gpt → worker/jobs 都是 workspace-gpt',
+        kfp('/workspace/gpt').workers === 'workspace-gpt' && kfp('/workspace/gpt').jobs === 'workspace-gpt', kfp('/workspace/gpt'));
+    check('键归属：BETA 页 worker 在 workspace-gpt-pipeline、jobs 仍在 workspace-gpt',
+        kfp('/workspace/gpt-pipeline').workers === 'workspace-gpt-pipeline' && kfp('/workspace/gpt-pipeline').jobs === 'workspace-gpt', kfp('/workspace/gpt-pipeline'));
+    check('键归属：/workspace/sakura 两者同仓', kfp('/workspace/sakura').workers === S.sakura && kfp('/workspace/sakura').jobs === S.sakura, kfp('/workspace/sakura'));
+    check('键归属：非工作区页返回 null', kfp('/novel/syosetu/n1') === null, kfp('/novel/syosetu/n1'));
+
+    // BETA 页的 update()：两个仓都补齐数组，worker 只在 BETA 仓、jobs 只在老仓
+    const origPath = location.pathname;
+    setKey('workspace-gpt', { jobs: [{ task: 't1', description: 'd', createAt: 1 }] });
+    setKey('workspace-gpt-pipeline', { workers: [{ id: 'w-b', endpoint: 'http://x' }] });
+    history.pushState({}, '', '/workspace/gpt-pipeline');
+    await S.update();
+    const betaAfter = readKey('workspace-gpt-pipeline');
+    const legacyAfter = readKey('workspace-gpt');
+    check('BETA 页 update()：BETA 仓 workers 保持不变且数组补齐',
+        Array.isArray(betaAfter.workers) && betaAfter.workers.length === 1 && betaAfter.workers[0].id === 'w-b'
+        && Array.isArray(betaAfter.jobs) && Array.isArray(betaAfter.uncompletedJobs), betaAfter);
+    check('BETA 页 update()：老仓 jobs 不被清空（队列与老工作区共用）',
+        Array.isArray(legacyAfter.jobs) && legacyAfter.jobs.length === 1 && legacyAfter.jobs[0].task === 't1', legacyAfter);
+    history.pushState({}, '', origPath);
+
+    // addGPTWorker 的落库目标：显式 storeKey（BETA）vs 默认（老工作区）
+    await S.addGPTWorker('ntr-beta-w', 'm', 'http://e', 'k', null, S.gptPipeline);
+    const betaW = readKey('workspace-gpt-pipeline').workers.map((w) => w.id);
+    await S.addGPTWorker('ntr-legacy-w', 'm', 'http://e', 'k');
+    const legacyW = readKey('workspace-gpt').workers.map((w) => w.id);
+    check('addGPTWorker 写 BETA 仓时只进 workspace-gpt-pipeline',
+        betaW.includes('ntr-beta-w') && !legacyW.includes('ntr-beta-w'), { betaW, legacyW });
+    check('addGPTWorker 不给 storeKey 时仍进老工作区', legacyW.includes('ntr-legacy-w'), legacyW);
+
     // ---------- A. 导出结构与忠实性 ----------
     const gptStore = {
         workers: [

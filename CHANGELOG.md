@@ -6,6 +6,20 @@ All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 
 自 v0.8.0-alpha.2 之后的增量（均已合入 main，未打 tag）：
 
+### 上游同步：auto-novel `5fc49d30 → c11cdbfe`（2026-10-17，53 提交，8 项漂移处置）
+
+站点源码又动了一批。核对结论与逐条处置写进新文档 **`docs/upstream-sync.md`**（对齐基线 pin + 权威文件清单 + 下次同步步骤——「上游更新了」以后先读它）。本轮处置的 8 处：
+
+- **① 会话存储键变更（致命，很可能是 10-16 真站 401 的成因）**：站点删掉 `web/src/api/auth/session.ts`、改用外部包 `@novelia/web-kit`，会话键 `auth-v2` → **`web-kit:session:v1`**（值 `{token, adminMode}`，**无旧键迁移**）。原实现三处只读 `auth-v2` → 站点一部署就读不到 token、daemon 全线 401。修法：`user.js` 抽 `SITE_SESSION_SOURCES` + `readSiteToken()`（`web-kit:session:v1` → `auth-v2` → `auth.profile.token` 依次回落，返回 `{token, key}`），`initToken()` / `daemonReadToken()` / 站点自检条目三处全部改走它；自检与提示会写出**命中的是哪个键**，读不到时列全部三个键名。
+- **② BETA 页 worker 仓与任务仓分家**（上游 `64d6f805`）：`/workspace/gpt-pipeline` 的 worker 读 `workspace-gpt-pipeline`、任务队列与老工作区**共用 `workspace-gpt`**。原实现按「pathname 含 workspace/gpt」单键读写 → 队列对、**worker 写错仓**（BETA 页加的翻译器进了老工作区、pipeline 仓从不被 round-trip）。修法：`StorageUtils.keysForPath(pathname)` 返回 `{workers, jobs}`，`update()` 先写 workers 仓、不同再写 jobs 仓；`addGPTWorker` / 删除翻译器 / 清空任务各取自己那半（清空任务仍取 `workspace-gpt`——与老工作区共用，行为不变）。
+- **③ 站点导出格式：章标题前多两个空行**（上游 `11fbbb9f`，`makeTxt.kt` 的 `writeTocItemTitle()` 首行 `write("\n\n")`）：原「标题后固定偏移 + ±2 窗口」在新格式与卷/分组标题块下必然失配 → 改成**块作用域前向扫描**（在「本标题到下一个标题」之间逐位置试切 `count` 行、sha1 命中为止，标题偏移由命中反推），旧格式、新格式、卷标题块三种都对得上；mock 夹具同步改成新格式。
+- **④ 缺译标记章**：部分翻译的站点导出里，未译章只写一行标记（web `GPT翻译缺失。`/`百度|有道|Sakura翻译缺失。`、丢章 `该章节缺失。`、文库 `// 该分段翻译缺失。`）——原实现因「非空行数对不上」把**整本**拒掉。修法：识别标记（整行 trim 全等才算，正文里的「…翻译缺失。」不误判）→ 按清单 `count` 展开空行（严格模式另记 `zhDrift` 防后续章错位）→ 提交侧判「该章没有译文…跳过上传」，已译章照常导入；提交回读比对前双侧剥离孤立标记行。
+- **⑤ 文库「站点导出格式自动对齐」是死路（确认后删掉）**：服务端对文库 `mode=jp` 直接抛「文库小说不允许日语下载」、下载是**逐卷**端点（无整本）、导出无标题块结构且章序是 `sorted()`（toc 未排序）。原实现拼的 URL 既缺 `volumeId` 又用被禁的 mode，即便通了也对不上。修法：**不再发请求**，命中即报错提示改用本工具「导出原文」的契约格式 txt（`verifyImport` 的行数不符报告里也带该提示）。
+- **⑥ 文库 `translate-v2` 字段**：上游只返回 `{glossaryId, toc:[{chapterId, glossaryId?}]}`（`glossaryUuid`/`glossary`/标题是 web 专有）→ 文库上 `glossaryUuid` 恒空，`normal`/`expire` 档每次全量重翻。修法：`SiteClient` 文库分支归一字段（toc 项的 `glossaryId` → `glossaryUuid`、书级 `glossaryId` 作为当前版本、`glossary` 补 `{}`；未译章是**键缺失**而非 `null`，按 `=== undefined` 判定）。
+- **⑦ 术语表 PUT「内容没变 → 400」**：上游 web 返 `修改为空`、文库返 `术语表没有改变`。原注释「内容幂等」是错的 → 命中这两种文案按**幂等成功**处理（合并结果与站点一致是正常情形），其它 400 照旧抛错。
+- **⑧ 401 一码三义**：真 token 问题带 `WWW-Authenticate: Bearer error="invalid_token"`，封禁/权限不足（术语表写入需 member 且注册满 30 天）不带。修法：`SiteClient.#unauthorizedError` 按响应头分流——带 → `code='unauthorized'`（触发 need-auth 自愈）；不带 → `code='forbidden'`（不触发 need-auth、不中止不重试、按业务失败报原由）；`lg-align.mjs` 的 `isUnauthorized` 只认 `unauthorized`。
+
+测试：`lg-align-test` **49/0**（+11：新旧空行变体、卷标题块、标记章严格/宽松、标记后章不错位、非标记文本不误判、标记章跳过上传、文库 0 请求 + 提示、权限类 401、整行标记后瞻（正文首行恰为标记串不误判）、文库命中站点格式短路（0 请求、不空转退避）、回读双侧标记不同如实报不一致）、`daemon-test` **151/0**（+6：术语表 400 幂等、401 分类三例（`invalid_token` / 裸 `Bearer` / 不带该头）、mock 保真两条（401 车道经真实 HTTP 分流 / PUT 内容未变返 400），原「HTTP 状态错误不重试」用例改写为「裸 401 → forbidden 码」）、`translate-test` **25/0**（+1 文库字段归一 + `planTargets` 三档）、`engine-test` 98/0、`quality-test` 38/0、`proxy-test` 32/0；浏览器车道 `.e2e-daemon-sync.js` 23/23（+5 会话键回落链）、`.e2e-workspace-backup.js` 48/48（+8 BETA 双仓分写）、`.e2e-lg-gui.js` 51/51（契约 + 站点格式 + 回读三段，mock 车道）。mock 同步改严：导出夹具带新格式空行与 `GPT翻译缺失。` 标记章、文库 translate-v2 只回 `glossaryId`、术语表 PUT 内容未变返 400、新增两条 401 车道（带/不带 `WWW-Authenticate`）。文档：新增 `docs/upstream-sync.md`；spec-02（`keysForPath`/会话键）、spec-04（BETA worker/任务归属）、spec-10（PUT 400 幂等）、spec-11（会话键 + 401 分流）、spec-13（站点格式对齐/标记章/文库不适用）与 `docs/architecture.md`、`README.md`、`daemon/README.md`、`AGENTS.md` 同步更新。
 
 ### 用户脚本
 

@@ -8,10 +8,11 @@
 - 添加Sakura翻译器（whitelist `/workspace/sakura`）：设置 数量(number,5)/名称(string,'NTR translator ')/链接(string,'https://sakura-share.one')/bind。run → `StorageUtils.addSakuraWorker(名称, 链接, 数量)`。
 - 添加GPT翻译器（whitelist `/workspace/gpt`）：设置 数量/名称/模型('deepseek-chat')/链接('https://api.deepseek.com')/Key('sk-wait-for-input')/bind。run → `StorageUtils.addGPTWorker(名称, 模型, 链接, Key, 数量)`。
   - 注记（2026-10-12，对 site 源码 auto-novel 核对）：站点 `GptWorker` 已无 `type` 字段（`web/src/model/Translator.ts`，提交 `6a49aca6` 移除 web 模式），我们写入的 `type:'api'` 在站点侧被原样保留但忽略；`workspace-gpt-pipeline` 的 worker 另有 `concurrency`/`profile` 两个字段（我们只写基础字段，站点读时按默认值补）。
+  - 注记（2026-10-17，对 `64d6f805` 核对）：**BETA 页（`/workspace/gpt-pipeline`）的 worker 仓与任务仓不是一个键**——worker 读 `workspace-gpt-pipeline`、任务队列与老工作区共用 `workspace-gpt`。本模块在 BETA 页按 `StorageUtils.keysForPath(location.pathname).workers` 落 pipeline 仓（见 spec-02 §5）；`/workspace/gpt` 页两仓都是 `workspace-gpt`。删除翻译器（§2）与清空任务（对应模块）各取自己那半的键，不再用「href 以 gpt/sakura 结尾」单键判定。
 
 ## 2. 删除翻译器（whitelist `/workspace`）
 设置 确认删除(boolean,true)/排除(string,'共享,本机,AutoDL')/bind。run：
-- 排除按逗号拆分去空；按 `location.href` 以 `gpt`/`sakura` 结尾选工作区键，都不是 → 当前 workers 空。
+- 排除按逗号拆分去空；按 `location.href` 取 `StorageUtils.keysForPath(pathname)`，取不到 → 当前 workers 空；否则用其 `workers` 仓（BETA 页 = `workspace-gpt-pipeline`）。
 - 确认删除开且可删数>0 → `confirm('确定要删除 N 个翻译器吗？')`；拒绝 → warning『已取消删除』并 return。
 - 然后 gpt 分支 removeAllWorkers(gpt键, 排除) + success『已删除 GPT 翻译器』；sakura 分支同理『已删除 Sakura 翻译器』；两键都不是 → 静默。
 
@@ -47,7 +48,7 @@
    - `script.delay(10)`（不 await）；relaunch 真值 → `script.runModule('启动翻译器')`（即使 retry 按钮不存在也每轮触发）。
 
 ## 6. 清空任务（whitelist `/workspace/*`）
-设置 确认清空(true)/仅清空已完成(false)。run：按 pathname 含 workspace/sakura → sakura 键、workspace/gpt → gpt 键、否则 error『无法确定工作区类型』；仅清空已完成 → warning『仅清空已完成功能需配合网站API』直接 return（**未实现的死设置**）；确认清空开且任务>0 → `confirm('确定要清空 N 个任务吗？此操作不可恢复！')` 拒绝 → warning『已取消清空』；清空 jobs + success『已清空 N 个任务』。
+设置 确认清空(true)/仅清空已完成(false)。run：取 `StorageUtils.keysForPath(pathname)`，取不到 → error『无法确定工作区类型』；否则用其 `jobs` 仓（BETA 页 = `workspace-gpt`，与老工作区共用——所以这里**不变**，与 workers 仓分属两键）；仅清空已完成 → warning『仅清空已完成功能需配合网站API』直接 return（**未实现的死设置**）；确认清空开且任务>0 → `confirm('确定要清空 N 个任务吗？此操作不可恢复！')` 拒绝 → warning『已取消清空』；清空 jobs + success『已清空 N 个任务』。
 
 ## 7. 资料同步（whitelist `/workspace/*`，hidden）
 设置 bind。run 为空——上游未实现的占位模块，保持 no-op。
