@@ -56,4 +56,4 @@
 
 - 纯函数 `lg-align-test.mjs` 17 例（导出行映射、清单结构、解析容忍、全对齐、疑似未翻、三类拒绝、漂移、章失败 + 站点格式 7 例：识别/头部与卷标题不误伤/空行模式拒绝/sha1 漂移拒绝/行数符零请求/不像站点格式不转换/清单串项目 fatal）；
 - daemon-test「LG 导入」9 例（端点/上传白名单/校验/队列全流程/进度断言 + 站点格式两例：`/lg/verify` 自动对齐 3/3、`/run lg-import` 站点格式全量提交且 `stats.converted=true`）；
-- 浏览器 e2e `tools/.e2e-lg-gui.js`：mock 车道一把跑完（契约格式 + 站点格式自动对齐两段，43 项断言）；真机车道用 `window.__LG_GUI_TEST` 分阶段（`export/open/verify-start/verify/apply/await`）+ `node tools/cdp.mjs setfiles "<选择器>" <真实 txt>` 塞盘上文件，长流程不受单条 CDP 命令超时限制。
+- 浏览器 e2e `tools/.e2e-lg-gui.js`：mock 车道一把跑完（契约格式 + 站点格式自动对齐两段，51 项断言）；真机车道用 `window.__LG_GUI_TEST` 分阶段（`export/open/verify-start/verify/apply/await`）+ `node tools/cdp.mjs setfiles "<选择器>" <真实 txt>` 塞盘上文件，长流程不受单条 CDP 命令超时限制。**同书重复跑会全章「断点跳过」**（上传 0 / 跳过 N），`uploaded + skipped = 应提交章数` 仍成立，但「面板摘要显示上传 N」那类断言要换一本新 novelId 再跑。

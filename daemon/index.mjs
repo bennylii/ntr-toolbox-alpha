@@ -31,7 +31,7 @@ const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
 const { CheckPipeline, samplesToTsv } = await imp('check-pipeline.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
 const { parseBookUrl } = await imp('book-url.mjs');
-const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport, alignLgResult, exportBookSource, applyImportReport, createLgImportRunner } = await imp('lg-align.mjs');
+const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport, alignLgResult, exportBookSource, applyImportReport, createLgImportRunner, createLgReadbackRunner, readImportState } = await imp('lg-align.mjs');
 const { createAgentLlm } = await imp('agent-llm.mjs');
 const { createAgentLoop } = await imp('agent-loop.mjs');
 const { doingTool, askUserTool } = await imp('agent-tools.mjs');
@@ -74,7 +74,7 @@ function getWorkers() {
 
 // 出网代理：配置每次请求现读（控制台保存即生效）；站点 API 与两个模型池共用同一份配置
 const getProxy = () => store.getConfig('proxy');
-const proxyFetch = createProxyFetch({ getProxy });
+const proxyFetch = createProxyFetch({ getProxy, log: (m) => log.log(m) });
 
 function makeClient(book) {
   const origin = book.origin || store.getConfig('origin') || 'https://n.novelia.cc';
@@ -158,8 +158,9 @@ const checkPipeline = new CheckPipeline({ store, engine, makeClient, log });
 
 // Agent（助手池 = agentScheduler；与翻译池互不抢并发门）
 const lgImportRunner = createLgImportRunner({ store, makeClient, log });
+const lgReadbackRunner = createLgReadbackRunner({ store, makeClient, log });
 const jobQueue = createJobQueue({
-  resolveRunner: (job) => ({ glossary: glossaryPipeline, check: checkPipeline, translate: pipeline, 'lg-import': lgImportRunner }[job]),
+  resolveRunner: (job) => ({ glossary: glossaryPipeline, check: checkPipeline, translate: pipeline, 'lg-import': lgImportRunner, 'lg-readback': lgReadbackRunner }[job]),
   log,
 });
 // 技能双根：user（daemon/skills-user，面板/agent 沙箱可写，覆盖同名内置）优先于 builtin（repo skills/，只读）
@@ -496,6 +497,7 @@ switch (command) {
       manifest: ioManifest,
       getChapter: (chapterId, volumeId) => ioClient.getChapterTask(ioBook, chapterId, 'gpt', volumeId),
     });
+    if (ioReport.needAuth) { log.error(`${ioReport.globalError}——凭据重同步后重跑（GUI 的导入面板会按断点跳过已完成章）`); break; }
     if (ioReport.globalError) { log.error(ioReport.globalError); break; }
     for (const c of ioReport.chapters) {
       log.log(`  ${c.ok ? '✓' : '✗'} ${c.title || c.chapterId}（${c.count} 段）${c.ok ? '' : '：' + c.reason}`);
@@ -508,6 +510,10 @@ switch (command) {
     });
     for (const r of applied.results) {
       if (r.status === 'failed') log.error(`  提交失败：${r.title || r.chapterId}：${r.error}`);
+    }
+    if (applied.stopped === 'need-auth') {
+      log.error(`提交中断：401 未授权（本批已停止，已提交 ${applied.uploaded} 章）——凭据重同步后重跑；GUI 的导入面板会按断点跳过已完成章`);
+      break;
     }
     log.log(`提交完成：成功 ${applied.uploaded}，失败 ${applied.failed}，未过校验 ${ioReport.total - ioReport.okCount}`);
     break;
@@ -538,7 +544,7 @@ switch (command) {
     const cfgServe = store.getConfig('serve') || {};
     const port = Math.max(1, Number(flags.port) || Number(cfgServe.port) || 7331);
     try { fs.writeFileSync(path.join(here, '.serve-port'), String(port), 'utf8'); } catch { }
-    await startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler, queue: jobQueue, makeClient, engine, agentLoop, agentEvents, port, log, lgImportRunner });
+    await startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler, queue: jobQueue, makeClient, engine, agentLoop, agentEvents, port, log, lgImportRunner, lgReadbackRunner });
     log.log('serve 模式：Ctrl-C 退出');
     await new Promise(() => { });
   }

@@ -1,6 +1,9 @@
 // daemon/lg-align-test.mjs —— LG 对齐导入纯函数单测（无需 mock；getChapter 用桩）
 import assert from 'node:assert/strict';
-import { buildSourceExport, manifestOf, splitResultLines, verifyImport, convertSiteFormat, looksLikeSiteFormat, alignLgResult, MANIFEST_VERSION } from './lg-align.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { buildSourceExport, manifestOf, splitResultLines, verifyImport, convertSiteFormat, convertSiteFormatLoose, splitBlocks, looksLikeSiteFormat, alignLgResult, applyImportReport, verifySubmitted, manifestFingerprint, chapterContentSha, createLgImportRunner, createLgReadbackRunner, fetchSiteExportLines, LG_IMPORT_STATE_KEY, MANIFEST_VERSION } from './lg-align.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -204,6 +207,304 @@ await t('alignLgResult：清单属于别的项目 → fatal（不与当前书混
     manifest: { linesTotal: 1, chapters: [], book: { key: 'web:mock/y' } },
   });
   assert.ok(/不一致/.test(r.fatal || ''), JSON.stringify(r));
+});
+
+// ---- 折叠空行版站点导出译文（连续空行被并成 1 个）自动对齐 ----
+// 真实来路：站点「下载原文」经某些工具翻译后，连续空行被折叠 → 行数与站点原文不同构，
+// 严格模式（绝对行号切片）必然错位；宽松模式按块序号 + 非空行映射对齐。
+const collapseBlanks = (lines) => {
+  const out = [];
+  for (const l of lines) {
+    if (String(l).trim() === '' && out.length > 0 && String(out[out.length - 1]).trim() === '') continue;
+    out.push(l);
+  }
+  return out;
+};
+
+console.log('== 站点导出格式（折叠空行版）自动对齐 ==');
+await t('splitBlocks：按 # 标题切块、块序号与卷标题各占一块', () => {
+  const blocks = splitBlocks(['头', '# 卷一', '', '# 章 一', '', 'a', '', 'b', '', '', '', '# 章 二', '', 'c']);
+  assert.equal(blocks.length, 3);
+  assert.deepEqual(blocks.map((b) => b.title), ['卷一', '章 一', '章 二']);
+  assert.deepEqual(blocks[1].lines, ['', 'a', '', 'b', '', '', '']);
+  assert.equal(blocks[1].titlePos, 3);
+});
+await t('convertSiteFormatLoose：折叠空行译文 → 折回契约行（空段落回填、未翻计数）', () => {
+  const jp = siteFormat((ch) => ch.paragraphs, ['t2']);
+  const zh = collapseBlanks(siteFormat((ch) => translate(ch.paragraphs), ['t2']));
+  assert.ok(zh.length < jp.length, '夹具确实更短');
+  const strict = convertSiteFormat({ zhLines: zh, jpLines: jp, manifest: MANIFEST });
+  assert.equal(strict.ok, false, '严格模式应拒绝折叠空行版');
+  const conv = convertSiteFormatLoose({ zhLines: zh, jpLines: jp, manifest: MANIFEST });
+  assert.equal(conv.ok, true, JSON.stringify(conv));
+  assert.equal(conv.blankCollapsed, true);
+  assert.deepEqual(conv.lines, translate(splitResultLines(BUILT.text)));
+  assert.equal(conv.chapters.length, 3);
+  assert.equal(conv.chapters[0].count, 6);
+  assert.equal(conv.untranslated, 0);
+});
+await t('convertSiteFormatLoose：块数不一致 → 拒绝', () => {
+  const jp = siteFormat((ch) => ch.paragraphs, ['t2']);
+  const zh = collapseBlanks(siteFormat((ch) => translate(ch.paragraphs)));
+  const conv = convertSiteFormatLoose({ zhLines: zh, jpLines: jp, manifest: MANIFEST });
+  assert.equal(conv.ok, false, JSON.stringify(conv));
+  assert.ok(/块数不一致/.test(conv.reason), conv.reason);
+});
+await t('convertSiteFormatLoose：某章非空行数不符 → 拒绝并指出章节', () => {
+  const jp = siteFormat((ch) => ch.paragraphs, ['t2']);
+  const zh = collapseBlanks(siteFormat((ch) => (ch.chapterId === 't2' ? translate(ch.paragraphs).slice(1) : translate(ch.paragraphs)), ['t2']));
+  const conv = convertSiteFormatLoose({ zhLines: zh, jpLines: jp, manifest: MANIFEST });
+  assert.equal(conv.ok, false, JSON.stringify(conv));
+  assert.ok(/t2/.test(conv.reason) && /非空行数/.test(conv.reason), conv.reason);
+});
+await t('convertSiteFormatLoose：原文块对不上（站点已更新）→ 拒绝', () => {
+  const jp = siteFormat((ch) => (ch.chapterId === 't3' ? ch.paragraphs.map((p) => p + '！') : ch.paragraphs), ['t2']);
+  const zh = collapseBlanks(siteFormat((ch) => translate(ch.paragraphs), ['t2']));
+  const conv = convertSiteFormatLoose({ zhLines: zh, jpLines: jp, manifest: MANIFEST });
+  assert.equal(conv.ok, false, JSON.stringify(conv));
+  assert.ok(/t3/.test(conv.reason), conv.reason);
+});
+
+await t('alignLgResult：严格失败 → 自动回落折叠空行版（convertMode=loose）', async () => {
+  const client = { getText: async () => siteFormat((ch) => ch.paragraphs, ['t2']).join('\n') };
+  const book = { key: 'web:mock/x', kind: 'web', providerId: 'mock', novelId: 'x' };
+  const zh = collapseBlanks(siteFormat((ch) => translate(ch.paragraphs), ['t2']));
+  const r = await alignLgResult({ client, book, manifest: MANIFEST, resultLines: zh });
+  assert.equal(r.converted, true, JSON.stringify(r));
+  assert.equal(r.convertMode, 'loose');
+  assert.ok(/折叠空行版/.test(r.note), r.note);
+  assert.equal(r.sitefmt.blankCollapsed, true);
+  assert.deepEqual(r.lines, translate(splitResultLines(BUILT.text)));
+});
+await t('alignLgResult：严格模式命中时 convertMode=strict（宽松路径不介入）', async () => {
+  const client = { getText: async () => siteFormat((ch) => ch.paragraphs, ['t2']).join('\n') };
+  const book = { key: 'web:mock/x', kind: 'web', providerId: 'mock', novelId: 'x' };
+  const r = await alignLgResult({ client, book, manifest: MANIFEST, resultLines: siteFormat((ch) => translate(ch.paragraphs), ['t2']) });
+  assert.equal(r.converted, true, JSON.stringify(r));
+  assert.equal(r.convertMode, 'strict');
+});
+
+// ---- 401 收口 / 断点续跑钩子 / 提交后回读校验 ----
+console.log('== 401 收口与断点 ==');
+await t('verifyImport：401 → 立即中止、needAuth、已校验章带回', async () => {
+  const report = await verifyImport({
+    resultLines: translate(splitResultLines(BUILT.text)),
+    manifest: MANIFEST,
+    getChapter: async (id) => {
+      if (id === 't2') { const e = new Error('401 未授权：token 失效，请重新同步凭据'); e.code = 'unauthorized'; throw e; }
+      return { paragraphJp: chapterStore.get(id), glossaryId: GLOSSARY_ID };
+    },
+    authRetryAttempts: 0,
+  });
+  assert.equal(report.needAuth, true, JSON.stringify(report).slice(0, 240));
+  assert.ok(/401/.test(report.globalError), report.globalError);
+  assert.equal(report.chapters.length, 1, '中止前只校验了第 1 章（不再逐章发无效请求）');
+  assert.equal(report.okCount, 1);
+});
+await t('verifyImport：401 抖动 → 退避重试后继续（不误判为凭据失效）', async () => {
+  let first = true;
+  const report = await verifyImport({
+    resultLines: translate(splitResultLines(BUILT.text)),
+    manifest: MANIFEST,
+    getChapter: async (id) => {
+      if (id === 't2' && first) { first = false; const e = new Error('401 未授权'); e.code = 'unauthorized'; throw e; }
+      return { paragraphJp: chapterStore.get(id), glossaryId: GLOSSARY_ID };
+    },
+    authRetryAttempts: 2, authRetryDelayMs: 0,
+  });
+  assert.equal(report.ok, true, JSON.stringify(report.chapters.filter((c) => !c.ok)));
+  assert.equal(report.okCount, 3);
+  assert.equal(report.needAuth, undefined);
+});
+await t('applyImportReport：401 → 停止本批（stopped=need-auth），后续章不再发请求', async () => {
+  const uploadedIds = [];
+  const client = {
+    uploadChapter: async (book, id) => {
+      if (id === 't2') { const e = new Error('401 未授权'); e.code = 'unauthorized'; throw e; }
+      uploadedIds.push(id);
+    },
+  };
+  const chapters = ['t1', 't2', 't3'].map((id) => ({ chapterId: id, ok: true, glossaryId: 'g', paragraphsZh: [`z-${id}`], count: 1, volumeId: '' }));
+  const r = await applyImportReport(client, { kind: 'web' }, { chapters }, { authRetryAttempts: 0 });
+  assert.equal(r.stopped, 'need-auth', JSON.stringify(r));
+  assert.equal(r.uploaded, 1);
+  assert.deepEqual(uploadedIds, ['t1'], '401 后不再尝试后续章');
+  assert.equal(r.results.filter((x) => x.status === 'failed').length, 1);
+});
+await t('applyImportReport：onUploaded 逐章回调（断点落库钩子）', async () => {
+  const seen = [];
+  const client = { uploadChapter: async () => { } };
+  const chapters = ['t1', 't2'].map((id) => ({ chapterId: id, ok: true, glossaryId: 'g', paragraphsZh: [`z-${id}`], count: 1 }));
+  const r = await applyImportReport(client, {}, { chapters }, { onUploaded: (c) => seen.push(c.chapterId) });
+  assert.deepEqual(seen, ['t1', 't2']);
+  assert.equal(r.uploaded, 2);
+  assert.equal(r.stopped, '');
+});
+await t('manifestFingerprint / chapterContentSha：内容或清单变则 sha 变', () => {
+  const fp1 = manifestFingerprint(MANIFEST);
+  const fp2 = manifestFingerprint({ chapters: MANIFEST.chapters.map((c, i) => (i === 0 ? { ...c, count: c.count + 1 } : c)) });
+  assert.equal(fp1.length, 40);
+  assert.notEqual(fp1, fp2);
+  assert.equal(chapterContentSha(['a', '', 'b']), chapterContentSha(['a', '', 'b']));
+  assert.notEqual(chapterContentSha(['a', '', 'b']), chapterContentSha(['a', 'b', '']));
+  assert.equal(chapterContentSha(['a', null]), chapterContentSha(['a', '']));
+});
+
+console.log('== 提交后回读校验（本地 txt vs 站点译文） ==');
+const readbackClient = (siteZh) => ({
+  getBookZhText: async () => siteZh.join('\n'),
+  getTranslateTasks: async () => [{ volumeId: '', toc: CHAPTERS.map((c) => ({ chapterId: c.chapterId, titleJp: c.title })) }],
+});
+await t('verifySubmitted：站点格式本地文件 vs 站点译文 → 全一致', async () => {
+  const siteZh = siteFormat((ch) => translate(ch.paragraphs));
+  const r = await verifySubmitted({ client: readbackClient(siteZh), book: { key: 'web:mock/x', kind: 'web', providerId: 'mock', novelId: 'x' }, resultLines: siteZh });
+  assert.equal(r.ok, true, JSON.stringify(r.mismatches));
+  assert.equal(r.okCount, 3);
+  assert.equal(r.total, 3);
+  assert.equal(r.mode, 'site-format');
+  // 夹具的「译文」是【译】+原文（仍含假名）→ 假名残留计数应等于站点侧非空行数（指标本身工作）
+  assert.equal(r.kanaLines, 9);
+});
+await t('verifySubmitted：本地某章被改 → 只报该章不一致（带首差行）', async () => {
+  const siteZh = siteFormat((ch) => translate(ch.paragraphs));
+  const local = siteFormat((ch) => (ch.chapterId === 't2' ? translate(ch.paragraphs).map((l, i) => (i === 0 ? `【改】${l}` : l)) : translate(ch.paragraphs)));
+  const r = await verifySubmitted({ client: readbackClient(siteZh), book: { key: 'web:mock/x', kind: 'web', providerId: 'mock', novelId: 'x' }, resultLines: local });
+  assert.equal(r.ok, false);
+  assert.equal(r.okCount, 2);
+  assert.equal(r.mismatches.length, 1);
+  assert.equal(r.mismatches[0].chapterId, 't2');
+  assert.ok(r.mismatches[0].first && /【改】/.test(r.mismatches[0].first.local), JSON.stringify(r.mismatches[0]));
+});
+await t('verifySubmitted：契约格式（带清单）→ 逐章切片比对；缺行报不一致', async () => {
+  const siteZh = siteFormat((ch) => translate(ch.paragraphs));
+  const contract = translate(splitResultLines(BUILT.text));
+  const r = await verifySubmitted({ client: readbackClient(siteZh), book: { key: 'web:mock/x', kind: 'web', providerId: 'mock', novelId: 'x' }, resultLines: contract, manifest: MANIFEST });
+  assert.equal(r.mode, 'contract');
+  assert.equal(r.okCount, 3, JSON.stringify(r.mismatches));
+  const short = contract.slice();
+  short[0] = '【掉了一行】';
+  const r2 = await verifySubmitted({ client: readbackClient(siteZh), book: { key: 'web:mock/x', kind: 'web', providerId: 'mock', novelId: 'x' }, resultLines: short, manifest: MANIFEST });
+  assert.equal(r2.okCount, 2);
+  assert.equal(r2.mismatches[0].chapterId, 't1');
+});
+await t('verifySubmitted：站点章节块数与章节数不符 → globalError（不猜）', async () => {
+  const siteZh = siteFormat((ch) => translate(ch.paragraphs)).slice(0, 20);
+  const r = await verifySubmitted({ client: readbackClient(siteZh), book: { key: 'web:mock/x', kind: 'web', providerId: 'mock', novelId: 'x' }, resultLines: siteZh });
+  assert.equal(r.ok, false);
+  assert.ok(/章节块数|不符/.test(r.globalError), r.globalError);
+});
+await t('verifySubmitted：本地文件既非契约也非站点格式 → globalError', async () => {
+  const siteZh = siteFormat((ch) => translate(ch.paragraphs));
+  const r = await verifySubmitted({ client: readbackClient(siteZh), book: { key: 'web:mock/x', kind: 'web', providerId: 'mock', novelId: 'x' }, resultLines: ['随便几行', '不对'] });
+  assert.equal(r.ok, false);
+  assert.ok(/无法逐章比对/.test(r.globalError), r.globalError);
+});
+
+console.log('== runner：断点续跑 / 401 need-auth ==');
+const runnerTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lg-align-runner-'));
+const LG_BOOK = { key: 'web:mock/x', kind: 'web', providerId: 'mock', novelId: 'x' };
+const lgManifest = manifestOf(LG_BOOK, BUILT);
+const lgTxt = path.join(runnerTmp, 'lg-result.txt');
+fs.writeFileSync(lgTxt, translate(splitResultLines(BUILT.text)).join('\n'), 'utf8');
+const lgManifestFile = path.join(runnerTmp, 'lg-result.txt.manifest.json');
+fs.writeFileSync(lgManifestFile, JSON.stringify(lgManifest), 'utf8');
+const fakeStore = () => {
+  const chunks = new Map(); const runs = []; const cfg = {}; const books = {};
+  return {
+    chunks, runs, cfg, books,
+    getChunk: (k, id) => chunks.get(`${k}/${id}`),
+    putChunk: (k, id, v) => { chunks.set(`${k}/${id}`, JSON.parse(JSON.stringify(v))); },
+    startRun: (bookKey, job) => { runs.push({ bookKey, job, state: 'running' }); return runs.length; },
+    finishRun: (id, state, stats) => { runs[id - 1].state = state; runs[id - 1].stats = stats; },
+    getBook: (k) => ({ ...LG_BOOK, state: books[k] || '' }),
+    setBookState: (k, s) => { books[k] = s; },
+    setConfig: (k, v) => { cfg[k] = v; },
+  };
+};
+const lgClient = ({ failChapter = '', failUpload = '', onUpload = null } = {}) => ({
+  getText: async () => '',
+  getChapterTask: async (book, id) => {
+    if (failChapter && id === failChapter) { const e = new Error('401 未授权：token 失效'); e.code = 'unauthorized'; throw e; }
+    return { paragraphJp: chapterStore.get(id), glossaryId: GLOSSARY_ID };
+  },
+  uploadChapter: async (book, id) => {
+    if (failUpload && id === failUpload) { const e = new Error('401 未授权：token 失效'); e.code = 'unauthorized'; throw e; }
+    if (onUpload) onUpload(id);
+  },
+});
+await t('createLgImportRunner：首次全传 → 二次重跑全跳过（断点落 chunks）', async () => {
+  const store = fakeStore();
+  const runner = createLgImportRunner({ store, makeClient: () => lgClient(), log: { log: () => { }, error: () => { } } });
+  const r1 = await runner.runBook('web:mock/x', { options: { txtPath: lgTxt, manifestPath: lgManifestFile } });
+  assert.equal(r1.stats.uploaded, 3, JSON.stringify(r1.stats));
+  assert.equal(r1.stats.skipped, 0);
+  assert.equal(store.runs[0].state, 'done');
+  const state = store.getChunk('web:mock/x', LG_IMPORT_STATE_KEY);
+  assert.equal(Object.keys(state.done).length, 3, JSON.stringify(state));
+  const r2 = await runner.runBook('web:mock/x', { options: { txtPath: lgTxt, manifestPath: lgManifestFile } });
+  assert.equal(r2.stats.uploaded, 0, JSON.stringify(r2.stats));
+  assert.equal(r2.stats.skipped, 3);
+});
+await t('createLgImportRunner：上传阶段 401 → need-auth（状态/自动请求重推/进度/run 记录）', async () => {
+  const store = fakeStore();
+  const uploaded = [];
+  const runner = createLgImportRunner({ store, makeClient: () => lgClient({ failUpload: 't2', onUpload: (id) => uploaded.push(id) }), log: { log: () => { }, error: () => { } } });
+  const progress = [];
+  await assert.rejects(
+    () => runner.runBook('web:mock/x', { options: { txtPath: lgTxt, manifestPath: lgManifestFile, authRetryAttempts: 0 }, progress: (p) => progress.push(p) }),
+    /401/,
+  );
+  assert.deepEqual(uploaded, ['t1'], '401 后不再发后续上传');
+  assert.equal(store.books['web:mock/x'], 'need-auth', 'book.state 应转 need-auth');
+  assert.ok(store.cfg.authRequest && store.cfg.authRequest.at, '应自动置 authRequest（站点侧重推凭据）');
+  assert.equal(store.runs[0].state, 'failed');
+  assert.equal(store.runs[0].stats.needAuth, true, JSON.stringify(store.runs[0].stats));
+  assert.ok(progress.some((p) => p.phase === 'need-auth'), JSON.stringify(progress.slice(-2)));
+  // 断点保留：续跑只补剩下的章
+  const store2 = fakeStore();
+  for (const [k, v] of store.chunks) store2.chunks.set(k, v);   // 复用同一份断点状态
+  Object.assign(store2.books, store.books);                      // 与生产一致：need-auth 状态还在书行上
+  const r2 = await createLgImportRunner({ store: store2, makeClient: () => lgClient(), log: { log: () => { }, error: () => { } } })
+    .runBook('web:mock/x', { options: { txtPath: lgTxt, manifestPath: lgManifestFile } });
+  assert.equal(r2.stats.uploaded, 2, JSON.stringify(r2.stats));
+  assert.equal(r2.stats.skipped, 1);
+  assert.equal(store2.books['web:mock/x'], 'done', '续跑成功后清掉 need-auth');
+});
+await t('createLgImportRunner：校验阶段 401 → need-auth（不再逐章发无效请求）', async () => {
+  const store = fakeStore();
+  let calls = 0;
+  const client = lgClient({ failChapter: 't2' });
+  const counting = { ...client, getChapterTask: async (...a) => { calls += 1; return client.getChapterTask(...a); } };
+  await assert.rejects(
+    () => createLgImportRunner({ store, makeClient: () => counting, log: { log: () => { }, error: () => { } } })
+      .runBook('web:mock/x', { options: { txtPath: lgTxt, manifestPath: lgManifestFile, authRetryAttempts: 0 } }),
+    /401/,
+  );
+  assert.equal(calls, 2, '校验到 t2 即中止（t1、t2 各一次），不再请求 t3');
+  assert.equal(store.books['web:mock/x'], 'need-auth');
+});
+await t('createLgReadbackRunner：全一致 → runs done；401 → need-auth + 自动请求重推', async () => {
+  const store = fakeStore();
+  const siteZh = siteFormat((ch) => translate(ch.paragraphs));
+  const okRunner = createLgReadbackRunner({
+    store, log: { log: () => { }, error: () => { } },
+    makeClient: () => ({ getBookZhText: async () => siteZh.join('\n'), getTranslateTasks: async () => [{ volumeId: '', toc: CHAPTERS.map((c) => ({ chapterId: c.chapterId, titleJp: c.title })) }] }),
+  });
+  const r = await okRunner.runBook('web:mock/x', { options: { txtPath: lgTxt, manifestPath: lgManifestFile } });
+  assert.equal(r.stats.ok, 3, JSON.stringify(r.stats));
+  assert.equal(store.runs[0].state, 'done');
+  const store2 = fakeStore();
+  const badRunner = createLgReadbackRunner({
+    store: store2, log: { log: () => { }, error: () => { } },
+    makeClient: () => ({
+      getTranslateTasks: async () => [{ volumeId: '', toc: CHAPTERS.map((c) => ({ chapterId: c.chapterId, titleJp: c.title })) }],
+      getBookZhText: async () => { const e = new Error('401 未授权：token 失效'); e.code = 'unauthorized'; throw e; },
+    }),
+  });
+  await assert.rejects(() => badRunner.runBook('web:mock/x', { options: { txtPath: lgTxt } }), /401/);
+  assert.equal(store2.books['web:mock/x'], 'need-auth');
+  assert.ok(store2.cfg.authRequest && store2.cfg.authRequest.at);
+  assert.equal(store2.runs[0].state, 'failed');
 });
 
 console.log(`\n通过 ${pass}，失败 ${fail}`);

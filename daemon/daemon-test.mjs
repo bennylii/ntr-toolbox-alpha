@@ -27,7 +27,7 @@ const { createSkillCatalog } = await imp('agent-skills.mjs');
 const { createAgentEvents } = await imp('agent-events.mjs');
 const { createJobQueue } = await imp('job-queue.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
-const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport, createLgImportRunner } = await imp('lg-align.mjs');
+const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport, createLgImportRunner, createLgReadbackRunner } = await imp('lg-align.mjs');
 const { effectivePreserveRules, presetRules } = await imp('preserve.mjs');
 const { processorFromStore } = await imp('processors.mjs');
 const { checkAligned } = await imp('quality.mjs');
@@ -1789,11 +1789,12 @@ store.upsertBook({ key: `web:mock/${LGG_BOOK}`, kind: 'web', providerId: 'mock',
 const lgTmp = { exportsDir: path.join(here, '.tmp-lg-exports'), uploadsDir: path.join(here, '.tmp-lg-uploads') };
 for (const d of [lgTmp.exportsDir, lgTmp.uploadsDir]) fs.rmSync(d, { recursive: true, force: true });
 const lgRunner = createLgImportRunner({ store, makeClient, log: quiet });
+const lgReadback = createLgReadbackRunner({ store, makeClient, log: quiet });
 const lgQueue = createJobQueue({
-  resolveRunner: (job) => ({ glossary: glossaryPipeline, check: null, translate: mkPipeline({}), 'lg-import': lgRunner }[job]),
+  resolveRunner: (job) => ({ glossary: glossaryPipeline, check: null, translate: mkPipeline({}), 'lg-import': lgRunner, 'lg-readback': lgReadback }[job]),
   log: quiet,
 });
-const lgServer = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline, scheduler: setSched, agentScheduler: setAgSched, queue: lgQueue, makeClient, engine, port: 7372, log: quiet, lgImportRunner: lgRunner, lgDirs: lgTmp });
+const lgServer = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline, scheduler: setSched, agentScheduler: setAgSched, queue: lgQueue, makeClient, engine, port: 7372, log: quiet, lgImportRunner: lgRunner, lgReadbackRunner: lgReadback, lgDirs: lgTmp });
 const LG = 'http://127.0.0.1:7372';
 const lgPost = async (p, body) => fetch(LG + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, body: await r.json() }));
 let lgExport = null;
@@ -1861,7 +1862,9 @@ await t('/run lg-import：全量提交 t2/t3；越界 options 被拒', async () 
     if (item && (item.state === 'done' || item.state === 'failed')) break;
   }
   assert.equal(item && item.state, 'done', JSON.stringify(item));
-  assert.equal(item.stats.uploaded, 3, JSON.stringify(item.stats));
+  // 断点续跑：t1 已按同一内容提交过 → 跳过，只传 t2/t3
+  assert.equal(item.stats.uploaded, 2, JSON.stringify(item.stats));
+  assert.equal(item.stats.skipped, 1, JSON.stringify(item.stats));
   const stats = await fetch(`${MOCK}/__stats`).then((r) => r.json());
   assert.equal(stats.lastChapterUpload.chapterId, 't3', JSON.stringify(stats.lastChapterUpload));
 });
@@ -1891,22 +1894,69 @@ await t('/lg/verify：站点导出格式（mode=jp）的 LG 译文 → 自动识
   assert.equal(r.body.okCount, 3, JSON.stringify(r.body));
   assert.ok(r.body.linesIn > r.body.linesTotal, `站点格式原文件行数(${r.body.linesIn}) 应多于清单契约行数(${r.body.linesTotal})`);
   globalThis.__lgSiteFmt = up.body.path;
+  globalThis.__lgSiteFmtContent = mkSite('【译】');
 });
-await t('/run lg-import：站点格式 txt → 队列侧同样自动对齐并全量提交', async () => {
-  const run = await lgPost('/run', { bookKey: `web:mock/${LGG_BOOK}`, job: 'lg-import', options: { txtPath: globalThis.__lgSiteFmt, manifestPath: lgExport.manifestFile, limit: 0 } });
-  assert.equal(run.status, 202, JSON.stringify(run.body));
-  let item = null;
+const lgWait = async (id) => {
   for (let i = 0; i < 60; i++) {
     await new Promise((res) => setTimeout(res, 200));
-    item = lgQueue.get(run.body.id);
-    if (item && (item.state === 'done' || item.state === 'failed')) break;
+    const item = lgQueue.get(id);
+    if (item && (item.state === 'done' || item.state === 'failed')) return item;
   }
+  return lgQueue.get(id);
+};
+await t('/run lg-import：站点格式 txt（内容与已提交一致）→ 自动对齐 + 断点全跳过', async () => {
+  const run = await lgPost('/run', { bookKey: `web:mock/${LGG_BOOK}`, job: 'lg-import', options: { txtPath: globalThis.__lgSiteFmt, manifestPath: lgExport.manifestFile, limit: 0 } });
+  assert.equal(run.status, 202, JSON.stringify(run.body));
+  const item = await lgWait(run.body.id);
+  assert.equal(item && item.state, 'done', JSON.stringify(item));
+  assert.equal(item.stats.uploaded, 0, JSON.stringify(item.stats));
+  assert.equal(item.stats.skipped, 3, '同一内容重跑应全部跳过（断点续跑）：' + JSON.stringify(item.stats));
+  assert.equal(item.stats.converted, true, '队列统计应标注自动对齐：' + JSON.stringify(item.stats));
+  assert.ok(item.progress && item.progress.phase === 'done' && /断点跳过 3/.test(item.progress.message || ''), JSON.stringify(item.progress));
+});
+await t('/run lg-import：译文内容变化 → 断点不拦（全部重新上传）', async () => {
+  const up = await lgPost('/lg/upload', { filename: 'lg-result-changed.txt', content: globalThis.__lgSiteFmtContent.replace(/【译】/g, '【改】') });
+  assert.equal(up.status, 200, JSON.stringify(up.body));
+  globalThis.__lgChanged = up.body.path;
+  const run = await lgPost('/run', { bookKey: `web:mock/${LGG_BOOK}`, job: 'lg-import', options: { txtPath: globalThis.__lgChanged, manifestPath: lgExport.manifestFile, limit: 0 } });
+  const item = await lgWait(run.body.id);
   assert.equal(item && item.state, 'done', JSON.stringify(item));
   assert.equal(item.stats.uploaded, 3, JSON.stringify(item.stats));
-  assert.equal(item.stats.converted, true, '队列统计应标注自动对齐：' + JSON.stringify(item.stats));
+  assert.equal(item.stats.skipped, 0, JSON.stringify(item.stats));
   const stats = await fetch(`${MOCK}/__stats`).then((r) => r.json());
   assert.equal(stats.lastChapterUpload.chapterId, 't3', JSON.stringify(stats.lastChapterUpload));
-  assert.ok((stats.lastChapterUpload.preview || []).every((l) => String(l).startsWith('【译】')), JSON.stringify(stats.lastChapterUpload));
+  assert.ok((stats.lastChapterUpload.preview || []).every((l) => String(l).startsWith('【改】')), JSON.stringify(stats.lastChapterUpload));
+});
+await t('GET /lg/import-state：断点状态（已提交章数 / 清单指纹）', async () => {
+  const r = await fetch(`${LG}/lg/import-state?book=${encodeURIComponent(`web:mock/${LGG_BOOK}`)}`).then((x) => x.json());
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.doneCount, 3, JSON.stringify(r));
+  assert.ok(r.updatedAt > 0 && r.manifestId, JSON.stringify(r));
+  const bad = await fetch(`${LG}/lg/import-state?book=nope`).then((x) => x.json());
+  assert.equal(bad.ok, false);
+});
+await t('/run lg-readback：站点已提交译文 vs 本地 txt → 3/3 一致', async () => {
+  const run = await lgPost('/run', { bookKey: `web:mock/${LGG_BOOK}`, job: 'lg-readback', options: { txtPath: globalThis.__lgChanged, manifestPath: lgExport.manifestFile } });
+  assert.equal(run.status, 202, JSON.stringify(run.body));
+  const item = await lgWait(run.body.id);
+  assert.equal(item && item.state, 'done', JSON.stringify(item));
+  assert.equal(item.stats.ok, 3, JSON.stringify(item.stats));
+  assert.equal(item.stats.total, 3);
+  assert.equal(item.stats.mode, 'site-format');
+  assert.ok(item.progress && item.progress.phase === 'done' && /回读校验：3\/3/.test(item.progress.message || ''), JSON.stringify(item.progress));
+  const runs = store.listRuns(20).filter((r) => r.job === 'lg-readback' && r.bookKey === `web:mock/${LGG_BOOK}`);
+  assert.ok(runs.length >= 1 && runs[0].state === 'done', 'runs 表应有 lg-readback 记录：' + JSON.stringify(runs[0]));
+});
+await t('/run lg-readback：本地某章被改 → 只报该章不一致（带首差行）', async () => {
+  const up = await lgPost('/lg/upload', { filename: 'lg-readback-diff.txt', content: globalThis.__lgSiteFmtContent.replace(/【译】/g, '【改】').replace('【改】第1行：', '【走样】第1行：') });
+  const run = await lgPost('/run', { bookKey: `web:mock/${LGG_BOOK}`, job: 'lg-readback', options: { txtPath: up.body.path, manifestPath: lgExport.manifestFile } });
+  const item = await lgWait(run.body.id);
+  // 校验本身跑完（队列 done），差异体现在 stats：不一致 1 章 + 首差证据
+  assert.equal(item && item.state, 'done', JSON.stringify(item));
+  assert.equal(item.stats.ok, 2, JSON.stringify(item.stats));
+  assert.equal(item.stats.mismatches.length, 1, JSON.stringify(item.stats.mismatches));
+  assert.equal(item.stats.mismatches[0].chapterId, 't1');
+  assert.ok(item.stats.mismatches[0].first && /走样/.test(item.stats.mismatches[0].first.local), JSON.stringify(item.stats.mismatches[0]));
 });
 await t('GET /warnings：质检警告端点（摘要 + 明细）', async () => {
   const r = await fetch(`${LG}/warnings?book=${encodeURIComponent(CHECK_KEY)}&limit=10`).then((x) => x.json());

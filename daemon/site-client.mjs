@@ -188,10 +188,11 @@ export class SiteClient {
     return { pairs, chapters, translationMissing, chapterMissing: 0, dropped: 0 };
   }
 
-  // 整本译文（验收回扫的 zh 侧；web 用 mode=zh，wenku 用 chapter-task 的 oldParagraphZh）
-  async getBookZhText(book, onProgress) {
+  // 整本译文（回读校验/验收回扫的 zh 侧；web 用 mode=zh 整本导出，wenku 用 chapter-task 的 oldParagraphZh）
+  // 返回：web → string（整本 txt）；wenku → { text, translated }
+  async getBookZhText(book, onProgress, { translator = 'gpt' } = {}) {
     if (book.kind === 'web') {
-      const q = this.#fileQuery('zh', book, { mode: 'zh', translationsMode: 'priority', translations: 'gpt' });
+      const q = this.#fileQuery('zh', book, { mode: 'zh', translationsMode: 'priority', translations: translator });
       return this.getText(`/api/novel/${book.providerId}/${book.novelId}/file?${q}`);
     }
     const novel = await this.getWenku(book.novelId);
@@ -199,10 +200,10 @@ export class SiteClient {
     const lines = [];
     let translated = 0;
     for (const volume of volumes) {
-      const task = await this.#json(`/api/wenku/${book.novelId}/translate-v2/gpt/${encodeURIComponent(volume.volumeId)}`);
+      const task = await this.#json(`/api/wenku/${book.novelId}/translate-v2/${translator}/${encodeURIComponent(volume.volumeId)}`);
       const toc = task.toc || [];
       for (const item of toc) {
-        const dto = await this.#json(`/api/wenku/${book.novelId}/translate-v2/gpt/${encodeURIComponent(volume.volumeId)}/chapter-task/${item.chapterId}`);
+        const dto = await this.#json(`/api/wenku/${book.novelId}/translate-v2/${translator}/${encodeURIComponent(volume.volumeId)}/chapter-task/${item.chapterId}`);
         const jp = dto.paragraphJp || [];
         const zh = Array.isArray(dto.oldParagraphZh) ? dto.oldParagraphZh : [];
         jp.forEach((p, i) => {

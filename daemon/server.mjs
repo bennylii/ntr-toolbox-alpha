@@ -11,10 +11,10 @@ import { PROMPT_SLOTS, DEFAULT_TEMPLATE, FORMAT_RULES } from './prompt.mjs';
 import { UI_HTML } from './ui.mjs';
 import { createJobQueue } from './job-queue.mjs';
 import { restoreSnapshot, applyProposal } from './glossary-io.mjs';
-import { exportBookSource, splitResultLines, verifyImport, alignLgResult } from './lg-align.mjs';
+import { exportBookSource, splitResultLines, verifyImport, alignLgResult, readImportState } from './lg-align.mjs';
 import { PRESET_NAMES, presetInfo, readTextPreserveConfig } from './preserve.mjs';
 import { VERSION } from './version.mjs';
-import { createProxyFetch, normalizeProxyConfig, assertProxyConfig } from './proxy.mjs';
+import { createProxyFetch, normalizeProxyConfig, assertProxyConfig, curlAvailable } from './proxy.mjs';
 import { resetSummaryIfBeyond } from './agent-session.mjs';
 
 const DAEMON_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -66,7 +66,7 @@ const normalizeSiteRetries = (raw) => {
   return Number.isFinite(n) ? Math.max(0, Math.min(8, n)) : 3;
 };
 
-export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler = null, queue, makeClient, engine, agentLoop, agentEvents, port = 7331, log = console, lgImportRunner = null, lgDirs = null }) {
+export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler = null, queue, makeClient, engine, agentLoop, agentEvents, port = 7331, log = console, lgImportRunner = null, lgReadbackRunner = null, lgDirs = null }) {
   // 单队列（控制面 /run 与 Agent 工具共用；未传入时按本进程管线自建）
   const jobQueue = queue || createJobQueue({
     resolveRunner: (job) => ({ glossary: glossaryPipeline, check: checkPipeline, translate: pipeline }[job]),
@@ -296,9 +296,9 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         };
         const [direct, proxied] = await Promise.all([
           probe((...args) => globalThis.fetch(...args)),
-          probe(createProxyFetch({ getProxy: () => cfg })),
+          probe(createProxyFetch({ getProxy: () => cfg, log: (m) => log.log(m) })),
         ]);
-        send(200, { ok: true, target: target.href, config: cfg, direct, proxied });
+        send(200, { ok: true, target: target.href, config: cfg, direct, proxied, curlFallback: cfg.curlFallback !== false, curlAvailable: curlAvailable() });
         return;
       }
       if (req.method === 'GET' && url.pathname === '/rules') {
@@ -472,8 +472,8 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
       if (req.method === 'POST' && url.pathname === '/run') {
         const body = await readBody();
         if (!body.bookKey) { send(400, { ok: false, error: '缺少 bookKey' }); return; }
-        const job = ['glossary', 'check', 'translate', 'lg-import'].includes(body.job) ? body.job : 'translate';
-        const runner = { glossary: glossaryPipeline, check: checkPipeline, translate: pipeline, 'lg-import': lgImportRunner }[job];
+        const job = ['glossary', 'check', 'translate', 'lg-import', 'lg-readback'].includes(body.job) ? body.job : 'translate';
+        const runner = { glossary: glossaryPipeline, check: checkPipeline, translate: pipeline, 'lg-import': lgImportRunner, 'lg-readback': lgReadbackRunner }[job];
         if (!runner) { send(400, { ok: false, error: `${job} 管线未装配` }); return; }
         const options = { ...(body.options || {}) };
         if (job === 'translate' && body.level) options.level = body.level;
@@ -481,6 +481,11 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           options.txtPath = resolveLgPath(options.txtPath);
           options.manifestPath = resolveLgPath(options.manifestPath);
           if (!options.txtPath || !options.manifestPath) { send(400, { ok: false, error: 'lg-import 的 txtPath/manifestPath 必须位于 exports/ 或 uploads/ 下' }); return; }
+        }
+        if (job === 'lg-readback') {
+          options.txtPath = resolveLgPath(options.txtPath);
+          options.manifestPath = options.manifestPath ? resolveLgPath(options.manifestPath) : '';
+          if (!options.txtPath) { send(400, { ok: false, error: 'lg-readback 的 txtPath 必须位于 exports/ 或 uploads/ 下' }); return; }
         }
         const { id } = jobQueue.enqueue({ bookKey: body.bookKey, job, options });
         send(202, { ok: true, accepted: true, queued: true, id, bookKey: body.bookKey, job });
@@ -538,11 +543,13 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
             ok: true,
             globalError: report.globalError,
             converted: aligned.converted,
+            convertMode: aligned.convertMode || '',
             convertNote: aligned.note || '',
             convertError: aligned.alignError || '',
             okCount: report.okCount,
             total: report.total,
             untranslated: report.untranslated,
+            needAuth: !!report.needAuth,
             linesIn: lines.length,
             linesTotal: manifest.linesTotal || 0,
             chapters: report.chapters.map((c) => ({ chapterId: c.chapterId, title: c.title || '', count: c.count, start: c.start, ok: c.ok, reason: c.reason || '' })),
@@ -551,6 +558,15 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         } catch (e) {
           send(400, { ok: false, error: (e && e.message) || String(e) });
         }
+        return;
+      }
+      // 断点续跑状态（lg-import）：已提交章数 + 最近更新（GUI 显示「断点：已提交 N 章」）
+      if (req.method === 'GET' && url.pathname === '/lg/import-state') {
+        const key = url.searchParams.get('book') || '';
+        const book = store.getBook(key);
+        if (!book) { send(400, { ok: false, error: 'book 不存在' }); return; }
+        const st = readImportState(store, key);
+        send(200, { ok: true, bookKey: key, doneCount: Object.keys(st.done).length, manifestId: st.manifestId, updatedAt: st.updatedAt });
         return;
       }
       // ---- Agent（本地助手） ----

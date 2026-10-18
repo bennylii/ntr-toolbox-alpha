@@ -93,6 +93,7 @@ node daemon/index.mjs forget    <bookKey>
 - **工作区脚本**：`workspace_run` 的沙箱子进程在 fork 时注入 `HTTP_PROXY/HTTPS_PROXY/NO_PROXY/NODE_USE_ENV_PROXY`，模型脚本自己的 fetch 与 daemon 走同一代理（代理关闭时不注入，保持原样）；
 - **不影响本机**：直连列表默认含回环地址，mock（8788/8790）、托盘 `/status`、控制台自身流量都不经代理；代理关闭时全部直连，行为与旧版一致；
 - **传输层重试**：站点请求（`SiteClient`）对网络层失败默认重试 3 次（退避 300ms×n），CLI 打「站点请求失败，重试 n/3」；HTTP 状态错误（401/404/…）不重试。次数在控制台设置页「站点与凭据 → 站点请求重试」可调（0–8，保存即生效）——墙内代理链路抖动（`ECONNRESET` / `fetch failed`）很常见：实测整本 167 章逐章抓取约 1/3 请求首发失败，3 次重试每轮仍有 2 章左右失败，调到 8 次基本清零；
+- **curl 兜底（默认开）**：实测**个别站点对 Node/undici 的指纹会稳定 ECONNRESET**（`n.novelia.cc` 经 Clash 6789：undici 连打 8 次全失败、同代理 curl 成功率约 85%，`/proxy/test` 的直连/代理两列都红），重试到顶也过不去。开启后：传输层失败（`ECONNRESET` / `fetch failed` / 超时等，`isTransportError` 判定；HTTP 状态错误与调用方主动 abort 不触发）时，用 **curl 子进程**把同一个请求重发一次（`-L` 跟 302、`--retry`、`--max-time`、走同一代理/直连判定、`signal` 中止会 kill 子进程），日志打「回落 curl 传输（经代理 …）」；curl 不存在或也失败时保持原错误。开关在「网络代理」区块（`config.proxy.curlFallback`，默认开），`POST /proxy/test` 返回值带 `curlFallback` / `curlAvailable`。实现用**异步 spawn**（同步 `spawnSync` 会阻塞事件循环 → daemon 自己的 HTTP 服务与同进程测试假服务器都收不到请求）；
 - CLI（`translate` / `run` / `check` / `agent` / `status`）读同一份配置，`status` 会打印当前代理状态。
 
 ## 调度与限流（默认单线程，适配 Gemini 逆向 / 单槽上游）
@@ -200,6 +201,9 @@ node daemon/index.mjs import-lg --book <key> --txt <LG结果.txt> --manifest <�
 
 - **兼容前提**（来自 LG 源码）：LG 的 TXT 格式一行一条 item、空行也是条目、写出逐行 join（空译文回退原文）→ 结果 txt 的行数与行号和输入天然一致。因此**不要在 LG 里增删行、不要开启会改行数的处理**；
 - **也吃站点「下载原文」格式**：站点简介页「下载原文」拿到的是 `mode=jp` 整本导出（书名/作者/标签/统计 → `############` → 简介，之后每章 `# 标题` + 空行 + 正文），LG 翻完仍是同格式。控制台「导入 LG 译文」/CLI `import-lg` 会在**行数不符且文本像站点导出**时自动抓站点原文、按「标题后 count 段」逐章 sha1 对齐（卷/分组标题占两行的 ±2 偏移窗口；逐段空/非空模式校验；任一章对不上即拒绝），校验报告会显示「↻ 已识别站点导出格式（mode=jp），并抓站点原文逐章 sha1 对齐 N 章」，队列 stats 带 `converted`。抓整本原文是一次 2MB 级请求，代理链路抖动时会分轮重试，全轮失败会把原因写进错误（「…（站点格式自动对齐失败：fetch failed——代理链路抖动时稍后重跑）」）；契约格式路径零额外请求。离线转换/排查用 `node tools/.lg-import-sitefmt.mjs --book <key> --zh <LG译文.txt> --manifest <清单.json>`（同一内核）；
+- **也吃「折叠空行版」站点格式**：有些来路的站点导出译文把**连续空行折成了单个空行**（行数与站点原文不同构，严格模式按绝对行号切片必然错位，整本被拒）。现在严格模式失败后**自动回落「块序 + 非空行映射」**：原文块仍按标题后 `count` 行 sha1 硬定位（块内锚定，卷/分组标题不越界），译文块按块序号取，要求两侧非空行数一致，再把译文非空行按序铺回原文段落数组（空段落原位回填空串）；硬校验不打折（块数一致 / 逐章原文 sha1 / 逐章非空行数一致 / 重建行数 == 清单行数），任一章不过即整体拒绝。报告标注 `convertMode`（`strict` / `loose`）与「已识别站点导出格式（折叠空行版）：按块序 + 非空行映射对齐 N 章」；
+- **提交后回读校验**（控制台项目卡「回读校验」按钮 / 队列 `lg-readback`）：把站点**已提交**的整本译文拉回来（`/file?mode=zh&translations=gpt`，11MB 级一次请求）与本地 txt 逐章比对非空行——本地侧支持契约格式（按清单 `start/count` 切片）与站点导出格式（按 `# 标题` 块序）；站点侧章节块按序对应清单章节（缺清单则抓 TOC），两侧章节数不符即拒绝。报告给「N/M 章一致」+ 不一致章的首差行（本地 ↔ 站点片段）+ 站点侧假名残留行数，结果落 `runs(job='lg-readback')`；站点标题与本地译名不同译法也能对上（这就是不按标题比对的原因）；
+- **断点续跑 + 401 监测**：逐章提交成功后把「章 id + 译文内容 sha」写进 `chunks`（`lg-import-state`，`forgetBook` 会清），**重跑自动跳过内容一致的已完成章**（内容变了 sha 变 → 自然重传，自愈），进度显示「断点跳过 N 章」，回读面板/项目详情显示「断点：已提交 N 章」（`GET /lg/import-state`）。401 不再被逐章 catch 吞成「章节获取失败」：先原地退避重试 2 次（8s，覆盖会话抖动），仍 401 则**中止本批**、置 `book.state='need-auth'`、**自动置 `authRequest`**（等于帮你点了「从站点同步」，站点页面开着时油猴 ≤5s 重推新 token）、进度打 `phase:'need-auth'`、run 记 failed（`stats.needAuth`）；控制台项目卡显示红色「凭据失效」+「重新同步凭据」，导入面板给出「继续提交（跳过已完成章）」按钮，任务页队列行直接显示 `progress.message`；
 - **三层校验**：总行数 = 清单 `linesTotal`（否则全局拒绝）；每章行数 + 空/非空模式与站点当前 `paragraphJp` 一致（行错位检测）；每章原文 sha1 与导出时一致（源站更新/漂移 → 该章拒绝）；
 - **疑似未翻**：结果行 === 原文行（非空）的行数会统计进报告（LG 空译文回退原文的特性），dry-run 里先看这个数再 `--apply`；
 - **提交即 GPT 翻译器兼容**：逐章走站点既有 `POST .../translate-v2/gpt/chapter/{id}`（带当前 `glossaryId`、`sakuraVersion 0.9`、段落数严格一致），导入后站点与 daemon 都把该章视为已译；`--apply` 后可跑 `translate --level expire` 验证零目标；
@@ -248,8 +252,8 @@ powershell -File daemon/tray.ps1 -TestSpawn -Port 7377          # 托盘冒烟�
 # 助手页 e2e（浏览器车道）：mock 在 8790，daemon 在 7355（--db daemon/.tmp-agent-ui.db），见 tools/.e2e-agent-ui.js 头部跑法
 # 助手页会话操作 e2e：mock 在 8790，daemon 在 7358（--db daemon/.tmp-agent-ops.db），见 tools/.e2e-agent-session-ops.js 头部
 # LG 导入 GUI e2e：mock 在 8790，daemon 在 7356（--db daemon/.tmp-lggui.db，预置 mock-trans-lg4-* 书），见 tools/.e2e-lg-gui.js 头部
-#   一把跑完（契约格式 + 站点 mode=jp 格式自动对齐两段）：CDP_PORT=9335 node tools/cdp.mjs open http://127.0.0.1:7356/ui && node tools/cdp.mjs evalf tools/.e2e-lg-gui.js
-#   真机分阶段（长流程）：window.__LG_GUI_TEST={bookKey,txtPath,expect,limit} + phase=export/open/setfiles/verify-start/verify/apply/await，
+#   一把跑完（契约格式 + 站点 mode=jp 格式自动对齐 + 回读校验三段）：CDP_PORT=9335 node tools/cdp.mjs open http://127.0.0.1:7356/ui && node tools/cdp.mjs evalf tools/.e2e-lg-gui.js
+#   真机分阶段（长流程）：window.__LG_GUI_TEST={bookKey,txtPath,expect,limit} + phase=export/open/setfiles/verify-start/verify/apply/await/readback-open/readback，
 #   文件用 CDP 原生塞盘上的真实 txt：node tools/cdp.mjs setfiles "#books-table .proj-card .proj-detail input[type=file]" "<LG译文.txt>"
 # Daemon 连接 e2e：mock 8790 + tools/.run-daemon-stub.mjs（7343：/ping /auth /last /request-auth /reset），见 tools/.e2e-daemon-sync.js 头部
 # 控制台「从站点同步」按钮 e2e：daemon 7359（--db daemon/.tmp-token-sync.db），见 tools/.e2e-token-sync.js 头部

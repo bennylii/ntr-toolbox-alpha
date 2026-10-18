@@ -205,12 +205,24 @@ const transBook = (novelId) => {
   return transStates.get(novelId);
 };
 const transChapters = (novelId) => (/mock-trans-r/.test(novelId) ? ['r1', 'r2', 'r3'] : ['t1', 't2', 't3']);
+// 已提交译文（POST /chapter/ 的 paragraphsZh 原样存下来）：mode=zh 整本导出与 chapter-task 的
+// oldParagraphZh 都回读它 —— 回读校验（本地 txt vs 站点已提交内容）用例靠这份数据做闭环。
+const transUploads = new Map();
+const uploadsOf = (novelId) => {
+  if (!transUploads.has(novelId)) transUploads.set(novelId, new Map());
+  return transUploads.get(novelId);
+};
 const transParagraphCount = (chapterId) => (chapterId.endsWith('1') ? 6 : chapterId.endsWith('2') ? 4 : 2);
 const transParagraphs = (chapterId) => Array.from({ length: transParagraphCount(chapterId) }, (_, i) => `第${i + 1}行：アリスが魔導書を読む。`);
 // 空段夹具（④）：真站点 paragraphJp 含空段/空白段——验证 daemon「空段不进请求 + 提交前原位回填」
 const emptyParagraphs = () => ['第1行：アリスが魔導書を読む。', '', '   ', '第4行：ローズも来た。'];
-const chaptersFor = (novelId) => (/mock-empty/.test(novelId) ? ['e1'] : transChapters(novelId));
-const paragraphsFor = (novelId, chapterId) => (/mock-empty/.test(novelId) ? emptyParagraphs() : transParagraphs(chapterId));
+// 上下文夹具：40 段短句（每段都以句末标点结尾）→ daemon 按 30 行/段切成 2 段，
+// 正好覆盖「章首无上文 / 段间有上文 / 段末无下文」；且 chapter-task 永远报「未译」，
+// 便于用「重置进度」造重跑（验证段缓存键随上下文变化）。上传仍会记录 lastChapterUpload。
+const ctxParagraphs = () => Array.from({ length: 40 }, (_, i) => `第${i + 1}段：アリスが魔導書を読む。`);
+const isCtxBook = (novelId) => /mock-ctx/.test(String(novelId || ''));
+const chaptersFor = (novelId) => (/mock-empty/.test(novelId) ? ['e1'] : (isCtxBook(novelId) ? ['c1'] : transChapters(novelId)));
+const paragraphsFor = (novelId, chapterId) => (/mock-empty/.test(novelId) ? emptyParagraphs() : (isCtxBook(novelId) ? ctxParagraphs() : transParagraphs(chapterId)));
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || HOST}`);
@@ -302,9 +314,11 @@ const server = http.createServer(async (req, res) => {
       const chapterId = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
       const done = state.get(chapterId);
       const paragraphs = paragraphsFor(novelId, chapterId);
+      const uploaded = uploadsOf(novelId).get(chapterId);
       res.end(JSON.stringify({
         paragraphJp: paragraphs,
-        oldParagraphZh: done ? paragraphs.map((_, i) => `【已译】第${i + 1}行`) : null,
+        // 提交过就回读提交内容（与真站点一致）；没提交但标记为已译时给合成旧译
+        oldParagraphZh: uploaded || (done ? paragraphs.map((_, i) => `【已译】第${i + 1}行`) : null),
         glossaryId: TRANS_GLOSSARY_ID,
         glossary: {},
         oldGlossaryId: done || null,
@@ -315,6 +329,7 @@ const server = http.createServer(async (req, res) => {
     if (/\/chapter\//.test(url.pathname)) {
       const chapterId = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
       state.set(chapterId, body.glossaryId || TRANS_GLOSSARY_ID);
+      if (Array.isArray(body.paragraphsZh)) uploadsOf(novelId).set(chapterId, body.paragraphsZh.map((p) => String(p == null ? '' : p)));
       stats.lastChapterUpload = {
         path: url.pathname,
         chapterId,

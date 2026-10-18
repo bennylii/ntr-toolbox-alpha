@@ -153,12 +153,53 @@ const doAwait = async (id, limit, opts = {}) => {
   }, opts.timeoutMs || 600000);
   check('lg-import 队列跑完（state=done）', !!done && done.state === 'done', done && JSON.stringify({ state: done.state, stats: done.stats, progress: done.progress }));
   const wantUploaded = limit > 0 ? limit : ((CFG.expect && CFG.expect.chapters) || 3);
-  check('上传章数 = ' + wantUploaded + '，失败 0', !!done && done.stats && done.stats.uploaded === wantUploaded && done.stats.failed === 0, done && JSON.stringify(done.stats));
+  // 断点续跑：前一段已提交过同内容章时本段会跳过（uploaded + skipped 恒等于应提交章数）
+  const gotUp = done && done.stats ? done.stats.uploaded : -1;
+  const gotSkip = (done && done.stats && done.stats.skipped) || 0;
+  check('上传章数 + 断点跳过 = ' + wantUploaded + '（上传 ' + gotUp + ' / 跳过 ' + gotSkip + '），失败 0', !!done && done.stats && (gotUp + gotSkip) === wantUploaded && done.stats.failed === 0, done && JSON.stringify(done.stats));
   if (opts.expectConverted) check('队列统计标注「自动对齐（converted）」', !!done && done.stats && done.stats.converted === true, done && JSON.stringify(done.stats));
   const runs = await fetch('/runs').then((r) => r.json()).catch(() => ({ runs: [] }));
   const found = (runs.runs || []).find((r) => r.job === 'lg-import' && r.state === 'done');
   check('任务记录里有 lg-import/done（runs 表）', !!found, found && JSON.stringify(found.stats));
   return done;
+};
+
+// 回读校验：项目卡按钮 → 面板（本地 txt + 可选清单）→ 开始 → 报告 + runs 记录
+const doReadbackOpen = async () => {
+  openBooksTab();
+  const card = await waitFor(() => cardOf(), 15000);
+  check('回读阶段：找到项目卡片', !!card, CFG.bookKey || '(第一张卡片)');
+  if (!card) return null;
+  const btn = card.querySelector('[data-lgreadback]');
+  check('卡片有「回读校验」按钮', !!btn);
+  if (btn) btn.click();
+  const panel = await waitFor(() => {
+    const box = boxOf(card);
+    return box && box.textContent.includes('回读校验') && box.querySelector('input[type=file]') && btnByText(box, '开始回读校验') ? box : null;
+  }, 15000);
+  check('回读面板出现（本地译文选择器 + 开始按钮）', !!panel);
+  // 断点行来自异步 /lg/import-state（面板先渲染「查询中…」）——等它落地再断言
+  const stateLine = panel && await waitFor(() => (/断点：/.test(panel.textContent) ? panel.textContent : null), 15000);
+  check('面板显示断点状态（断点：…）', !!stateLine, stateLine && stateLine.slice(0, 200));
+  out.notes.push('接着用 cdp setfiles 选文件：CDP_PORT=… node tools/cdp.mjs setfiles "#books-table .proj-card .proj-detail input[type=file]" "<本地译文 txt>"');
+  return panel;
+};
+const doReadbackRun = async (panel) => {
+  const input = panel.querySelectorAll('input[type=file]')[0];
+  const txtFile = input.files && input.files[0];
+  check('本地译文 txt 已选中（files[0] 存在）', !!txtFile, txtFile && (txtFile.name + ' · ' + txtFile.size + 'B'));
+  btnByText(panel, '开始回读校验').click();
+  const report = await waitFor(() => {
+    const t = panel.textContent;
+    return /回读：\d+\/\d+ 章一致/.test(t) ? t : null;
+  }, CFG.reportWaitMs || 600000);
+  check('回读报告出现（回读：N/M 章一致）', !!report, report && report.slice(0, 200));
+  const want = (CFG.expect && CFG.expect.chapters) || 3;
+  check('回读结果：' + want + '/' + want + ' 章一致', !!report && report.includes('回读：' + want + '/' + want + ' 章一致'), report && report.slice(-220));
+  const runs = await fetch('/runs').then((r) => r.json()).catch(() => ({ runs: [] }));
+  const found = (runs.runs || []).find((r) => r.job === 'lg-readback');
+  check('任务记录里有 lg-readback（runs 表）', !!found, found && JSON.stringify(found.stats).slice(0, 200));
+  return report;
 };
 
 try {
@@ -200,8 +241,13 @@ try {
     const last = (typeof window !== 'undefined' && window.__LG_GUI_LAST) || null;
     check('拿到上一阶段入队的队列号', !!(last && last.queueId), JSON.stringify(last));
     if (last && last.queueId) await doAwait(last.queueId, last.limit, { expectConverted: true });
+  } else if (CFG.phase === 'readback-open') {
+    await doReadbackOpen();
+  } else if (CFG.phase === 'readback') {
+    const card = await waitFor(() => cardOf(), 15000);
+    const panel = boxOf(card);
+    if (panel) await doReadbackRun(panel);
   } else {
-    // ===== 默认（mock 车道）：一把跑完，两段：契约格式 + 站点导出格式 =====
     const exported = await doExport();
     check('导出详情行数（12 行 / 3 章）', !!exported && exported.includes('已导出 12 行 / 3 章'), exported && exported.slice(0, 120));
 
@@ -243,6 +289,14 @@ try {
       }
     }
     void card2;
+    // —— 第三段：回读校验（站点已提交译文 vs 本地 txt，逐章比对）——
+    const panel3 = await doReadbackOpen();
+    if (panel3) {
+      const dt3 = new DataTransfer();
+      dt3.items.add(new File([siteFormatFixture('【译】')], 'lg-readback-src.txt', { type: 'text/plain' }));
+      panel3.querySelectorAll('input[type=file]')[0].files = dt3.files;
+      await doReadbackRun(panel3);
+    }
     out.notes.push('清理：任务与上传文件保留在临时 daemon/目录（由外部脚本删除）');
   }
 } catch (e) {

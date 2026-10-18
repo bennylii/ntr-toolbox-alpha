@@ -115,6 +115,9 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 - **术语表**：`glossary-io` 双向 JSON（导入含引擎审计与 regex→规则分流）。
 - **译文**：`export-src`（GUI 同款）导出「一行一段」纯文本 + 对齐清单（每章 `start/count/jpSha1`）→ LinguaGacha 翻译（txt 天然保行号）→ `import-lg`/GUI「导入 LG 译文」按清单切片回章，**三层校验**（总行数 / 每章行数+空行模式 / 源 sha1）后按 §4.1-3 契约提交；GUI 里以 `lg-import` 队列任务跑，进度经队列 progress 通道实时回显。（规格 `docs/cleanroom/spec-13`）
 - **也接受站点「下载原文」格式**：站点 `mode=jp` 整本导出（头部 → `############` → 简介，之后每章 `# 标题` + 空行 + 正文）经 LG 翻译后仍是同格式，会在「行数不符 + 文本像站点导出」时自动抓原文逐章 sha1 对齐（±2 偏移窗口容忍卷/分组标题占两行、逐段空/非空模式；任一章不过即拒绝），契约格式路径零额外请求；抓原文是 2MB 级请求，失败分轮重试并把原因带进错误。纯函数 `convertSiteFormat`/`fetchSiteExportLines`/`alignLgResult` 在 `lg-align.mjs`（四处调用点共用：`/lg/verify`、`lg-import` runner、CLI、Agent 工具）。
+- **折叠空行版回落（`convertSiteFormatLoose`）**：有些来路的站点格式译文把连续空行折成单个空行（与站点原文不同构，绝对行号切片必然错位）。严格模式失败后自动回落「块序 + 非空行映射」：`splitBlocks` 按 `# 标题` 切块、块内锚定定位原文块（sha1 命中且块内剩余行全空）、译文块按块序号取、要求两侧非空行数一致，再把译文非空行按序铺回原文段落数组（空段落回填空串）；块数/逐章 sha1/非空行数/重建行数四项硬校验不打折，报告带 `convertMode: 'strict'|'loose'`。真数据实测：`web:syosetu/n5731ie`（449 章 / 462 块）折叠空行版译文经此路径重建，与站点实际内容逐章 **449/449 一致**。
+- **提交后回读校验（`verifySubmitted` + `lg-readback` 队列任务）**：抓站点 `mode=zh&translations=gpt` 整本译文（`getBookZhText`，一次 11MB 级请求）与本地 txt 逐章比对非空行——本地侧支持契约格式（按清单切片）与站点导出格式（块序），站点侧「有正文的块」按序对应章节（缺清单抓 TOC），两侧章节数不符即拒绝；输出 N/M 章一致 + 不一致章首差行 + 站点侧假名残留行数，落 `runs(job='lg-readback')`，GUI 项目卡「回读校验」按钮/导入面板入口，`GET /lg/import-state` 回显断点（已提交 N 章）。
+- **断点续跑与 401 收口**：逐章提交成功后把「章 id + 译文内容 sha」写 `chunks`（`lg-import-state`），重跑跳过内容一致的已完成章（内容变则 sha 变 → 自动重传）；`verifyImport`/`applyImportReport` 对 401 先退避重试 2 次，仍失败即中止本批并返回 `needAuth`/`stopped:'need-auth'`（不再逐章吞成「章节获取失败」），runner 置 `book.state='need-auth'`、自动置 `authRequest`（触发油猴重推凭据）、进度打 `phase:'need-auth'`，GUI 出「继续提交」入口。
 
 ### 4.9 控制台（`/ui`，Windows 经典灰 + 扁平直角）
 
@@ -130,7 +133,8 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 - **自动同步**：油猴侧 5s glance tick 顺带做「指纹（token+workers+origin）变化才推」，页面加载即推、token 刷新 ≤5s 自愈，无变化零请求；`lastSync.mode = auto|manual` 可观测；
 - **控制台请求同步**：设置页「从站点同步」→ `POST /auth/request` 置位（5 分钟过期）→ 油猴从 `/ping.pendingAuth` 看到标志后绕过指纹去重强推一次 → `/auth` 清位；控制台轮询 `lastSync.at` 变化回报结果（token 只存在站点页面 localStorage，daemon 无法自取）；
 - CORS：内置 `n.novelia.cc` + localhost（不可移除）+ `config.serve.origins` 附加条目；仅监听 127.0.0.1；LNA/PNA 头已应答（真实用户首次需浏览器授权一次；headless 车道需禁用 LocalNetworkAccessChecks）。（规格 `docs/cleanroom/spec-11`）
-- **出网代理**：`config.proxy = { enabled, url, noProxy }`；站点 API 与双池的 LLM 调用统一经 `daemon/proxy.mjs` 注入的 fetch（http 目标走代理绝对形式，https 目标走 CONNECT 隧道，支持 `user:pass@` 凭据）；**每次请求现读配置 → 控制台保存即生效**；直连列表默认 `127.0.0.1,localhost,::1`（mock/测试零影响），代理关闭时全部直连（与旧版一致）；不支持 SOCKS5；`POST /proxy/test` 对同一目标做「直连 vs 代理」双探测。工作区沙箱在 fork 时注入 `HTTP_PROXY/HTTPS_PROXY/NO_PROXY/NODE_USE_ENV_PROXY`，脚本出网与 daemon 同路。
+- **出网代理**：`config.proxy = { enabled, url, noProxy, curlFallback }`；站点 API 与双池的 LLM 调用统一经 `daemon/proxy.mjs` 注入的 fetch（http 目标走代理绝对形式，https 目标走 CONNECT 隧道，支持 `user:pass@` 凭据）；**每次请求现读配置 → 控制台保存即生效**；直连列表默认 `127.0.0.1,localhost,::1`（mock/测试零影响），代理关闭时全部直连（与旧版一致）；不支持 SOCKS5；`POST /proxy/test` 对同一目标做「直连 vs 代理」双探测并报告 `curlFallback`/`curlAvailable`。工作区沙箱在 fork 时注入 `HTTP_PROXY/HTTPS_PROXY/NO_PROXY/NODE_USE_ENV_PROXY`，脚本出网与 daemon 同路。
+- **curl 传输兜底**：个别站点对 Node/undici 指纹稳定 `ECONNRESET`（实测 `n.novelia.cc` 经 Clash 6789：undici 8/8 失败、同代理 curl ~85% 成功）。`daemon/curl-fetch.mjs` 用**异步 spawn**（同步 spawn 会阻塞事件循环）把同一请求交给 curl（`-L`/`--retry`/`--max-time`/同代理判定/signal kill），`isTransportError` 只对传输层失败触发（HTTP 状态错误与调用方 abort 不触发），默认开、可关，回落时打日志。
 
 ### 4.11 托盘
 
@@ -143,9 +147,9 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 | `GET /ping` `/status` `/settings` `/rules` `/prompts` `/books` `/progress` `/runs` `/proposals` `/snapshots` `/warnings` `/agent/*` | 只读面（探测/状态/配置回读/列表） |
 | `POST /auth` | 凭据 + 翻译器推送（油猴自动/手动共用，带 auto 标记）；收到即清「同步请求」标志 |
 | `POST /auth/request` | 控制台请求站点页面立刻推一次凭据（油猴经 `/ping.pendingAuth` 响应） |
-| `POST /run` | 派发 `translate / glossary / check / lg-import`（单队列，lg-import 校验路径白名单） |
+| `POST /run` | 派发 `translate / glossary / check / lg-import / lg-readback`（单队列，lg-import/lg-readback 路径白名单） |
 | `POST /settings` | llm / agent（含 workers、llm 子对象）/ origin / serve（port、origins）/ textPreserve.preset / proxy（enabled、url、noProxy） |
-| `POST /proxy/test` | 出网代理探测：同一目标「直连 / 代理」各一次，返回状态与耗时（判断是否被墙） |
+| `POST /proxy/test` | 出网代理探测：同一目标「直连 / 代理」各一次，返回状态与耗时（判断是否被墙）+ `curlFallback`/`curlAvailable` |
 | `POST /books` `/rules` `/prompts` `/snapshots/restore` `/proposals/close|apply` `/lg/export|upload|verify` | 各域写操作 |
 | `POST /agent/session/rename` `/agent/session/delete` | 会话重命名 / 删除（删除连带消息与决定；跑轮次中 409） |
 | `POST /agent/message/regenerate` `/agent/message/edit` | 重新生成该轮回答 / 编辑用户消息后重发（均按截断点重跑，见 §4.7） |
@@ -178,9 +182,9 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 | 用户脚本引擎 | `tools/engine-test.mjs` | mock 8788 |
 | 油猴页面流 | `tools/.e2e-*.js`（inject）+ `tools/.run-suite.mjs` | mock 8788/8790 + CDP 车道 |
 | daemon 纯函数 | quality / translate / processors / prompt / glossary-io / lg-align / agent / agent-skills `-test.mjs` | 无 |
-| daemon 代理 | `daemon/proxy-test.mjs`（本地回环测试代理 + 自签证书 fixture） | 无 |
 | daemon 冒烟 | `daemon/daemon-test.mjs`（129 例：管线/调度/质检/Agent/会话操作/工作区/LG 导入（含站点 mode=jp 自动对齐）/站点请求重试/连接/托盘端口） | mock 8790 |
 | 浏览器 e2e | `.e2e-agent-ui.js`（助手页）、`.e2e-agent-session-ops.js`（会话操作）、`.e2e-lg-gui.js`（导入 GUI：mock 车道一把 43 项；真机分阶段 `__LG_GUI_TEST` + `cdp setfiles` 真实文件）、`.e2e-daemon-sync.js`（连接/自动同步） | mock 8790 + stub 7343 + CDP 车道 |
+| daemon 代理 | `daemon/proxy-test.mjs`（本地回环测试代理 + 自签证书 fixture；含 curl 兜底：回落成功 / 开关关闭 / noRetry 不触发 / curl 走代理） | 无 |
 | 真机 | TM 重装（sha256 整文件比对）→ 实站全流程 | 测试 profile + LNA 旗标 |
 
 ## 8. 版本与发布

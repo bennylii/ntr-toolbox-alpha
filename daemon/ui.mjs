@@ -545,8 +545,9 @@ export const UI_HTML = `<!doctype html>
       <label><input type="checkbox" id="proxy-enable"> 启用代理</label>
       <label>代理地址 <input type="text" id="proxy-url" size="40" placeholder="http://127.0.0.1:6789"></label>
       <label>直连列表 <input type="text" id="proxy-noproxy" size="44" placeholder="127.0.0.1,localhost,::1"></label>
+      <label><input type="checkbox" id="proxy-curlfallback" checked> undici 传输失败时回落 curl 子进程重发（默认开）</label>
       <div><button class="btn" id="proxy-save">保存代理设置</button> <button class="btn ghost" id="proxy-test">测试（对比直连 / 代理）</button></div>
-      <div class="muted" style="margin-top:6px">站点被墙时填本机代理（只支持 http/https，不支持 SOCKS5）；直连列表内的主机不经代理（默认含回环，本机 mock / 测试不受影响）。工作区脚本出网同样走此代理。</div>
+      <div class="muted" style="margin-top:6px">站点被墙时填本机代理（只支持 http/https，不支持 SOCKS5）；直连列表内的主机不经代理（默认含回环，本机 mock / 测试不受影响）。工作区脚本出网同样走此代理。curl 兜底：实测 Node/undici 经代理访问个别站点会被稳定 ECONNRESET（curl 同代理可用），开启后传输层失败自动用 curl 重发一次（日志打「回落 curl 传输」）。</div>
       <div class="muted" id="proxy-info" style="margin-top:6px"></div>
     </fieldset>
   </div>
@@ -688,8 +689,16 @@ async function refresh() {
 function renderJobs(status) {
   $('job-book').innerHTML = STATE.books.map((b) => '<option value="' + esc(b.key) + '">' + esc(b.key) + '</option>').join('');
   if (PROJECT && STATE.books.some((b) => b.key === PROJECT)) $('job-book').value = PROJECT;
+  // 进度摘要列：lg-import/lg-readback 的 progress.message（401 → need-auth 也在这里可见）
+  const prog = (x) => {
+    const p = x.progress;
+    if (!p || !p.message) return '';
+    const bad = p.phase === 'need-auth' || p.phase === 'error';
+    return ' · <span class="' + (bad ? 'bad' : 'muted') + '">' + esc(String(p.message).slice(0, 120)) + '</span>';
+  };
   $('queue').innerHTML = (status.queue || []).slice().reverse().map((x) =>
     '<div>' + esc(x.job) + ' · ' + esc(x.bookKey) + ' · <b>' + esc(x.state) + '</b>' +
+    prog(x) +
     (x.stats ? ' · ' + esc(JSON.stringify(x.stats).slice(0, 160)) : '') +
     (x.error ? ' · <span class="bad">' + esc(x.error) + '</span>' : '') + '</div>').join('') || '<span class="muted">空</span>';
   $('runs').innerHTML = '<table><tr><th>id</th><th>job</th><th>book</th><th>state</th><th>stats</th></tr>' +
@@ -741,9 +750,11 @@ async function renderBooks() {
   (STATE.runs || []).forEach((r) => { if (!runsByBook[r.bookKey]) runsByBook[r.bookKey] = r; });
   $('books-table').innerHTML = (STATE.books || []).map((b) => {
     const run = runsByBook[b.key];
+    const needAuth = String(b.state || '') === 'need-auth';
     return '<div class="proj-card' + (b.key === PROJECT ? ' current' : '') + '" data-pk="' + esc(b.key) + '">' +
       '<div><b>' + esc(String(b.title || b.key).slice(0, 46)) + '</b>' + (b.key === PROJECT ? ' <span class="ok">当前</span>' : '') + '</div>' +
-      '<div class="muted">' + esc(b.key) + ' · ' + esc(b.state || 'idle') + '</div>' +
+      '<div class="muted">' + esc(b.key) + ' · ' + esc(b.state || 'idle') +
+      (needAuth ? ' · <span class="bad">凭据失效：点「重新同步凭据」，或打开站点页面等它自动重推</span>' : '') + '</div>' +
       '<div class="muted">已译 ' + (b.progress || 0) + ' 章 · 最近 run ' + (run ? esc(run.job + '/' + run.state) : '—') +
       ' · 队列 ' + (queueByBook[b.key] || 0) + ' · open 提案 ' + (openByBook[b.key] || 0) + '</div>' +
       '<div class="proj-actions">' +
@@ -751,6 +762,8 @@ async function renderBooks() {
       '<button class="btn" data-run="' + esc(b.key) + '">派发任务</button> ' +
       '<button class="btn ghost" data-lgexport="' + esc(b.key) + '">导出 LG 源文</button> ' +
       '<button class="btn ghost" data-lgimport="' + esc(b.key) + '">导入 LG 译文</button> ' +
+      '<button class="btn ghost" data-lgreadback="' + esc(b.key) + '">回读校验</button> ' +
+      (needAuth ? '<button class="btn" data-tokensync="' + esc(b.key) + '">重新同步凭据</button> ' : '') +
       '<button class="btn danger" data-forget="' + esc(b.key) + '">忘记</button></div>' +
       '<div class="proj-detail" style="display:none"></div>' +
       '</div>';
@@ -790,9 +803,123 @@ async function renderBooks() {
   document.querySelectorAll('[data-lgimport]').forEach((btn) => btn.addEventListener('click', () => {
     openLgImportPanel(btn.closest('.proj-card'), btn.dataset.lgimport);
   }));
+  document.querySelectorAll('[data-lgreadback]').forEach((btn) => btn.addEventListener('click', () => {
+    openLgReadbackPanel(btn.closest('.proj-card'), btn.dataset.lgreadback);
+  }));
+  document.querySelectorAll('[data-tokensync]').forEach((btn) => btn.addEventListener('click', () => {
+    requestTokenSync({ btn, label: '重新同步凭据' });
+  }));
 }
 // 项目页：LG 译文导入面板（本会话记住最近一次导出的清单路径）
 const LG_LAST = {};
+// 「从站点同步」：置同步请求 → 站点页面（油猴）≤5s 探测到 pendingAuth 就推一次凭据 → 等 lastSync 变化。
+// 设置页按钮与项目卡/导入面板的「重新同步凭据」（need-auth 时出现）共用。
+async function requestTokenSync({ btn = null, hint = null, label = '从站点同步' } = {}) {
+  if (btn && btn.disabled) return;
+  const beforeAt = LAST_SYNC_AT;
+  if (btn) { btn.disabled = true; btn.textContent = '等待站点推送…'; }
+  if (hint) hint.textContent = '已请求，站点页面会在几秒内推送（需页面开着且已登录）';
+  try {
+    await post('/auth/request', {});
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = label; }
+    if (hint) hint.textContent = '';
+    toast(e.message, true);
+    return;
+  }
+  const done = (okMsg, badMsg) => {
+    if (btn) { btn.disabled = false; btn.textContent = label; }
+    if (hint) hint.textContent = badMsg || '从站点页面（油猴）取当前 token；需站点页面开着且已登录';
+    if (okMsg) toast(okMsg); else toast(badMsg, true);
+    loadSettings();
+    refresh();
+  };
+  const deadline = Date.now() + 35000;
+  const timer = setInterval(async () => {
+    let s = null;
+    try { s = await api('/settings'); } catch (e) { /* 瞬时错误继续等 */ }
+    const ls = s && s.settings && s.settings.lastSync;
+    if (ls && (ls.at || 0) > beforeAt) {
+      clearInterval(timer);
+      done('已同步（' + (ls.ua || '?') + ' · ' + (ls.workersCount == null ? '?' : ls.workersCount) + ' 个翻译器）');
+      return;
+    }
+    if (Date.now() > deadline) {
+      clearInterval(timer);
+      done(null, '未收到推送：确认站点页面已打开并且已登录');
+    }
+  }, 1500);
+}
+
+// 项目页：提交后回读校验（站点已提交译文 mode=zh vs 本地 txt，逐章比对）+ 断点状态
+function openLgReadbackPanel(card, bookKey, preset = {}) {
+  const box = card.querySelector('.proj-detail');
+  box.style.display = 'block';
+  box.innerHTML = '';
+  const state = { txtPath: preset.txtPath || '', manifestPath: preset.manifestPath || (LG_LAST[bookKey] || {}).manifestFile || '' };
+  const mkRow = () => { const row = document.createElement('div'); row.style.cssText = 'margin:4px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap'; return row; };
+  const head = document.createElement('div');
+  head.innerHTML = '<b>回读校验</b><span class="muted">：把站点已提交的整本译文拉回来（mode=zh），与本地 txt 逐章比对；站点标题与本地译名不同译法也能对上（按块序 + 非空行比对）</span>';
+  const txtRow = mkRow();
+  const txtLabel = document.createElement('span'); txtLabel.textContent = '本地译文 txt：';
+  const txtInput = document.createElement('input'); txtInput.type = 'file'; txtInput.accept = '.txt,text/plain';
+  txtRow.append(txtLabel, txtInput);
+  const mfRow = mkRow();
+  const mfLabel = document.createElement('span'); mfLabel.textContent = '清单 json（可选）：';
+  const mfInput = document.createElement('input'); mfInput.type = 'file'; mfInput.accept = '.json,application/json';
+  const mfHint = document.createElement('span'); mfHint.className = 'muted';
+  mfHint.textContent = state.manifestPath ? ('默认用本会话导出时的清单：' + state.manifestPath) : '不给清单也能比对（章节顺序取站点 TOC）；给了清单则契约格式（一行一段）的 txt 也能逐章切';
+  mfRow.append(mfLabel, mfInput, mfHint);
+  const opRow = mkRow();
+  const runBtn = document.createElement('button'); runBtn.className = 'btn'; runBtn.textContent = '开始回读校验';
+  const stateLine = document.createElement('span'); stateLine.className = 'muted';
+  stateLine.textContent = '断点状态查询中…';
+  opRow.append(runBtn, stateLine);
+  const report = document.createElement('div'); report.className = 'muted';
+  report.textContent = '选好本地译文 txt 后点「开始回读校验」。';
+  box.append(head, txtRow, mfRow, opRow, report);
+  api('/lg/import-state?book=' + encodeURIComponent(bookKey)).then((r) => {
+    stateLine.textContent = (r && r.doneCount) ? ('断点：已提交 ' + r.doneCount + ' 章（' + new Date(r.updatedAt || 0).toLocaleString() + '）') : '断点：无（还没提交过）';
+  }).catch(() => { stateLine.textContent = ''; });
+  runBtn.addEventListener('click', async () => {
+    try {
+      const txtFile = txtInput.files && txtInput.files[0];
+      if (!txtFile && !state.txtPath) { toast('请先选择本地译文 txt', true); return; }
+      runBtn.disabled = true;
+      report.textContent = '上传并启动…';
+      const uploadFile = async (file) => { const text = await file.text(); const r = await post('/lg/upload', { filename: file.name, content: text }); return r.path; };
+      if (txtFile) state.txtPath = await uploadFile(txtFile);
+      const mfFile = mfInput.files && mfInput.files[0];
+      if (mfFile) state.manifestPath = await uploadFile(mfFile);
+      const r = await post('/run', { bookKey, job: 'lg-readback', options: { txtPath: state.txtPath, manifestPath: state.manifestPath || '' } });
+      report.textContent = '已入队 lg-readback #' + r.id + '，等待执行…';
+      toast('已入队 lg-readback（#' + r.id + '）');
+      const timer = setInterval(async () => {
+        try {
+          const st = await api('/status');
+          const item = (st.queue || []).find((x) => x.id === r.id);
+          if (!item) { report.textContent = '队列已滚动出最近 20 条；完整结果看「任务」页最近 run。'; clearInterval(timer); runBtn.disabled = false; return; }
+          const p = item.progress || null;
+          let html = '<div><b>lg-readback #' + r.id + ' · ' + esc(item.state) + '</b> ' + (p && p.message ? esc(p.message) : '') + '</div>';
+          if (item.stats && (item.state === 'done' || item.state === 'failed')) {
+            const s = item.stats;
+            if (Array.isArray(s.mismatches)) {
+              const rows = s.mismatches.map((m) => '<div><span class="bad">✗</span> ' + esc(m.title || m.chapterId) +
+                '（本地 ' + m.localLines + ' 行 / 站点 ' + m.siteLines + ' 行，命中 ' + m.hits + '）' +
+                (m.first ? ' · 首差第 ' + m.first.line + ' 行：' + esc(String(m.first.local).slice(0, 40)) + ' ↔ ' + esc(String(m.first.site).slice(0, 40)) : '') + '</div>').join('');
+              html += '<div><b>' + (s.ok === s.total ? '<span class="ok">回读：' + s.ok + '/' + s.total + ' 章一致</span>' : '回读：' + s.ok + '/' + s.total + ' 章一致') + '</b>' +
+                (s.kanaLines ? ' · 站点侧假名残留 ' + s.kanaLines + ' 行' : '') + '</div>' + rows;
+            } else if (s.error) {
+              html += '<div class="bad">' + esc(s.error) + '</div>';
+            }
+          }
+          report.innerHTML = html;
+          if (item.state === 'done' || item.state === 'failed') { clearInterval(timer); runBtn.disabled = false; refresh(); }
+        } catch (e) { report.textContent = '进度查询失败：' + e.message; }
+      }, 1000);
+    } catch (e) { report.textContent = '启动失败：' + e.message; runBtn.disabled = false; }
+  });
+}
 function openLgImportPanel(card, bookKey) {
   const box = card.querySelector('.proj-detail');
   box.style.display = 'block';
@@ -819,7 +946,8 @@ function openLgImportPanel(card, bookKey) {
   const limitLabel = document.createElement('span'); limitLabel.textContent = '限章数';
   const limitInput = document.createElement('input'); limitInput.type = 'number'; limitInput.min = '0'; limitInput.value = '0';
   const applyBtn = document.createElement('button'); applyBtn.className = 'btn'; applyBtn.textContent = '提交通过章'; applyBtn.disabled = true;
-  opRow.append(verifyBtn, limitLabel, limitInput, applyBtn);
+  const readbackBtn = document.createElement('button'); readbackBtn.className = 'btn ghost'; readbackBtn.textContent = '回读校验';
+  opRow.append(verifyBtn, limitLabel, limitInput, applyBtn, readbackBtn);
   const report = document.createElement('div'); report.className = 'muted';
   report.textContent = '选好文件后点「校验」：逐章核对行数/空行模式/源 sha1，再决定提交。站点「下载原文」经 LG 翻译的整本 txt（含 # 标题行）会自动识别并对齐。';
   box.append(txtRow, mfRow, opRow, report);
@@ -848,14 +976,16 @@ function openLgImportPanel(card, bookKey) {
         '<div>' + (c.ok ? '<span class="ok">✓</span>' : '<span class="bad">✗</span>') + ' ' +
         esc(c.title || c.chapterId) + '（' + c.count + ' 段）' + (c.ok ? '' : '：' + esc(c.reason)) + '</div>').join('');
       const convNote = v.converted ? ('<div class="muted">↻ ' + esc(v.convertNote || '已识别站点导出格式并自动对齐') + '</div>') : '';
-      report.innerHTML = convNote + '<div><b>校验：' + v.okCount + '/' + v.total + ' 章通过 · 疑似未翻 ' + v.untranslated + ' 行</b>（' + esc(v.note) + '）</div>' + rows;
+      const authNote = v.needAuth ? '<div class="bad">凭据失效（401）：点「重新同步凭据」后再校验/提交</div>' : '';
+      report.innerHTML = convNote + authNote + '<div><b>校验：' + v.okCount + '/' + v.total + ' 章通过 · 疑似未翻 ' + v.untranslated + ' 行</b>（' + esc(v.note) + '）</div>' + rows;
       applyBtn.disabled = !(v.okCount > 0);
       toast('校验完成：' + v.okCount + '/' + v.total + ' 章通过');
     } catch (e) { report.textContent = '校验失败：' + e.message; applyBtn.disabled = true; }
   });
-  applyBtn.addEventListener('click', async () => {
+  // 提交（applyBtn 与 need-auth 后的「继续提交」共用；断点续跑由 daemon 侧按内容 sha 自动跳过已完成章）
+  const submitImport = async () => {
+    const limit = Math.max(0, Number(limitInput.value) || 0);
     try {
-      const limit = Math.max(0, Number(limitInput.value) || 0);
       const r = await post('/run', { bookKey, job: 'lg-import', options: { txtPath: state.txtPath, manifestPath: state.manifestPath, limit } });
       applyBtn.disabled = true;
       const progressBox = document.createElement('div');
@@ -872,10 +1002,12 @@ function openLgImportPanel(card, bookKey) {
           const head = 'lg-import #' + r.id + ' · ' + esc(item.state);
           if (item.state === 'queued') { progressBox.innerHTML = head + '（排队中）'; return; }
           let body = '';
+          let needAuth = false;
           if (p) {
             if (p.phase === 'verify') body = esc(p.message || '校验中…');
             else if (p.phase === 'apply') body = esc(p.message || '提交中…') + (p.failed ? ' · 失败 ' + p.failed : '');
             else if (p.phase === 'done') body = esc(p.message || '完成');
+            else if (p.phase === 'need-auth') { body = '<span class="bad">' + esc(p.message || '凭据失效') + '</span>'; needAuth = true; }
             else if (p.phase === 'error') body = '<span class="bad">' + esc(p.message || '失败') + '</span>';
           }
           let results = '';
@@ -884,14 +1016,35 @@ function openLgImportPanel(card, bookKey) {
             const list = (s.results || []).map((x) =>
               '<div>' + (x.status === 'uploaded' ? '<span class="ok">✓</span>' : '<span class="bad">✗</span>') + ' ' +
               esc(x.title || x.chapterId) + (x.status === 'uploaded' ? '（' + x.count + ' 段）' : '：' + esc(x.error || '')) + '</div>').join('');
-            results = '<div>上传 ' + s.uploaded + ' · 失败 ' + s.failed + ' · 未过校验 ' + (s.total - s.ok) + ' · 疑似未翻 ' + s.untranslated + ' 行</div>' + list;
+            results = '<div>上传 ' + s.uploaded + ' · 失败 ' + s.failed + ' · 断点跳过 ' + (s.skipped || 0) + ' · 未过校验 ' + (s.total - s.ok) + ' · 疑似未翻 ' + s.untranslated + ' 行</div>' + list;
           }
           progressBox.innerHTML = '<div><b>' + head + '</b> ' + body + '</div>' + results;
-          if (item.state === 'done' || item.state === 'failed') { clearInterval(timer); refresh(); }
+          if (needAuth) {
+            // 断点续跑入口：先同步凭据，再点「继续提交」（已完成章由断点自动跳过）
+            if (!progressBox.querySelector('[data-lg-resume]')) {
+              const resumeBtn = document.createElement('button');
+              resumeBtn.className = 'btn';
+              resumeBtn.dataset.lgResume = '1';
+              resumeBtn.textContent = '继续提交（跳过已完成章）';
+              resumeBtn.addEventListener('click', () => { progressBox.remove(); submitImport(); });
+              const syncBtn = document.createElement('button');
+              syncBtn.className = 'btn ghost';
+              syncBtn.textContent = '重新同步凭据';
+              syncBtn.style.marginLeft = '6px';
+              syncBtn.addEventListener('click', () => requestTokenSync({ btn: syncBtn, label: '重新同步凭据' }));
+              progressBox.append(resumeBtn, syncBtn);
+            }
+          }
+          if (item.state === 'done' || item.state === 'failed') {
+            clearInterval(timer);
+            if (!needAuth) refresh();   // need-auth 时保留面板（里面有「继续提交」按钮）
+          }
         } catch (e) { progressBox.textContent = '进度查询失败：' + e.message; }
       }, 1000);
-    } catch (e) { toast(e.message, true); }
-  });
+    } catch (e) { toast(e.message, true); applyBtn.disabled = false; }
+  };
+  applyBtn.addEventListener('click', () => { submitImport(); });
+  readbackBtn.addEventListener('click', () => openLgReadbackPanel(card, bookKey, { txtPath: state.txtPath, manifestPath: state.manifestPath }));
 }
 async function toggleProjectDetail(card) {
   const box = card.querySelector('.proj-detail');
@@ -1004,6 +1157,7 @@ async function loadSettings() {
     $('proxy-enable').checked = px.enabled === true;
     $('proxy-url').value = px.url || '';
     $('proxy-noproxy').value = px.noProxy || '127.0.0.1,localhost,::1';
+    $('proxy-curlfallback').checked = px.curlFallback !== false;
     $('proxy-info').textContent = px.enabled && px.url
       ? ('当前：经 ' + px.url + ' 出网 · 直连 ' + (px.noProxy || '—'))
       : '当前：全部直连（代理未启用）';
@@ -1106,52 +1260,14 @@ $('site-retries-save').addEventListener('click', async () => {
     toast('站点请求重试次数已保存（' + n + ' 次，立即生效）'); loadSettings();
   } catch (e) { toast(e.message, true); }
 });
-// 「从站点同步」：置同步请求 → 站点页面（油猴）在 ≤5s 探测里看到 pendingAuth 就推一次凭据 → 这里等 lastSync 变化
-$('token-sync').addEventListener('click', async () => {
-  const btn = $('token-sync');
-  const hint = $('token-sync-hint');
-  if (btn.disabled) return;
-  const beforeAt = LAST_SYNC_AT;
-  btn.disabled = true;
-  btn.textContent = '等待站点推送…';
-  hint.textContent = '已请求，站点页面会在几秒内推送（需页面开着且已登录）';
-  try {
-    await post('/auth/request', {});
-  } catch (e) {
-    btn.disabled = false; btn.textContent = '从站点同步';
-    hint.textContent = '';
-    toast(e.message, true);
-    return;
-  }
-  const done = (okMsg, badMsg) => {
-    btn.disabled = false;
-    btn.textContent = '从站点同步';
-    hint.textContent = badMsg || '从站点页面（油猴）取当前 token；需站点页面开着且已登录';
-    if (okMsg) toast(okMsg); else toast(badMsg, true);
-    loadSettings();
-  };
-  const deadline = Date.now() + 35000;
-  const timer = setInterval(async () => {
-    let s = null;
-    try { s = await api('/settings'); } catch (e) { /* 瞬时错误继续等 */ }
-    const ls = s && s.settings && s.settings.lastSync;
-    if (ls && (ls.at || 0) > beforeAt) {
-      clearInterval(timer);
-      done('已同步（' + (ls.ua || '?') + ' · ' + (ls.workersCount == null ? '?' : ls.workersCount) + ' 个翻译器）');
-      return;
-    }
-    if (Date.now() > deadline) {
-      clearInterval(timer);
-      done(null, '未收到推送：确认站点页面已打开并且已登录');
-    }
-  }, 1500);
-});
+$('token-sync').addEventListener('click', () => requestTokenSync({ btn: $('token-sync'), hint: $('token-sync-hint') }));
 $('proxy-save').addEventListener('click', async () => {
   try {
     await post('/settings', { proxy: {
       enabled: $('proxy-enable').checked,
       url: $('proxy-url').value.trim(),
       noProxy: $('proxy-noproxy').value.trim(),
+      curlFallback: $('proxy-curlfallback').checked,
     } });
     toast('代理设置已保存并生效'); loadSettings();
   } catch (e) { toast(e.message, true); }
