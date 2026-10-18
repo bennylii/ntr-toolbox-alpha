@@ -66,6 +66,12 @@ const normalizeSiteRetries = (raw) => {
   return Number.isFinite(n) ? Math.max(0, Math.min(8, n)) : 3;
 };
 
+// 翻译上下文行数（config.translate.contextBefore/contextAfter；默认 0 = 关闭，0–20）
+const normalizeContextLines = (raw, field) => {
+  const n = Math.floor(Number(raw && raw[field]));
+  return Number.isFinite(n) ? Math.max(0, Math.min(20, n)) : 0;
+};
+
 export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler = null, queue, makeClient, engine, agentLoop, agentEvents, port = 7331, log = console, lgImportRunner = null, lgReadbackRunner = null, lgDirs = null }) {
   // 单队列（控制面 /run 与 Agent 工具共用；未传入时按本进程管线自建）
   const jobQueue = queue || createJobQueue({
@@ -203,6 +209,10 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
             serve: { port, ...serveConfig() },
             proxy: normalizeProxyConfig(store.getConfig('proxy')),
             site: { retries: normalizeSiteRetries(store.getConfig('site')) },
+            translate: {
+              contextBefore: normalizeContextLines(store.getConfig('translate'), 'contextBefore'),
+              contextAfter: normalizeContextLines(store.getConfig('translate'), 'contextAfter'),
+            },
             textPreserve: { ...readTextPreserveConfig(store), presets: presetInfo() },
           },
         });
@@ -257,6 +267,17 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
             // 站点请求传输层重试次数（墙内代理链路抖动大时加档；0=不重试，上限 8）
             store.setConfig('site', { ...cur, retries: Math.max(0, Math.min(8, n)) });
           }
+        }
+        if (body.translate && typeof body.translate === 'object') {
+          const cur = store.getConfig('translate') || {};
+          const next = { ...cur };
+          // 相邻段上下文行数（0 = 关闭；0–20）。管线每轮现读，保存即生效
+          for (const field of ['contextBefore', 'contextAfter']) {
+            if (body.translate[field] === undefined) continue;
+            const n = Math.floor(Number(body.translate[field]));
+            if (Number.isFinite(n)) next[field] = Math.max(0, Math.min(20, n));
+          }
+          store.setConfig('translate', next);
         }
         if (body.textPreserve && typeof body.textPreserve === 'object') {
           const cur = store.getConfig('textPreserve') || {};

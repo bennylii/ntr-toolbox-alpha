@@ -166,6 +166,16 @@ node daemon/index.mjs forget    <bookKey>
 - **运行**：`check` 任务（CLI / 任务页 / `/run job=check`）、agent `run_check`·`quality_report`；全部确定性启发式、无 LLM、不写站点（`--propose` 仅把样例转提案，`--tsv` 导表）；
 - **警告落库**：每次 check **全量替换**该书 `warnings` 表（章节/行号/码/细节/证据 JSON）；消费面：`GET /warnings?book=&code=&limit=`、agent 只读工具 `list_warnings`、工作区数据集 `warnings/entries.jsonl`、控制台项目详情（按码计数 + 前 20 条）。
 
+## 翻译上下文（相邻段参考；默认关闭）
+
+- 开启后，每个段的请求会在正文 `#n:` 块**之前**多带两块：`【参考上文】（只用于理解语境，不要翻译，也不要出现在输出里）：` 与 `【参考下文】（同上）：`；system 提示一字不动（系统指令不随上下文变化）。
+- **上文**语义镜像 LinguaGacha v0.125.0 的 `preceding_lines_threshold`（`planning/translation-planner.ts:21,265-293` 的「句末标点门槛」）：从上一段末尾往前收**以句末标点结尾的连续行**（`. 。 ? ？ ! ！ … ' " 」 』`），遇到不达标的行就停——所以有时一行都不带；可跨段回溯（最多 N 行）。
+- **下文**（LG 没有的方向）对称设计：从下一段开头往后收，**收到句末标点为止（含该行）**——因此正文行普遍以句末标点结尾时通常正好 1 行。
+- 行数与开关：控制台「设置 → 翻译上下文」（`config.translate.contextBefore/contextAfter`，0–20，0 = 关闭，保存后下一轮生效）；CLI `translate --context-before N --context-after N`（不给旗标则用 config）；`/run` 的 `options` 可单次覆盖。**默认 0 = 与旧行为逐字一致**（`translate-test` 钉死）。
+- 成本与缓存：上下文计入「提示词上限」（`maxPromptChars`，默认 12000）——触上限就调大上限或减行数；**段缓存键在上下文非空时追加上下文分量**，所以「关闭 → 打开」这类变化会让已缓存的段重译一次（之后同设置命中），「打开 → 关闭」则旧键仍命中（零缓存流失）。日志打 `段 i/n：参考上文 X 行 / 下文 Y 行`（不打印原文）。
+- 与 LG 的两处刻意偏离：① 双向（LG 只有上文）；② **补发重试（③ 条目级）也带上下文**（LG 重试丢上下文）。
+- 只影响 daemon 自己发出的请求；站点页面里那个浏览器 worker 的请求仍由站点代码拼装（不带上下文）。
+
 ## 提示词模板
 
 - 四槽 `prefix / base / thinking / suffix`（`prompts` 表，`bookKey=''` 为全局；按书覆盖全局）；

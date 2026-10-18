@@ -5,7 +5,7 @@
 // 内存纪律：段落/译文只在单章作用域内存在，上传后随作用域释放（工作区泄漏的正面修复）。
 // 调度纪律：所有 LLM 请求经 LlmScheduler（默认全局单线程）；本次 run 的选项以参数覆盖，不改共享配置。
 import crypto from 'node:crypto';
-import { segmentLines, translateSegment, splitEmptyParagraphs, mergeEmptyParagraphs } from './translate.mjs';
+import { segmentLines, translateSegment, splitEmptyParagraphs, mergeEmptyParagraphs, collectContextLines } from './translate.mjs';
 import { LlmScheduler } from './scheduler.mjs';
 import { processorFromStore } from './processors.mjs';
 import { templateFromStore, renderSystemPrompt } from './prompt.mjs';
@@ -56,6 +56,15 @@ export class TranslationPipeline {
   async runBook(bookKey, { signal, options } = {}) {
     const opt = { ...this.options, ...(options || {}) };
     const { translatorId, level, concurrency } = opt;
+    // 相邻段上下文（参考上文/参考下文行数）：本次运行 options > config.translate > 0（0 = 关闭）。
+    // 每轮现读 config（与 processorFromStore / templateFromStore 同款）→ 控制台保存即生效，不必重启。
+    const txCfg = (this.store && typeof this.store.getConfig === 'function' ? this.store.getConfig('translate') : null) || {};
+    const ctxLines = (runValue, cfgValue) => {
+      const n = Number(runValue !== undefined ? runValue : cfgValue);
+      return Number.isFinite(n) && n > 0 ? Math.min(20, Math.floor(n)) : 0;
+    };
+    const contextBefore = ctxLines(opt.contextBefore, txCfg.contextBefore);
+    const contextAfter = ctxLines(opt.contextAfter, txCfg.contextAfter);
     const holder = `daemon:${process.pid}`;
     if (!this.store.acquireLock(bookKey, holder)) throw new Error('同书已有运行器在跑（锁被占用）；确认浏览器/其他会话没在跑同一本');
     const runId = this.store.startRun(bookKey, 'translate');
@@ -123,6 +132,9 @@ export class TranslationPipeline {
 
           // 分段 → 并发翻译（段缓存落库；未完成的段在下次运行复用）
           const segments = segmentLines(filled);
+          // 段偏移（segments 是 filled 的连续切片）：上下文收集要按本章原位往前/往后走
+          const segOffsets = [];
+          { let off = 0; for (const seg of segments) { segOffsets.push(off); off += seg.length; } }
           const zhParts = new Array(segments.length).fill(null);
           let cursor = 0;
           let chapterRetries = 0;   // 本章各段重试次数取最大（质检 RETRY_THRESHOLD 用）
@@ -135,11 +147,31 @@ export class TranslationPipeline {
               const seg = segments[index];
               const prepared = seg.map((line) => processor.pre(line));
               const preLines = prepared.map((p) => p.text);
+              // 参考上文/下文：按本章原位收集（LG 的句末标点门槛语义），再过处理链投影
+              // （镜像 LG 的 project_precedings；pre 是逐行 ctx、永不 post，安全）
+              const contextOn = contextBefore > 0 || contextAfter > 0;
+              let preceding = [];
+              let following = [];
+              if (contextOn) {
+                const segStart = segOffsets[index];
+                const got = collectContextLines(filled, { start: segStart, end: segStart + seg.length }, { before: contextBefore, after: contextAfter });
+                preceding = got.preceding.map((line) => processor.pre(line).text);
+                following = got.following.map((line) => processor.pre(line).text);
+              }
+              // 上下文参与段缓存键——但仅在非空时追加，保证「关闭/空上下文」与旧键逐字相同（零缓存流失）
+              const ctxKey = (preceding.length > 0 || following.length > 0)
+                ? `|pre:${JSON.stringify(preceding)}|post:${JSON.stringify(following)}`
+                : '';
               const segKey = crypto.createHash('sha1')
-                .update(JSON.stringify(preLines)).update('|').update(processor.version)
+                .update(JSON.stringify(preLines)).update('|').update(processor.version).update(ctxKey)
                 .digest('hex');
+              const ctxLog = `参考上文 ${preceding.length} 行 / 下文 ${following.length} 行`;
               const cached = this.store.getSeg(bookKey, segKey);
-              if (Array.isArray(cached) && cached.length === seg.length) { zhParts[index] = cached; continue; }
+              if (Array.isArray(cached) && cached.length === seg.length) {
+                zhParts[index] = cached;
+                if (contextOn) this.log.log(`[translate] ${chapterKey} 段 ${index + 1}/${segments.length}：${ctxLog}（段缓存命中）`);
+                continue;
+              }
               const glossary = (dto.glossary && Object.keys(dto.glossary).length > 0) ? dto.glossary : {};
               let segRetries = 0;
               const rawZh = await translateSegment(preLines, {
@@ -148,6 +180,8 @@ export class TranslationPipeline {
                 signal,
                 systemPrompt: rendered.text,
                 thinking: template.thinking,
+                preceding,
+                following,
                 wait: (ms) => sleep(ms),   // 传输层重试耗尽后的等待（调度器也会在派发前按冷却等待）
                 onRetry: (n) => { segRetries = n; },
                 log: (msg) => this.log.log(`[translate] ${chapterKey} ${msg}`),
@@ -160,6 +194,7 @@ export class TranslationPipeline {
               chapterRetries = Math.max(chapterRetries, segRetries);
               this.store.putSeg(bookKey, segKey, zh);
               zhParts[index] = zh;
+              if (contextOn) this.log.log(`[translate] ${chapterKey} 段 ${index + 1}/${segments.length}：${ctxLog}`);
             }
           };
           await Promise.all(Array.from({ length: Math.min(concurrency, segments.length) }, () => lane()));

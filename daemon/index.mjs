@@ -12,6 +12,7 @@
 //   export-src --book key [--out file]   导出站点原文为 LG 可翻译的纯文本（+对齐清单）
 //   import-lg --book key --txt file --manifest file [--apply] [--limit N]   LG 译文结果对齐导入（gpt 端）
 //   translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
+//             [--context-before N] [--context-after N]   相邻段参考上下文行数（不给则用 config.translate，0 = 关闭）
 //   watch [--interval 分钟]  常驻：定期按 expire 档补翻未译/过期章节
 //   serve [--port 7331]     本机控制面（/status /progress /auth /run）
 //   status                  控制台状态
@@ -136,6 +137,9 @@ const pipeline = new TranslationPipeline({
     level: typeof flags.level === 'string' ? flags.level : 'expire',
     concurrency: Math.max(1, Number(flags.concurrency) || 2),
     maxChapters: Math.max(0, Number(flags['max-chapters']) || 0),
+    // 相邻段上下文行数：不给旗标则留 undefined → 由 config.translate 决定（控制台保存即生效）
+    contextBefore: pickNum(flags['context-before'], undefined, undefined),
+    contextAfter: pickNum(flags['context-after'], undefined, undefined),
     rssLimitMB: RSS_LIMIT_MB,
   },
 });

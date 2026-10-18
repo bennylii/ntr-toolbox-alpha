@@ -295,7 +295,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { ...cors, 'content-type': 'application/json', 'cache-control': 'no-store' });
     const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || (url.pathname.split('/').filter(Boolean)[3] || 'mock-novel');
     const state = transBook(novelId);
-    if (/\/chapter-task\//.test(url.pathname) && !/mock-trans/.test(novelId) && !/mock-empty/.test(novelId)) {
+    if (/\/chapter-task\//.test(url.pathname) && !/mock-trans/.test(novelId) && !/mock-empty/.test(novelId) && !isCtxBook(novelId)) {
       // 非 mock-trans 的书：rich 风格（25/12 段 + 对齐旧译，供修句/回扫用例）
       const ch = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
       const n = ch === 'ch2' ? 12 : 25;
@@ -312,7 +312,8 @@ const server = http.createServer(async (req, res) => {
     }
     if (/\/chapter-task\//.test(url.pathname)) {
       const chapterId = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
-      const done = state.get(chapterId);
+      // mock-ctx：永远当「未译」（不返回旧译）→ 便于重置进度后重跑，验证上下文参与的段缓存键
+      const done = isCtxBook(novelId) ? undefined : state.get(chapterId);
       const paragraphs = paragraphsFor(novelId, chapterId);
       const uploaded = uploadsOf(novelId).get(chapterId);
       res.end(JSON.stringify({
@@ -349,7 +350,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && /^\/api\/(novel|wenku)\//.test(url.pathname)) {
     const segs = url.pathname.split('/').filter(Boolean);
     const rich = /mock-src/.test(url.pathname);
-    const trans = /mock-trans/.test(url.pathname) || /mock-empty/.test(url.pathname);   // mock-empty：空段夹具（④）
+    const trans = /mock-trans/.test(url.pathname) || /mock-empty/.test(url.pathname) || /mock-ctx/.test(url.pathname);   // mock-empty：空段夹具（④）；mock-ctx：上下文夹具
     const boost = /mock-boost/.test(url.pathname);
     const noted = /mock-noted/.test(url.pathname);
     const check = /mock-check/.test(url.pathname);
@@ -617,12 +618,29 @@ const server = http.createServer(async (req, res) => {
   if (userContent.includes('你是一个轻小说翻译者') || userContent.includes('注意要保留每一段开头的编号')) {
     const numbered = [...userContent.matchAll(/^#(\d+)[:：](.*)$/gm)].map((m) => ({ id: Number(m[1]), text: m[2] }));
     const glossaryLines = [...userContent.matchAll(/^.+ => .+$/gm)].length;
-    stats.lastTranslate = {
+    // 相邻段上下文块（daemon 的「参考上文/参考下文」）：数块内行数，供 e2e/daemon-test 断言请求形状
+    const countContextBlock = (text, marker) => {
+      const lines = String(text || '').split('\n');
+      const start = lines.findIndex((line) => line.startsWith(marker));
+      if (start < 0) return 0;
+      let n = 0;
+      for (let i = start + 1; i < lines.length; i += 1) {
+        const line = lines[i];
+        if (line.startsWith('【') || line.startsWith('#') || line.startsWith('翻译的时候参考下面的术语表') || line.startsWith('小说原文如下')) break;
+        if (line.trim() === '') continue;
+        n += 1;
+      }
+      return n;
+    };
+    const record = {
       lines: numbered.length,
       glossaryLines,
+      context: { preceding: countContextBlock(userContent, '【参考上文】'), following: countContextBlock(userContent, '【参考下文】') },
       system: String(((body.messages || []).find((m) => m.role === 'system') || {}).content || '').slice(0, 300),
       userHead: String(userContent || '').slice(0, 160),
     };
+    stats.lastTranslate = record;
+    stats.translateLog = [...(stats.translateLog || []), record].slice(-5);   // 最近 5 条（多段并发/重跑用）
     const out = numbered.length > 0
       ? numbered.map((line) => `#${line.id}:【模拟译】第${line.id}段：这是由本地模拟端点生成的译文。`)
       : ['#1:【模拟译】这是由本地模拟端点生成的译文。'];

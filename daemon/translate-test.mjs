@@ -186,5 +186,93 @@ await t('空段预过滤（④）：空段不进分段/请求；原位回填后�
   assert.deepEqual(T.mergeEmptyParagraphs(['', '  '], []), ['', '  ']);
 });
 
+console.log('== 相邻段上下文（参考上文/参考下文：LG 句末门槛 + 对称下文） ==');
+await t('关闭态：用户消息与旧实现逐字一致（不带任何上下文块）', () => {
+  const expected = [
+    '翻译的时候参考下面的术语表：',
+    'アリス => 爱丽丝',
+    '小说原文如下，注意要保留每一段开头的编号：',
+    '#1:アリスが来た',
+    '#2:ボブが寝た',
+  ].join('\n');
+  const user = T.buildTranslateMessages(['アリスが来た', 'ボブが寝た'], { 'アリス': '爱丽丝' })[1].content;
+  assert.equal(user, expected);
+  // 空数组/空白串等同未传
+  const same = T.buildTranslateMessages(['アリスが来た', 'ボブが寝た'], { 'アリス': '爱丽丝' }, { preceding: [], following: ['  '] })[1].content;
+  assert.equal(same, expected);
+});
+
+await t('上下文块渲染：位置在术语表之前、块头与「不要翻译」指令、行首 # 转全角', () => {
+  const user = T.buildTranslateMessages(['本文'], {}, {
+    preceding: ['上文一。', '  #12:像是编号的行'],
+    following: ['下文一。'],
+  })[1].content;
+  const lines = user.split('\n');
+  const iPre = lines.indexOf('【参考上文】（只用于理解语境，不要翻译，也不要出现在输出里）：');
+  const iFol = lines.indexOf('【参考下文】（同上）：');
+  const iGloss = lines.findIndex((l) => l.startsWith('小说原文如下'));
+  assert.ok(iPre >= 0 && iFol > iPre && iGloss > iFol, user);
+  assert.equal(lines[iPre + 1], '上文一。');
+  assert.equal(lines[iPre + 2], '  ＃12:像是编号的行', '行首 # 转全角，防止被解析器当成正文 #n: 行');
+  assert.equal(lines[iFol + 1], '下文一。');
+  assert.ok(user.includes('#1:本文'), '正文编号不受影响');
+  assert.ok(!/^#12:/m.test(user), '上下文里的 #12: 不会以半角 # 出现在行首');
+});
+
+await t('单行段：上下文存在时仍追加「原文到此为止」', () => {
+  const user = T.buildTranslateMessages(['本文'], {}, { preceding: ['上文。'] })[1].content;
+  assert.ok(user.endsWith('原文到此为止'), user);
+});
+
+await t('collectContextLines：句末门槛（遇非句末行即停，不跳过）+ 上限', () => {
+  const lines = ['一。', '二。', '三。', '未完的句子', '五。', '六。'];
+  // 段 = ['六。']（start=5）
+  const got = T.collectContextLines(lines, { start: 5, end: 6 }, { before: 3, after: 0 });
+  assert.deepEqual(got.preceding, ['五。'], '只收紧邻的句末行；再往上碰到「未完的句子」就停（LG 语义），不继续收');
+  assert.deepEqual(got.following, []);
+  const more = T.collectContextLines(['一。', '二。', '三。', '四。'], { start: 4, end: 4 }, { before: 2 });
+  assert.deepEqual(more.preceding, ['三。', '四。'], '最多 before 行，且按原序');
+});
+
+await t('collectContextLines：跨段回溯（从上一段末尾继续往前）+ 章首边界 + 空行跳过', () => {
+  // 模拟 3 段：seg0 = 0..1，seg1 = 2..3，seg2 = 4..5；seg2 的上文应跨过 seg1 的末尾继续收
+  const lines = ['s0a。', 's0b。', 's1a。', 's1b。', 's2a。', 's2b。'];
+  const got = T.collectContextLines(lines, { start: 4, end: 6 }, { before: 3 });
+  assert.deepEqual(got.preceding, ['s0b。', 's1a。', 's1b。'].slice(0, 3), '按原序、最多 3 行');
+  const head = T.collectContextLines(lines, { start: 0, end: 2 }, { before: 3, after: 0 });
+  assert.deepEqual(head.preceding, [], '章首无上文');
+  const withBlank = T.collectContextLines(['一。', '', '  ', '三。'], { start: 4, end: 4 }, { before: 2 });
+  assert.deepEqual(withBlank.preceding, ['一。', '三。'], '空行跳过、不占上限，顺序与原章一致');
+});
+
+await t('collectContextLines：下文对称（收到句末标点为止）+ 章末边界', () => {
+  const lines = ['a。', 'b1', 'b2。', 'c。', 'd。'];
+  const got = T.collectContextLines(lines, { start: 0, end: 1 }, { after: 3 });
+  assert.deepEqual(got.following, ['b1', 'b2。'], '收到句末标点（含该行）就停');
+  const tail = T.collectContextLines(lines, { start: 4, end: 5 }, { after: 3 });
+  assert.deepEqual(tail.following, [], '章末无下文');
+  const zero = T.collectContextLines(lines, { start: 0, end: 1 }, { before: 0, after: 0 });
+  assert.deepEqual([zero.preceding, zero.following], [[], []], '0 = 关闭');
+  assert.deepEqual(T.CONTEXT_END_PUNCTUATION.has('」'), true);
+});
+
+await t('translateSegment：首轮与补发请求都带上下文（③ 补发也保留）', async () => {
+  const users = [];
+  const result = await T.translateSegment(['a', 'b'], {
+    preceding: ['上文。'],
+    following: ['下文。'],
+    call: async (messages) => {
+      users.push(messages[1].content);
+      return users.length === 1
+        ? { ok: true, content: '#1:甲' }                     // 首轮缺 #2 → 走补发
+        : { ok: true, content: '#1:乙' };
+    },
+  });
+  assert.deepEqual(result, ['甲', '乙']);
+  assert.equal(users.length, 2);
+  assert.ok(users[0].includes('【参考上文】（') && users[0].includes('【参考下文】（同上）'), users[0].slice(0, 200));
+  assert.ok(users[1].includes('【参考上文】（'), '补发请求同样带上下文');
+  assert.ok(users[1].includes('#1:b'), '补发只含缺失行（重编号）');
+});
+
 console.log(`\n通过 ${pass}，失败 ${fail}`);
-process.exit(fail === 0 ? 0 : 1);

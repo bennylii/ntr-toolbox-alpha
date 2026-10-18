@@ -6,6 +6,8 @@
 // - 解析：/^#(\d+)(?:[:：]|\s+)(.*)/；空行保留原文；缺失编号抛"行数不匹配"；保留原行前导空白
 // - 重试：≤3 次；"输出语言不是中文"用 detectChinese 判定（utils.ts 的阈值）
 // - 二分拆分：仅当"连续 3 次显式行数检查失败且行数>1"触发（与站点一致的语义，含其可达性局限）
+// - 相邻段上下文：可选的「参考上文/参考下文」块（默认 0 行 = 关闭，与现状逐字相同）。
+//   上文镜像 LinguaGacha 的 preceding_lines_threshold（含"句末标点门槛"）；下文是本仓库的对称扩展。
 
 export const TRANSLATE_SYSTEM_PROMPT =
   '你是一个轻小说翻译者，将下面的轻小说翻译成简体中文。要求翻译准确，译文流畅，尽量保持原文写作风格。要求人名和专有名词也要翻译成中文。既不要漏掉任何一句，也不要增加额外的说明。注意保持换行格式，译文的行数必须要和原文相等。';
@@ -37,6 +39,44 @@ export function segmentLines(lines, options = {}) {
   return ranges.map((r) => lines.slice(r.start, r.end));
 }
 
+// ---- 相邻段上下文（参考上文/参考下文）----
+// 上文语义镜像 LinguaGacha v0.125.0 `src/backend/batch-translation/planning/translation-planner.ts:21,265-293`：
+// 从段首往前收集「以句末标点结尾」的连续行，遇到不以句末标点结尾的行即停（因此可能一行都不带）；
+// 下文（LG 没有的方向）对称：从段尾往后收，收到句末标点为止。都在本章 lines 内走，不跨章。
+export const CONTEXT_END_PUNCTUATION = new Set(['.', '。', '?', '？', '!', '！', '…', '\'', '"', '」', '』']);
+
+export function collectContextLines(lines, { start, end } = {}, { before = 0, after = 0 } = {}) {
+  const src = Array.isArray(lines) ? lines : [];
+  const from = Number.isFinite(start) ? start : 0;
+  const to = Number.isFinite(end) ? end : src.length;
+  const preceding = [];
+  const following = [];
+  const isEmpty = (line) => String(line == null ? '' : line).trim() === '';
+  const endsSentence = (line) => CONTEXT_END_PUNCTUATION.has(String(line == null ? '' : line).trim().slice(-1));
+  if (before > 0) {
+    for (let i = from - 1; i >= 0 && preceding.length < before; i -= 1) {
+      const line = src[i];
+      if (line === undefined) break;
+      if (isEmpty(line)) continue;        // 空行不进上下文（真站点空段已在分段前过滤，这里只做防御）
+      if (!endsSentence(line)) break;     // LG 语义：遇到非句末行就停（不是跳过）
+      preceding.unshift(line);
+    }
+  }
+  if (after > 0) {
+    for (let i = to; i < src.length && following.length < after; i += 1) {
+      const line = src[i];
+      if (line === undefined) break;
+      if (isEmpty(line)) continue;
+      following.push(line);
+      if (endsSentence(line)) break;      // 收到句末标点为止（含该行）
+    }
+  }
+  return { preceding, following };
+}
+
+// 上下文行：行首 # 转全角，防止模型把参考行回显成 "#n:" 被 parseTranslateAnswer 误认成正文行（静默串位）
+const contextLine = (line) => String(line == null ? '' : line).replace(/^(\s*)#/, '$1＃');
+
 // ---- 空段预过滤（④ 探针实测真站点 paragraphJp 含空段：空段不占编号/token，提交前原位回填）----
 // splitEmptyParagraphs：filled = 参与翻译的段（原序）；map[i] = 该段在 filled 中的下标（空段 -1）
 export function splitEmptyParagraphs(paragraphs) {
@@ -65,6 +105,8 @@ export function mergeEmptyParagraphs(paragraphs, filledZh) {
 }
 
 // ---- 提示词（镜像 openai-prompt.ts；systemPrompt/thinking 可由模板注入，协议段不可改）----
+// preceding/following（默认 0 行）：已由调用方投影过的相邻段文本，渲染成「参考上文/参考下文」块；
+// 都为空时用户消息与旧实现逐字相同（回归红线，translate-test 钉死）
 export function buildTranslateMessages(lines, glossary, options = {}) {
   const opts = options || {};
   const systemPrompt = (typeof opts.systemPrompt === 'string' && opts.systemPrompt.trim() !== '')
@@ -74,6 +116,17 @@ export function buildTranslateMessages(lines, glossary, options = {}) {
   const parts = [];
   const thinking = String(opts.thinking || '').trim();
   if (thinking !== '') parts.push(`【思考指引】\n${thinking}\n`);
+  const preceding = (Array.isArray(opts.preceding) ? opts.preceding : []).filter((line) => String(line == null ? '' : line).trim() !== '');
+  const following = (Array.isArray(opts.following) ? opts.following : []).filter((line) => String(line == null ? '' : line).trim() !== '');
+  if (preceding.length > 0) {
+    parts.push('【参考上文】（只用于理解语境，不要翻译，也不要出现在输出里）：');
+    preceding.forEach((line) => parts.push(contextLine(line)));
+  }
+  if (following.length > 0) {
+    parts.push('【参考下文】（同上）：');
+    following.forEach((line) => parts.push(contextLine(line)));
+  }
+  // 术语表激活只看正文行命中（上下文不参与，避免把无关术语拉进请求）
   const pairs = Object.entries(glossary || {}).filter(([jp]) => lines.some((line) => line.includes(jp)));
   if (pairs.length > 0) {
     parts.push('翻译的时候参考下面的术语表：');
@@ -158,11 +211,18 @@ export function parseTranslateAnswerPartial(answer, originalLines) {
 
 // ---- 单段翻译（镜像 openai-translator 的重试/二分语义）----
 // call: (messages) => Promise<{ ok, content?, error? }>（由管线注入，测试可桩）
+// context.preceding / context.following：相邻段上下文（可选；补发请求同样带上——刻意偏离 LG 的"重试丢上下文"：
+// 补发只剩缺行，上下文此时最有用于对齐人称/指代）
 async function translateLines(lines, context) {
   if (lines.length === 0) return [];
   if (lines.every((l) => l.trim().length === 0)) return [...lines];
   if (context.signal && context.signal.aborted) throw new Error('aborted');
-  const messages = buildTranslateMessages(lines, context.glossary, { systemPrompt: context.systemPrompt, thinking: context.thinking });
+  const messages = buildTranslateMessages(lines, context.glossary, {
+    systemPrompt: context.systemPrompt,
+    thinking: context.thinking,
+    preceding: context.preceding,
+    following: context.following,
+  });
   const result = await context.call(messages);
   if (!result || !result.ok) {
     const err = new Error((result && result.error) || '请求失败');
@@ -177,7 +237,12 @@ async function translateLinesPartial(lines, context) {
   if (lines.length === 0) return { map: new Map(), missing: [] };
   if (lines.every((l) => l.trim().length === 0)) return { map: new Map(), missing: [] };
   if (context.signal && context.signal.aborted) throw new Error('aborted');
-  const messages = buildTranslateMessages(lines, context.glossary, { systemPrompt: context.systemPrompt, thinking: context.thinking });
+  const messages = buildTranslateMessages(lines, context.glossary, {
+    systemPrompt: context.systemPrompt,
+    thinking: context.thinking,
+    preceding: context.preceding,
+    following: context.following,
+  });
   const result = await context.call(messages);
   if (!result || !result.ok) {
     const err = new Error((result && result.error) || '请求失败');

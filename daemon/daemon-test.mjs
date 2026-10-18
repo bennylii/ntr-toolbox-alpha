@@ -129,6 +129,63 @@ await t('runBook：含空段的章只把非空段送进请求；上传段数/顺
   assert.equal(stats.lastTranslate.lines, 2, '只有非空段进请求（编号/token 不花在空段上）');
 });
 
+console.log('== 相邻段上下文（参考上文/参考下文：LG 句末门槛 + 段缓存键随上下文变化） ==');
+const CTX_BOOK = `mock-ctx-${RUN}`;
+const CTX_KEY = `web:mock/${CTX_BOOK}`;
+const ctxStats = () => fetch(`${MOCK}/__stats`).then((r) => r.json());
+// level=all（重翻档）保证每轮都是目标；再用「重置进度」绕过断点续跑，专测段缓存键
+const resetCtxProgress = () => store.setProgress(CTX_KEY, 'c1', { glossaryUuid: 'g-current', state: 'pending' });
+await t('关闭态：跑一遍 → 重置进度重跑 → 零请求（键与旧实现逐字相同、零缓存流失）', async () => {
+  store.upsertBook({ key: CTX_KEY, kind: 'web', providerId: 'mock', novelId: CTX_BOOK, origin: MOCK, title: '' });
+  const first = await mkPipeline({ level: 'all', concurrency: 1 }).runBook(CTX_KEY);
+  assert.equal(first.stats.uploaded, 1, JSON.stringify(first.stats));
+  const stats1 = await ctxStats();
+  assert.deepEqual(stats1.lastTranslate.context, { preceding: 0, following: 0 }, '关闭态不带上下文块');
+  assert.deepEqual((stats1.translateLog || []).slice(-2).map((r) => r.lines).sort((a, b) => b - a), [30, 10], '40 段按 30 行/段切成 30 + 10（末两条 = 本轮两段）');
+  resetCtxProgress();
+  const again = await mkPipeline({ level: 'all', concurrency: 1 }).runBook(CTX_KEY);
+  assert.equal(again.stats.uploaded, 1);
+  assert.equal(again.stats.requests, 0, '同源同处理链 + 无上下文 → 段缓存命中');
+});
+await t('开上下文：键随上下文变化（命中 → 重新请求），各段上下文行数正确、上传段数不变', async () => {
+  resetCtxProgress();
+  const withCtx = await mkPipeline({ level: 'all', concurrency: 1, contextBefore: 2, contextAfter: 2 }).runBook(CTX_KEY);
+  assert.equal(withCtx.stats.uploaded, 1);
+  assert.ok(withCtx.stats.requests >= 2, `上下文变了 → 两段都要重新请求：${JSON.stringify(withCtx.stats)}`);
+  const stats = await ctxStats();
+  const tail = (stats.translateLog || []).slice(-2);
+  const seg0 = tail.find((r) => r.context && r.context.preceding === 0 && r.context.following === 1);
+  const seg1 = tail.find((r) => r.context && r.context.preceding === 2 && r.context.following === 0);
+  // 下文语义：往后收到句末标点为止（含该行）——40 段全都以 。 结尾，所以段 0 的下文 = 1 行完整句
+  assert.ok(seg0, `段 0：章首无上文、有下文 1 行（log=${JSON.stringify(tail.map((r) => r.context))}）`);
+  assert.ok(seg1, '段 1：有上文 2 行、章末无下文');
+  assert.equal(seg0.lines, 30);
+  assert.equal(seg1.lines, 10);
+  assert.equal(stats.lastChapterUpload.count, 40, '上传段数不变（上下文不进正文）');
+  assert.ok(String(stats.lastChapterUpload.preview[0]).includes('模拟译'));
+});
+await t('同设置重跑：上下文相同 → 键稳定 → 段缓存命中', async () => {
+  resetCtxProgress();
+  const again = await mkPipeline({ level: 'all', concurrency: 1, contextBefore: 2, contextAfter: 2 }).runBook(CTX_KEY);
+  assert.equal(again.stats.uploaded, 1);
+  assert.equal(again.stats.requests, 0, '同上下文 → 键相同 → 命中');
+});
+await t('config.translate 生效（控制台保存路径）：不给运行选项时按 config；关回去旧键仍命中', async () => {
+  resetCtxProgress();
+  // 3/0：段 1 的上文从 2 行变 3 行（新键 → 请求）；段 0 在章首且 after=0（无上下文 → 与关闭态同键 → 命中）。
+  // 这同时钉住「只有上下文真正变化的段才重发」这条缓存语义。
+  store.setConfig('translate', { contextBefore: 3, contextAfter: 0 });
+  const viaConfig = await mkPipeline({ level: 'all', concurrency: 1 }).runBook(CTX_KEY);
+  assert.equal(viaConfig.stats.uploaded, 1);
+  assert.equal(viaConfig.stats.requests, 1, `按 config 生效：只有上下文变化的段 1 需要请求：${JSON.stringify(viaConfig.stats)}`);
+  const stats = await ctxStats();
+  assert.deepEqual(stats.lastTranslate.context, { preceding: 3, following: 0 }, '段 1 按 config：上文 3 行 / 下文 0 行');
+  store.setConfig('translate', { contextBefore: 0, contextAfter: 0 });
+  resetCtxProgress();
+  const backOff = await mkPipeline({ level: 'all', concurrency: 1 }).runBook(CTX_KEY);
+  assert.equal(backOff.stats.requests, 0, '关回去 → 旧键（无上下文）仍命中（零缓存流失）');
+});
+
 console.log('== 调度器（P1：全局并发门 / key 池 / 限流 / 用量） ==');
 const quiet = { log: () => { }, error: () => { } };
 const mkW = (id, key, extra = '') => ({ id, model: 'mock-glossary-1', endpoint: `${MOCK}/v1${extra}`, key });
@@ -397,6 +454,29 @@ await t('/settings 预设往返：合法保存、非法回退 base', async () =>
   assert.equal(s.settings.textPreserve.preset, 'base', '非法值回退 base');
   const rulesResp = await fetch(`${S2}/rules`).then((r) => r.json());
   assert.ok(rulesResp.textPreserve && Array.isArray(rulesResp.textPreserve.presets), 'GET /rules 带预设清单');
+  srv.close();
+});
+await t('/settings 翻译上下文往返 + 取值夹紧（0–20；非法忽略）', async () => {
+  const srv = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline: null, checkPipeline: null, makeClient, engine, port: 7376, log: quiet });
+  const S3 = 'http://127.0.0.1:7376';
+  const postCtx = (body) => fetch(`${S3}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ translate: body }) });
+  const getCtx = async () => (await fetch(`${S3}/settings`).then((r) => r.json())).settings.translate;
+  // 「全新实例默认 0/0」由纯函数与管线用例覆盖（关闭态用户消息逐字一致）；这里先归零再验往返与夹紧
+  await postCtx({ contextBefore: 0, contextAfter: 0 });
+  let tx = await getCtx();
+  assert.deepEqual(tx, { contextBefore: 0, contextAfter: 0 }, '0 = 关闭');
+  await postCtx({ contextBefore: 2, contextAfter: 1 });
+  tx = await getCtx();
+  assert.deepEqual(tx, { contextBefore: 2, contextAfter: 1 });
+  await postCtx({ contextBefore: 999, contextAfter: -5 });
+  tx = await getCtx();
+  assert.deepEqual(tx, { contextBefore: 20, contextAfter: 0 }, '999→20、-5→0');
+  await postCtx({ contextBefore: 'x' });
+  tx = await getCtx();
+  assert.deepEqual(tx, { contextBefore: 20, contextAfter: 0 }, '非法值忽略（保留原值）');
+  await postCtx({ contextBefore: 0, contextAfter: 0 });
+  assert.deepEqual(await getCtx(), { contextBefore: 0, contextAfter: 0 }, '关回去');
+  assert.equal(store.getConfig('translate').contextBefore, 0, '落 config.translate');
   srv.close();
 });
 await t('质检集成：默认预设下 <br> 丢失 → TEXT_PRESERVE（无需用户规则）', () => {

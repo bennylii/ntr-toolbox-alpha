@@ -503,6 +503,12 @@ export const UI_HTML = `<!doctype html>
       <div><button class="btn" id="settings-save">保存</button></div>
       <div class="muted">单线程 Gemini：maxInFlight=1；填 0 = 自动伸缩（起步 4，连续成功逐步 +1，429/503 减半，上限 16）。</div>
     </fieldset>
+    <fieldset><legend>翻译上下文（相邻段参考；保存后下一轮翻译生效）</legend>
+      <label>参考上文行数 <input type="number" id="tx-ctx-before" min="0" max="20"></label>
+      <label>参考下文行数 <input type="number" id="tx-ctx-after" min="0" max="20"></label>
+      <div><button class="btn" id="tx-ctx-save">保存</button></div>
+      <div class="muted" id="tx-ctx-info">填 0 = 关闭（与旧行为逐字一致）。上文照 LinguaGacha 的「句末标点门槛」语义：从上一段末尾往前收以句末标点结尾的连续行，遇到不达标的行就停——所以有时一行都不带；下文是对称设计（LG 没有）。上下文行本身不会被翻译，只作语境提示。</div>
+    </fieldset>
     <fieldset><legend>助手池调度与限流</legend>
       <label>并发上限 maxInFlight <input type="number" id="ag-max" min="0"></label>
       <label>RPM <input type="number" id="ag-rpm" min="0"></label>
@@ -1165,6 +1171,12 @@ async function loadSettings() {
     $('site-retries').value = site.retries == null ? 3 : site.retries;
     $('site-retries-info').textContent = '站点请求（抓原文/章节提交/术语表）传输层失败最多重试 ' + ($('site-retries').value) +
       ' 次——墙内走代理链路抖动大时可加档；整本抓取 167 章实测约 1/3 请求首发失败，3 次重试仍有零星章失败，8 次基本清零。';
+    const tx = (s.settings && s.settings.translate) || {};
+    $('tx-ctx-before').value = tx.contextBefore == null ? 0 : tx.contextBefore;
+    $('tx-ctx-after').value = tx.contextAfter == null ? 0 : tx.contextAfter;
+    $('tx-ctx-info').textContent = (Number($('tx-ctx-before').value) > 0 || Number($('tx-ctx-after').value) > 0)
+      ? '当前：上文 ' + ($('tx-ctx-before').value) + ' 行 / 下文 ' + ($('tx-ctx-after').value) + ' 行（0 = 关闭）。开启后段缓存键随上下文变化，已缓存的段会重译一次；上下文计入「提示词上限」，触上限就调大上限或减行数。'
+      : '当前：关闭（0 行）。填 0 = 关闭（与旧行为逐字一致）。上文照 LinguaGacha 的「句末标点门槛」语义：从上一段末尾往前收以句末标点结尾的连续行，遇到不达标的行就停——所以有时一行都不带；下文是对称设计（LG 没有）。上下文行本身不会被翻译，只作语境提示。';
     $('cred').textContent = 'token：' + (s.settings.tokenSet ? '已同步' : '未同步') +
       ' · 翻译池 ' + ((s.settings.workers || []).length) + ' 个 · 助手池 ' +
       ((agent.workers || []).length > 0 ? (agent.workers.length + ' 个（显式）') : '跟随翻译池') +
@@ -1258,6 +1270,15 @@ $('site-retries-save').addEventListener('click', async () => {
     const n = Math.max(0, Math.min(8, Math.floor(Number($('site-retries').value) || 0)));
     await post('/settings', { site: { retries: n } });
     toast('站点请求重试次数已保存（' + n + ' 次，立即生效）'); loadSettings();
+  } catch (e) { toast(e.message, true); }
+});
+$('tx-ctx-save').addEventListener('click', async () => {
+  try {
+    const clamp = (el) => Math.max(0, Math.min(20, Math.floor(Number(el.value) || 0)));
+    const before = clamp($('tx-ctx-before'));
+    const after = clamp($('tx-ctx-after'));
+    await post('/settings', { translate: { contextBefore: before, contextAfter: after } });
+    toast('翻译上下文已保存（上文 ' + before + ' 行 / 下文 ' + after + ' 行，下一轮翻译生效）'); loadSettings();
   } catch (e) { toast(e.message, true); }
 });
 $('token-sync').addEventListener('click', () => requestTokenSync({ btn: $('token-sync'), hint: $('token-sync-hint') }));
