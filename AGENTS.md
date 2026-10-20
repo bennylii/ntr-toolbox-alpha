@@ -134,7 +134,7 @@ CDP_PORT=9334 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8789
 ## 已知陷阱
 
 - **站点会话键换过**：2026-10 起是 `web-kit:session:v1`（`{token, adminMode}`，无旧键迁移），旧键 `auth-v2` 只作回落。读 token 一律走 `readSiteToken()`（user.js）/ `SITE_SESSION_SOURCES`，**别再写死 `auth-v2`**——写死会让 daemon 拿不到凭据、全线 401。核对结论见 `docs/upstream-sync.md` ①。
-- **BETA 页 worker 仓与任务仓不是一个键**：`/workspace/gpt-pipeline` 的 workers 在 `workspace-gpt-pipeline`、jobs 在 `workspace-gpt`（共用）；按路径取键一律用 `StorageUtils.keysForPath()`，别用「href 以 gpt 结尾」这类单键判定（`docs/upstream-sync.md` ②）。
+- **旧 GPT 工作区已删除（2026-10 上游 `fd90b2d4`）**：`/workspace/gpt` 重定向到 `/workspace/gpt-pipeline`，`/workspace` 默认重定向到 `/workspace/sakura-pipeline`。GPT 翻译器**只在 `workspace-gpt-pipeline`**，任务队列仍与 `workspace-gpt` 共用；按路径取键一律用 `StorageUtils.keysForPath()`（过渡路径 `/workspace/gpt` 也映射到 pipeline workers）。普通链路只走 `readWorkspaceGptWorkers()`，**别再读 `workspace-gpt.workers`**——那是死数据，唯一入口是「合并旧工作区翻译器」模块。「复制翻译器到 BETA 工作区」「工作区翻译器自动同步」两个模块已删除（`docs/upstream-sync.md` ①②）。
 - **队列 init 的 2.5s 定时器**：初始化后约 2.5 秒会把 `running` 任务改成 `pending`（不受「自动续跑」设置门控），并可能触发 `runLoop()`。测试套件要么在内存里把「自动续跑」置 false 并还原，要么在开头 `await sleep(2800)` 等它先跑完。
 - **mock 的 429 会触发引擎冷却**（几秒内不再发请求），想要"失败"请用 `?fail=empty`（不冷却）。
 - **`Q.put()` 不会触发队列面板重绘**：写库后要 `await Q.openPanel(); await sleep(400);` 或 `refreshPanel()` 才能点到新行的按钮。

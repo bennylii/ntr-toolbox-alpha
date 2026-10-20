@@ -4,12 +4,14 @@
 实现位置：`daemon/server.mjs`（`GET /ping`、`POST /auth`、CORS 白名单）、`daemon/index.mjs`（端口解析、need-auth 文案）、`daemon/tray.ps1`（端口自读）、`ntr-toolbox-alpha.user.js`（Daemon 连接模块 + 自动同步）。
 定位：浏览器端把站点凭据（站点会话键里的 token）与 GPT 工作区翻译器喂给 daemon 的唯一通道；带可观测性与自愈（token 刷新后自动重推）。
 
+> 翻译器来源：2026-10-20 起只读新 GPT 工作区的 `workspace-gpt-pipeline`（`readWorkspaceGptWorkers()`）；旧 `workspace-gpt.workers` 已随上游删除旧工作区退役，不再上行（需要保留请用「合并旧工作区翻译器」模块迁移）。证据见 `docs/upstream-sync.md` ①。
+
 > 会话键：站点 2026-10 起改用 `@novelia/web-kit` 存会话，键名 `web-kit:session:v1`（值 `{token, adminMode}`，**无旧键迁移**）。我们按 `web-kit:session:v1` → `auth-v2` → `auth`（`auth.profile.token`）的顺序取 token，三处链路（`initToken()` / `daemonReadToken()` / 健康检查）共用同一个 `readSiteToken()`，读不到时的提示列出全部三个键名。证据与处置见 `docs/upstream-sync.md` ①。
 
 ## 1. 端点契约
 
 - `GET /ping`：免凭据；返回 `{ok:true, name:'ntr-daemon', port, version}`；CORS 走同一白名单——油猴角标与外部脚本探测用；
-- `POST /auth`：body `{token, workers, origin, auto}` →
+- `POST /auth`：body `{token, workers, origin, auto}`（`workers` 来自 `workspace-gpt-pipeline`）→
   - `config.token/workers/origin` 落库；workers 热更新翻译池（`setWorkers`），助手池「跟随模式」下同步镜像、显式配置过则不覆盖；
   - `config.lastSync = {at, origin, ua(浏览器名+版本主干), workersCount, tokenSet, mode: 'auto'|'manual'}`——**只记元数据，不记 token**；
   - 响应 `{ok:true, workers:n}`。
@@ -28,7 +30,7 @@
 ## 4. 油猴侧自动同步
 
 - 挂点：面板主循环每 tick 调用的 `refreshDaemonGlance`（**5s 节流**——原为 30s；改 5s 是为了让控制台「从站点同步」按钮几秒内生效，仍是免凭据的本机回环请求）；「自动同步」开关默认**开**；
-- 流程：ping 在线 → 指纹 `JSON({token, workers, origin})` 与 `localStorage['ntr-daemon-auth-fp']` 比较 →
+- 流程：ping 在线 → 指纹 `JSON({token, workers, origin})`（`workers` 只取 `workspace-gpt-pipeline`）与 `localStorage['ntr-daemon-auth-fp']` 比较 →
   - 未变：零网络请求（短路）；
   - 首次（无存档指纹）：静默推送（仅状态行更新）；
   - 有旧指纹且变化（站内 token 刷新）：推送 + 一次性提示「凭据已自动更新到 Daemon」；
@@ -59,4 +61,4 @@
 ## 7. 验证对照
 
 - daemon-test：`/ping` 形状、lastSync 字段与 auto/manual、白名单放行/拒绝、`.serve-port` 落盘（子进程起于 config 端口）；
-- 浏览器 e2e `tools/.e2e-daemon-sync.js`（stub 7343 提供 /ping、/auth 计数、/reset）：去重零推送 → token 变化自动重推（auto 标记 + 提示）→ 再 tick 不重复；手动流保持。
+- 浏览器 e2e `tools/.e2e-daemon-sync.js`（stub 7343 提供 /ping、/auth 计数、/reset）：推送只含 pipeline 翻译器（旧仓 id 不上行）→ 去重零推送 → token 变化自动重推（auto 标记 + 提示）→ 再 tick 不重复；手动流保持。

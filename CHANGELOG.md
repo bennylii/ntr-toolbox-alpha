@@ -6,6 +6,18 @@ All notable changes 按版本记录；版本号跟随油猴脚本 `@version`。
 
 自 v0.8.0-alpha.2 之后的增量（均已合入 main，未打 tag）：
 
+### 上游同步：auto-novel `c11cdbfe → fd90b2d4`（2026-10-20，41 提交，旧 GPT 工作区退役）
+
+上游这一轮把**旧 GPT 工作区整个删掉了**：`/workspace/gpt` 重定向到 `/workspace/gpt-pipeline`、`/workspace` 默认重定向到 `/workspace/sakura-pipeline`，`GptWorkspace.vue`/`GptWorkerModal.vue`/`Interactive.vue` 删除。翻译器仓与任务仓的归属没变（GPT workers 在 `workspace-gpt-pipeline`、jobs 仍与 `workspace-gpt` 共用；Sakura pipeline 两仓都是 `workspace-sakura`），但旧 `workspace-gpt.workers` 从此没有任何页面维护，属于死数据。逐条核对见 `docs/upstream-sync.md`（基线已改为 `fd90b2d4`）。
+
+- **退役新旧工作区同步功能**：删除模块「复制翻译器到BETA工作区」「工作区翻译器自动同步」，以及 `WORKSPACE_SYNC_STATE`/`WORKSPACE_PAIR`/三路合并/`syncWorkspaceTranslators`/`_NTRGlossaryDev.syncWorkspaceTranslators` 等辅助与导出；历史快照键 `ntr-workspace-sync` 不再读写（保留原值，可手动清理）。删除测试 `.e2e-translator-copy.js`、`.e2e-workspace-sync.js`。
+- **普通链路只读新工作区**：新增 `readWorkspaceGptWorkers()`，只读 `workspace-gpt-pipeline`（按 id 去重、丢弃缺 id/endpoint）；翻译器下拉、AI 术语提取、Daemon 凭据推送、站点自检全部改走它。`StorageUtils.addGPTWorker` 缺省目标改为 pipeline（不再随页面落旧仓）；`keysForPath` 把 `/workspace/gpt` 过渡路径映射到 `{workers: pipeline, jobs: gpt}`；站点自检条目改名为「GPT 工作区翻译器存储」。
+- **新模块「合并旧工作区翻译器」**（替代两个同步模块）：一键把旧 `workspace-gpt.workers` 合并到 `workspace-gpt-pipeline`——新 id 追加、同 id 默认跳过（可勾选「覆盖同名翻译器」）、跳过 `type:'web'` 与缺 id/endpoint 条目；目标仓 jobs/uncompletedJobs 原样保留、旧仓一个字节不改；写入走 `_setData`（归一化 + StorageEvent），通知汇总新增/覆盖/跳过数量；可重复执行且幂等。它是普通链路之外**唯一**读取旧 workers 的入口。
+- **备份改为 jobOnly**：`WORKSPACE_SECTIONS.gpt` 标记 `jobOnly: true`——导出时 `workers` 恒为 `[]`，导入时忽略备份里的旧 GPT 翻译器并提示用迁移模块；`workspace-gpt` 的 jobs/uncompletedJobs 备份/恢复语义不变。文件格式仍 v1，旧备份可导入；面板该行翻译器列显示「—（不备份）」，标签改为「GPT 共享任务队列（workspace-gpt）」。
+- **后端 API 复核无需改代码**：`server/src` 仅 3 个文件变化——`PUT /api/novel/{provider}/{id}/translation` 的 toc key 改为 `chapterId ?: titleJp`（本项目不调用该元数据写接口）、`GET /api/novel/{provider}/{id}` 的同名章节 toc 合并值变化（字段/结构不变）、Pixiv 目录 `createAt` 开始有值（类型不变）。我们使用的 translate-v2/chapter-task/章节上传/`/file`/术语表 PUT/认证 401 分流全部未变；Go Banner API 的另一组变化与本项目无关。明细见 `docs/upstream-sync.md`「2026-10-20 后端 API 差异明细」。
+- **会话与前端存储**：会话键仍是 `web-kit:session:v1`；`useWorkspaceStore` 从 `lazy` 改 `createGlobalState` 但存储语义不变；pipeline 新增 `prepareExecution`/`allowModels` 属站点前端内部。
+- 测试：新增 `.e2e-workspace-migrate.js` **18/18**；重写/更新 `.e2e-translator-select.js` **15/15**、`.e2e-translator-mgmt.js` **21/21**、`.e2e-storage-utils.js` **8/8**、`.e2e-workspace-backup.js` **53/53**、`.e2e-sitecheck.js` **33/33**、`.e2e-daemon-sync.js` **24/24**、`.e2e-collect-tasks.js` **16/16** 与真机探针 `.probe-wb-live.js`（改到 `/workspace/gpt-pipeline`）。回归：`engine-test` **98/0**、`daemon-test` **151/0**、`translate-test` **25/0**、`lg-align-test` **49/0**、`quality-test` **38/0**、`proxy-test` **32/0**；浏览器 `.e2e-config.js` 3 组全绿、`.e2e-panel-basics.js` **30/30**、`.e2e-sync-storage.js` **7/7**、`.e2e-backup.js` **15/15**。
+
 ### 上游同步：auto-novel `5fc49d30 → c11cdbfe`（2026-10-17，53 提交，8 项漂移处置）
 
 站点源码又动了一批。核对结论与逐条处置写进新文档 **`docs/upstream-sync.md`**（对齐基线 pin + 权威文件清单 + 下次同步步骤——「上游更新了」以后先读它）。本轮处置的 8 处：

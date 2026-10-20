@@ -13,7 +13,7 @@
 │   │    ├─ 术语管线 UI（提取/队列/回滚/导入）──── 走站点 API（Bearer）          │
 │   │    ├─ Daemon 连接模块 ──── 自动同步凭据（/ping 探测 + /auth 推送，指纹去重）│
 │   │    └─ 面板角标 ────────── daemon 在线/离线                                 │
-│   └─ 站点 GPT/Sakura 工作区（BETA pipeline 等）                              │
+│   └─ 站点 GPT/Sakura 工作区（gpt-pipeline / sakura-pipeline；旧 /workspace/gpt 已重定向）│
 └──────────────┬──────────────────────────────────────────┬───────────────────┘
                │ HTTPS（经本地代理 6789 出网）               │ http://127.0.0.1:7331
                ▼                                          ▼ （CORS 白名单 + LNA 授权）
@@ -34,7 +34,7 @@
                                                             LLM 端点（OpenAI 兼容；默认单线程逆向 Gemini）
 ```
 
-分工：**浏览器端**负责「拿站点数据 + 写站点术语表 + 把凭据喂给 daemon」；**daemon** 负责「调 LLM 干活 + 按站点契约回写 + 提供控制台/Agent」。两者对同一本书互斥（单队列 + 书锁），避免双写。daemon 的出网（站点 API 与 LLM 端点）可经「网络代理」走本机代理——默认关闭、控制台保存即生效（§4.10）。站点工作区的**翻译器与任务队列**都只存在浏览器 localStorage（键 `workspace-gpt` / `workspace-gpt-pipeline` / `workspace-sakura`；站点自身没有任何导出/备份功能），脚本的「工作区备份」模块负责它们的导出/导入（契约见 `cleanroom/spec-02-helper-layer.md` §5.1/§5.2），daemon 侧看不到也管不到这两份数据。
+分工：**浏览器端**负责「拿站点数据 + 写站点术语表 + 把凭据喂给 daemon」；**daemon** 负责「调 LLM 干活 + 按站点契约回写 + 提供控制台/Agent」。两者对同一本书互斥（单队列 + 书锁），避免双写。daemon 的出网（站点 API 与 LLM 端点）可经「网络代理」走本机代理——默认关闭、控制台保存即生效（§4.10）。站点工作区的**翻译器与任务队列**都只存在浏览器 localStorage（GPT 翻译器在 `workspace-gpt-pipeline`、共享任务队列在 `workspace-gpt`，Sakura 在 `workspace-sakura`；站点自身没有任何导出/备份功能），脚本的「工作区备份」模块负责它们的导出/导入（契约见 `cleanroom/spec-02-helper-layer.md` §5.1/§5.2；旧 GPT 仓只备份队列，遗留翻译器用「合并旧工作区翻译器」迁移），daemon 侧看不到也管不到这两份数据。
 
 ## 2. 进程与目录
 
@@ -69,6 +69,8 @@
 5. `GET .../file?mode=jp-zh&filename=…`（`filename` 必填，缺了 404；另有 `mode=jp`（站点「下载原文」整本导出）与 `mode=zh`（整本译文，回扫/验收用），daemon 用它们做站点格式自动对齐与导入后比对）。
 
 鉴权 = `Authorization: Bearer <站点会话 token>`。会话键：站点 2026-10 起改用 `@novelia/web-kit` 存会话（键名 `web-kit:session:v1`，值 `{token, adminMode}`，**无旧键迁移**），我们按 `web-kit:session:v1` → `auth-v2` → `auth`（`auth.profile.token`）的顺序取（油猴侧 `readSiteToken()`，三处链路共用；见 spec-11）；站点 API **不使用 Cookie**（refresh cookie 是 HttpOnly 且属站点域，daemon 无法也无需持有）。
+
+2026-10-20 上游 `fd90b2d4` 复核：`server/src` 只有 3 个文件变化，**上面 1–5 条契约全部未变**。变化的是 `PUT /api/novel/{provider}/{id}/translation`（元数据写入，toc key 改为 `chapterId ?: titleJp`，本项目不调用）、`GET /api/novel/{provider}/{id}` 的同名章节 toc 合并值（结构不变）、Pixiv `createAt` 开始有值；Go Banner API 另一组变化与本项目无关。明细见 `docs/upstream-sync.md`「2026-10-20 后端 API 差异明细」。
 
 401 有两义：带 `WWW-Authenticate: Bearer error="invalid_token"` → 真凭据失效（`code='unauthorized'`，触发 need-auth 自愈链路）；无该头 → 封禁/权限不足（`code='forbidden'`，不触发 need-auth、不中止不重试）。术语表 PUT 的「内容没变 → 400」（web `修改为空` / 文库 `术语表没有改变`）按**幂等成功**处理。证据与处置见 `docs/upstream-sync.md` ⑦⑧。
 
@@ -186,7 +188,7 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 | daemon 纯函数 | quality / translate / processors / prompt / glossary-io / lg-align / agent / agent-skills `-test.mjs` | 无 |
 | daemon 代理 | `daemon/proxy-test.mjs`（本地回环测试代理 + 自签证书 fixture；含 curl 兜底：回落成功 / 开关关闭 / noRetry 不触发 / curl 走代理） | 无 |
 | daemon 冒烟 | `daemon/daemon-test.mjs`（151 例：管线/调度/质检/Agent/会话操作/工作区/LG 导入（含站点 mode=jp 自动对齐）/站点请求重试/连接/术语表 400 幂等/401 分类/托盘端口） | mock 8790 |
-| 浏览器 e2e | `.e2e-agent-ui.js`（助手页）、`.e2e-agent-session-ops.js`（会话操作）、`.e2e-lg-gui.js`（导入 GUI：mock 车道一把 51 项；真机分阶段 `__LG_GUI_TEST` + `cdp setfiles` 真实文件）、`.e2e-daemon-sync.js`（连接/自动同步，23 项）、`.e2e-workspace-backup.js`（工作区备份 + BETA 双仓分写，48 项） | mock 8790 + stub 7343 + CDP 车道 |
+| 浏览器 e2e | `.e2e-agent-ui.js`（助手页）、`.e2e-agent-session-ops.js`（会话操作）、`.e2e-lg-gui.js`（导入 GUI：mock 车道一把 51 项；真机分阶段 `__LG_GUI_TEST` + `cdp setfiles` 真实文件）、`.e2e-daemon-sync.js`（连接/自动同步，含只推 pipeline）、`.e2e-workspace-backup.js`（工作区备份 + pipeline 双仓/jobOnly）、`.e2e-workspace-migrate.js`（旧仓翻译器迁移） | mock 8790 + stub 7343 + CDP 车道 |
 | 真机 | TM 重装（sha256 整文件比对）→ 实站全流程 | 测试 profile + LNA 旗标 |
 
 ## 8. 版本与发布
