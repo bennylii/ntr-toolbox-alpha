@@ -49,7 +49,7 @@ node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8788/wenku/mock-sr
 ## 5. daemon 控制台与站位
 
 ```sh
-node daemon/index.mjs serve --port 7331   # 或双击托盘 daemon/tray.vbs（隐藏运行）
+node daemon/index.mjs serve --port 7331   # 或双击仓库根 daemon.cmd（一键启动；restart/stop/status 见其参数）
 # 控制台 http://127.0.0.1:7331/ui
 ```
 

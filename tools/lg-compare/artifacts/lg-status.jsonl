@@ -1,0 +1,4 @@
+{"type":"started","command":"translate","timestamp":"2026-10-11T15:18:53.585Z"}
+{"type":"progress","command":"translate","status":"requested","timestamp":"2026-10-11T15:18:53.833Z","stats":{"total":178,"skipped":0,"failed":0,"completed":0,"pending":178,"percent":0}}
+{"type":"progress","command":"translate","status":"running","timestamp":"2026-10-11T15:18:54.898Z","stats":{"total":178,"skipped":0,"failed":0,"completed":178,"pending":0,"percent":100}}
+{"type":"finished","command":"translate","status":"done","timestamp":"2026-10-11T15:18:54.936Z"}

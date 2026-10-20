@@ -12,11 +12,23 @@ export const DEFAULT_AGENT_SYSTEM = `你是 NTR Daemon 的本地助手，帮助�
 
 const SUMMARY_SYSTEM = '你是对话历史压缩器。把对话历史压缩成要点式摘要，保留：用户目标、已确认的事实与数字、已完成的操作与结果、未决事项。只输出摘要正文，不要客套。';
 
+// 截断/重跑前调用：摘要正文由模型生成（不可确定性重算），一旦 summaryUpTo 跨过截断点，
+// 摘要就会引用即将被删的消息 → 整段清掉并回零；没跨过则保持不动。
+export function resetSummaryIfBeyond(store, sessionId, boundarySeq) {
+  const session = store.getAgentSession(sessionId);
+  if (!session) return false;
+  const upTo = Number(session.summaryUpTo) || 0;
+  if (upTo === 0 || upTo < Number(boundarySeq)) return false;
+  store.setAgentSummary(sessionId, { summary: '', summaryUpTo: 0 });
+  return true;
+}
+
 export function createAgentSession({ store, chat, log = console, options = {} }) {
   const opt = {
     compactThresholdTokens: 120000,   // 超过则压缩（估算值）
     keepRecentMessages: 12,           // 压缩时保留的最近消息条数
     decisionTimeoutMs: 300000,        // 审批/追问等待上限（超时视为拒绝/取消）
+    questionDefaultFirst: true,       // 追问超时改为默认选第一项（LG 行为；无人值守可自推进）
   };
   for (const [key, value] of Object.entries(options || {})) if (value !== undefined) opt[key] = value;
   const waiters = new Map();   // decisionId -> { resolve, timer }
@@ -42,6 +54,14 @@ export function createAgentSession({ store, chat, log = console, options = {} })
     const id = store.createAgentDecision({ sessionId, kind, payload });
     const promise = new Promise((resolve) => {
       const timer = setTimeout(() => {
+        const opts = (payload && payload.options) || [];
+        if (kind === 'question' && opt.questionDefaultFirst && opts.length > 0) {
+          // 追问超时 = 默认选第一项（LG 行为）：无人值守也能自推进；审批（write）维持超时拒绝
+          const resolution = { selected: String(opts[0].id || ''), reason: 'timeout_default' };
+          store.resolveAgentDecision(id, 'allowed', resolution);
+          settle(id, 'allowed', resolution);
+          return;
+        }
         store.resolveAgentDecision(id, kind === 'write' ? 'rejected' : 'cancelled', { reason: 'timeout' });
         settle(id, kind === 'write' ? 'rejected' : 'cancelled', { reason: 'timeout' });
       }, Math.max(1000, Number(timeoutMs) || opt.decisionTimeoutMs));

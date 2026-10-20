@@ -23,7 +23,7 @@ const setLS = (k, v) => { if (v === null) localStorage.removeItem(k); else local
 
 const origPath = location.pathname + location.search;
 const orig = {};
-for (const k of ['auth-v2', 'auth', 'workspace-gpt', 'workspace-gpt-pipeline']) orig[k] = localStorage.getItem(k);
+for (const k of ['web-kit:session:v1', 'auth-v2', 'auth', 'workspace-gpt', 'workspace-gpt-pipeline']) orig[k] = localStorage.getItem(k);
 
 // 测试自己控制检查时机：先取消启动自动跑的排期
 S.schedule(86400000);
@@ -36,7 +36,7 @@ try {
   // ---------- A. 空白 mock 列表页：无站点特征 ----------
   const a = await S.run({ silent: true, waitMs: 400 });
   check('面板挂载点 ok（注入的 #ntr-panel 挂在 body）', statusOf(a, 'panel') === 'ok', a && a.results);
-  check('非站点域名：会话/工作区翻译器/volumes 三项 skip', ['auth', 'workspace-gpt', 'volumes-idb'].every((id) => statusOf(a, id) === 'skip'));
+  check('非站点域名：会话/工作区翻译器/volumes 三项 skip', ['auth', 'workspace-gpt-pipeline', 'volumes-idb'].every((id) => statusOf(a, id) === 'skip'));
   check('空列表页：条目检查 info（不算变动）', statusOf(a, 'list-items') === 'info', detailOf(a, 'list-items'));
   check('空列表页：分页检查 info', statusOf(a, 'list-pagination') === 'info');
   check('空白页没有任何 warn', a.warns.length === 0, a.warns);
@@ -127,18 +127,34 @@ try {
   check('补上描述后 → ok', statusOf(d2, 'workspace-items') === 'ok', detailOf(d2, 'workspace-items'));
 
   // ---------- E. 存储类检查（site:true 强制，在 mock origin 上验证分支） ----------
-  setLS('auth-v2', null); setLS('auth', null);
+  setLS('web-kit:session:v1', null); setLS('auth-v2', null); setLS('auth', null);
   setLS('workspace-gpt', null); setLS('workspace-gpt-pipeline', null);
   const e1 = await S.run({ silent: true, site: true, waitMs: 100 });
-  check('没有会话键 → auth warn（提示未登录/键名变动）', statusOf(e1, 'auth') === 'warn', detailOf(e1, 'auth'));
-  check('没有工作区翻译器 → info（提示用临时端点）', statusOf(e1, 'workspace-gpt') === 'info', detailOf(e1, 'workspace-gpt'));
+  check('三键全无 → auth warn（提示未登录/键名变动）', statusOf(e1, 'auth') === 'warn', detailOf(e1, 'auth'));
+  check('warn 明细列出三个候选键名', ['web-kit:session:v1', 'auth-v2', 'auth'].every((k) => (detailOf(e1, 'auth') || '').includes(k)), detailOf(e1, 'auth'));
+  check('没有工作区翻译器 → info（提示用临时端点）', statusOf(e1, 'workspace-gpt-pipeline') === 'info', detailOf(e1, 'workspace-gpt-pipeline'));
   check('volumes IDB 检查给出 ok/info', ['ok', 'info'].includes(statusOf(e1, 'volumes-idb')), detailOf(e1, 'volumes-idb'));
 
+  // 旧 workspace-gpt.workers 已退役：即使有内容也不算「GPT 工作区翻译器」
+  setLS('workspace-gpt', JSON.stringify({ workers: [{ id: 'sc-legacy', endpoint: 'http://x', model: 'm' }], jobs: [], uncompletedJobs: [] }));
+  const eLegacy = await S.run({ silent: true, site: true, waitMs: 100 });
+  check('旧仓 workers 不被当作可用翻译器（仍 info、明细不含旧 id）',
+    statusOf(eLegacy, 'workspace-gpt-pipeline') === 'info'
+    && !/sc-legacy/.test(detailOf(eLegacy, 'workspace-gpt-pipeline') || ''), detailOf(eLegacy, 'workspace-gpt-pipeline'));
+  setLS('workspace-gpt', null);
+
+  // 站点 2026-10 起会话在 web-kit:session:v1（旧键只作回落）——只放新键也要认，且明细报出命中的键名
+  setLS('web-kit:session:v1', JSON.stringify({ token: 'sc-test-token-new', adminMode: false }));
+  const eNew = await S.run({ silent: true, site: true, waitMs: 100 });
+  check('只有 web-kit:session:v1 → auth ok', statusOf(eNew, 'auth') === 'ok', detailOf(eNew, 'auth'));
+  check('明细报出命中的键名 web-kit:session:v1', /web-kit:session:v1/.test(detailOf(eNew, 'auth') || ''), detailOf(eNew, 'auth'));
+  setLS('web-kit:session:v1', null);
+
   setLS('auth-v2', JSON.stringify({ token: 'sc-test-token', adminMode: false }));
-  setLS('workspace-gpt', JSON.stringify({ workers: [{ id: 'sc-fake', endpoint: 'http://x', model: 'm' }], jobs: [], uncompletedJobs: [] }));
+  setLS('workspace-gpt-pipeline', JSON.stringify({ workers: [{ id: 'sc-fake', endpoint: 'http://x', model: 'm' }], jobs: [], uncompletedJobs: [] }));
   const e2 = await S.run({ silent: true, site: true, waitMs: 100 });
-  check('会话键回来 → auth ok', statusOf(e2, 'auth') === 'ok', detailOf(e2, 'auth'));
-  check('工作区翻译器回来 → ok 且明细带 id', statusOf(e2, 'workspace-gpt') === 'ok' && /sc-fake/.test(detailOf(e2, 'workspace-gpt')), detailOf(e2, 'workspace-gpt'));
+  check('旧键 auth-v2 仍在时 → auth ok（回落链兼容老站点）', statusOf(e2, 'auth') === 'ok', detailOf(e2, 'auth'));
+  check('工作区翻译器回来 → ok 且明细带 id', statusOf(e2, 'workspace-gpt-pipeline') === 'ok' && /sc-fake/.test(detailOf(e2, 'workspace-gpt-pipeline')), detailOf(e2, 'workspace-gpt-pipeline'));
   check('auth 告警消失后角标再次隐藏', document.getElementById('ntr-sitecheck').style.display === 'none');
 
   // ---------- F. 路由切换自动重跑 ----------

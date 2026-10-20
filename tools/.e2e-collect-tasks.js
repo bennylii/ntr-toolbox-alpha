@@ -132,9 +132,16 @@ try {
     run('清空任务');
     await sleep(400);
     check('清空任务：仅清空已完成 → 警告且数据不变', toasts.slice(mark1).some(t => t.includes('仅清空已完成功能需配合网站API')) && readJobs(GPT_KEY).length === 1, toasts.slice(mark1));
+    // Sakura 新工作区路径（/workspace/sakura-pipeline）同样命中 sakura 仓
+    history.pushState({}, '', '/workspace/sakura-pipeline');
+    setSetting('清空任务', '仅清空已完成', false);
+    localStorage.setItem(SK_KEY, JSON.stringify({ workers: [], jobs: [{ task: 's1' }, { task: 's2' }], uncompletedJobs: [] }));
+    const markSk = toasts.length;
+    run('清空任务');
+    await waitFor(() => readJobs(SK_KEY).length === 0);
+    check('清空任务：/workspace/sakura-pipeline 清 sakura 仓并 toast 计数', readJobs(SK_KEY).length === 0 && toasts.slice(markSk).some(t => t.includes('已清空 2 个任务')), toasts.slice(markSk));
     // 非工作区 URL → 报错 toast
     history.replaceState({}, '', origHref);
-    setSetting('清空任务', '仅清空已完成', false);
     const mark2 = toasts.length;
     run('清空任务');
     await sleep(400);

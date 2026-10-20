@@ -38,6 +38,7 @@ daemon/*.db-*
 tools/.ab-report.json
 tools/.ab-fixture.txt
 daemon/work/
+daemon/skills-user/   # 用户技能根（面板可编辑 / agent 沙箱可写；内置技能在 repo 根 skills/，入库）
 daemon/.tmp-ws-root/
 daemon/.serve-port
 daemon/uploads/

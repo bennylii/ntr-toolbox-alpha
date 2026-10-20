@@ -1,5 +1,7 @@
 // daemon/agent-tools-read.mjs —— Agent 只读工具（A2）：书目/正文/译文/提案/快照/质检/技能
 // 依赖注入：ctx.deps = { engine, makeClient, skills, textCache }（由 index.mjs 装配；测试可给假件）
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { checkAligned } from './quality.mjs';
 import { effectivePreserveRules } from './preserve.mjs';
 
@@ -227,7 +229,8 @@ export function createReadTools({ store, engine, makeClient, log = console, text
     },
     {
       name: 'read_skill',
-      description: '读取技能包内的文件（默认 SKILL.md）。技能是处理术语/翻译/质检任务的操作指南，需要时先读再动手。',
+      description: '读取技能包内的文件（默认 SKILL.md）。技能是处理术语/翻译/质检任务的操作指南，需要时先读再动手。'
+        + '返回 baseUrl（技能包目录的 file: URL）：脚本里可用 `await import(new URL(\'scripts/xxx.mjs\', baseUrl).href)` 加载技能自带脚本（包内有 scripts/ 时）。',
       parameters: {
         type: 'object',
         properties: {
@@ -240,7 +243,11 @@ export function createReadTools({ store, engine, makeClient, log = console, text
         const skills = ctx && ctx.deps && ctx.deps.skills;
         if (!skills) throw Object.assign(new Error('技能目录未装配'), { code: 'skills_unavailable' });
         const result = skills.read(args.name, args.path || 'SKILL.md');
-        return { name: result.skill, path: result.path, basePath: result.basePath, content: cut(result.content, 8000) };
+        return {
+          name: result.skill, path: result.path, basePath: result.basePath,
+          baseUrl: pathToFileURL(result.basePath + path.sep).href,
+          content: cut(result.content, 8000),
+        };
       },
     },
   ];

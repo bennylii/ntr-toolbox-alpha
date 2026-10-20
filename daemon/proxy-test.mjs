@@ -9,7 +9,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
-import { normalizeProxyConfig, assertProxyConfig, shouldBypass, createProxyFetch, DEFAULT_NO_PROXY } from './proxy.mjs';
+import { normalizeProxyConfig, assertProxyConfig, shouldBypass, createProxyFetch, isTransportError, DEFAULT_NO_PROXY } from './proxy.mjs';
+import { createCurlFetch } from './curl-fetch.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const cert = fs.readFileSync(path.join(here, 'test-fixtures', 'localhost-cert.pem'));
@@ -232,6 +233,70 @@ await t('http 目标未被误走 CONNECT（协议分流正确）', async () => {
   assert.equal(proxy.counts.connect, connects);
   proxyCfg = null;
 });
+
+console.log('== 代理：curl 兜底（undici 传输失败 → curl 子进程重发） ==');
+await t('isTransportError：ECONNRESET/超时/网络类算传输失败；AbortError 与 noRetry 不算', () => {
+  const mk = (code, msg) => { const e = new TypeError(msg || 'fetch failed'); if (code) e.cause = Object.assign(new Error('x'), { code }); return e; };
+  assert.equal(isTransportError(mk('ECONNRESET')), true);
+  assert.equal(isTransportError(mk('ETIMEDOUT')), true);
+  assert.equal(isTransportError(mk('ENOTFOUND')), true);
+  assert.equal(isTransportError(mk(null, 'fetch failed')), true);
+  const abort = new Error('This operation was aborted'); abort.name = 'AbortError';
+  assert.equal(isTransportError(abort), false);
+  const http = new Error('HTTP 404 /x'); http.noRetry = true;
+  assert.equal(isTransportError(http), false);
+  assert.equal(isTransportError(null), false);
+});
+await t('归一化：curlFallback 缺省为 true，显式 false 保留', () => {
+  assert.equal(normalizeProxyConfig({ enabled: true, url: 'http://127.0.0.1:1' }).curlFallback, true);
+  assert.equal(normalizeProxyConfig({ enabled: true, url: 'http://127.0.0.1:1', curlFallback: false }).curlFallback, false);
+});
+await t('undici 传输失败 → 回落 curl 重发成功（并打回落日志）', async () => {
+  proxyCfg = { enabled: true, url: `http://127.0.0.1:${proxyPort}`, noProxy: '127.0.0.1' };   // 回环直连：兜底也走直连
+  let logs = 0;
+  const broken = createProxyFetch({
+    getProxy: () => proxyCfg,
+    base: () => { const e = new TypeError('fetch failed'); e.cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }); return Promise.reject(e); },
+    log: () => { logs += 1; },
+  });
+  const res = await broken(`${httpUrl}/via-curl`);
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).path, '/via-curl');
+  assert.equal(logs, 1, '应打一行「回落 curl 传输」日志');
+});
+await t('createCurlFetch：经测试代理（-x 绝对形式）取回 JSON + 跟随 302 + POST 体', async () => {
+  const before = proxy.counts.absolute;
+  const curlFetch = createCurlFetch({ proxy: `http://127.0.0.1:${proxyPort}` });
+  const res = await curlFetch(`${httpUrl}/curl-via-proxy`);
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).path, '/curl-via-proxy');
+  assert.equal(proxy.counts.absolute, before + 1, 'curl 走了代理');
+  const redir = await curlFetch(`${httpUrl}/redir`);
+  assert.equal(redir.status, 200);
+  assert.equal((await redir.json()).path, '/final', 'curl -L 跟随重定向');
+  const post = await curlFetch(`${httpUrl}/echo`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer t' }, body: '{"a":2}' });
+  const data = await post.json();
+  assert.equal(data.method, 'POST');
+  assert.equal(data.body, '{"a":2}');
+  assert.equal(data.auth, 'Bearer t');
+});
+await t('curlFallback=false → 传输失败不兜底（原错误抛出）', async () => {
+  proxyCfg = { enabled: true, url: `http://127.0.0.1:${proxyPort}`, noProxy: '127.0.0.1', curlFallback: false };
+  const broken = createProxyFetch({
+    getProxy: () => proxyCfg,
+    base: () => { const e = new TypeError('fetch failed'); e.cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }); return Promise.reject(e); },
+  });
+  await assert.rejects(broken(`${httpUrl}/no-fallback`), /fetch failed/);
+});
+await t('noRetry（HTTP 状态错误）不触发兜底', async () => {
+  proxyCfg = { enabled: true, url: `http://127.0.0.1:${proxyPort}`, noProxy: '127.0.0.1' };
+  const broken = createProxyFetch({
+    getProxy: () => proxyCfg,
+    base: () => { const e = new Error('HTTP 401 未授权'); e.noRetry = true; return Promise.reject(e); },
+  });
+  await assert.rejects(broken(`${httpUrl}/http-error`), /HTTP 401/);
+});
+proxyCfg = null;
 
 for (const s of [proxy.server, httpTarget.server, httpsTarget.server]) s.close();
 

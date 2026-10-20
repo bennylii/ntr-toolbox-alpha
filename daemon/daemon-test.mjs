@@ -27,7 +27,7 @@ const { createSkillCatalog } = await imp('agent-skills.mjs');
 const { createAgentEvents } = await imp('agent-events.mjs');
 const { createJobQueue } = await imp('job-queue.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
-const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport, createLgImportRunner } = await imp('lg-align.mjs');
+const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport, createLgImportRunner, createLgReadbackRunner } = await imp('lg-align.mjs');
 const { effectivePreserveRules, presetRules } = await imp('preserve.mjs');
 const { processorFromStore } = await imp('processors.mjs');
 const { checkAligned } = await imp('quality.mjs');
@@ -111,6 +111,79 @@ await t('续跑：仅补剩余 2 章，段缓存复用（已完成章的段不�
   const again = await mkPipeline({}).runBook(`web:mock/${TRANS_R_BOOK}`);
   assert.equal(again.stats.uploaded, 0);
   assert.equal(again.stats.requests, 0, '全部完成 + toc 已当前 → 零请求');
+});
+
+console.log('== 空段预过滤（④：真站点实测含空段 → 空段不进请求、提交前原位回填） ==');
+await t('runBook：含空段的章只把非空段送进请求；上传段数/顺序不变（空段原样回填）', async () => {
+  const bookKey = `web:mock/mock-empty-${RUN}`;
+  store.upsertBook({ key: bookKey, kind: 'web', providerId: 'mock', novelId: `mock-empty-${RUN}`, origin: MOCK, title: '' });
+  const r = await mkPipeline({}).runBook(bookKey);
+  assert.equal(r.stats.uploaded, 1, JSON.stringify(r.stats));
+  const stats = await fetch(`${MOCK}/__stats`).then((res) => res.json());
+  const up = stats.lastChapterUpload;
+  assert.equal(up.chapterId, 'e1');
+  assert.equal(up.count, 4, '上传段数 = 原段落数（含空段，上传契约不变）');
+  assert.equal(up.preview[1], '', '空段原位回填');
+  assert.equal(up.preview[2], '   ', '空白段原样保留');
+  assert.ok(String(up.preview[0]).includes('模拟译'), up.preview[0]);
+  assert.equal(stats.lastTranslate.lines, 2, '只有非空段进请求（编号/token 不花在空段上）');
+});
+
+console.log('== 相邻段上下文（参考上文/参考下文：LG 句末门槛 + 段缓存键随上下文变化） ==');
+const CTX_BOOK = `mock-ctx-${RUN}`;
+const CTX_KEY = `web:mock/${CTX_BOOK}`;
+const ctxStats = () => fetch(`${MOCK}/__stats`).then((r) => r.json());
+// level=all（重翻档）保证每轮都是目标；再用「重置进度」绕过断点续跑，专测段缓存键
+const resetCtxProgress = () => store.setProgress(CTX_KEY, 'c1', { glossaryUuid: 'g-current', state: 'pending' });
+await t('关闭态：跑一遍 → 重置进度重跑 → 零请求（键与旧实现逐字相同、零缓存流失）', async () => {
+  store.upsertBook({ key: CTX_KEY, kind: 'web', providerId: 'mock', novelId: CTX_BOOK, origin: MOCK, title: '' });
+  const first = await mkPipeline({ level: 'all', concurrency: 1 }).runBook(CTX_KEY);
+  assert.equal(first.stats.uploaded, 1, JSON.stringify(first.stats));
+  const stats1 = await ctxStats();
+  assert.deepEqual(stats1.lastTranslate.context, { preceding: 0, following: 0 }, '关闭态不带上下文块');
+  assert.deepEqual((stats1.translateLog || []).slice(-2).map((r) => r.lines).sort((a, b) => b - a), [30, 10], '40 段按 30 行/段切成 30 + 10（末两条 = 本轮两段）');
+  resetCtxProgress();
+  const again = await mkPipeline({ level: 'all', concurrency: 1 }).runBook(CTX_KEY);
+  assert.equal(again.stats.uploaded, 1);
+  assert.equal(again.stats.requests, 0, '同源同处理链 + 无上下文 → 段缓存命中');
+});
+await t('开上下文：键随上下文变化（命中 → 重新请求），各段上下文行数正确、上传段数不变', async () => {
+  resetCtxProgress();
+  const withCtx = await mkPipeline({ level: 'all', concurrency: 1, contextBefore: 2, contextAfter: 2 }).runBook(CTX_KEY);
+  assert.equal(withCtx.stats.uploaded, 1);
+  assert.ok(withCtx.stats.requests >= 2, `上下文变了 → 两段都要重新请求：${JSON.stringify(withCtx.stats)}`);
+  const stats = await ctxStats();
+  const tail = (stats.translateLog || []).slice(-2);
+  const seg0 = tail.find((r) => r.context && r.context.preceding === 0 && r.context.following === 1);
+  const seg1 = tail.find((r) => r.context && r.context.preceding === 2 && r.context.following === 0);
+  // 下文语义：往后收到句末标点为止（含该行）——40 段全都以 。 结尾，所以段 0 的下文 = 1 行完整句
+  assert.ok(seg0, `段 0：章首无上文、有下文 1 行（log=${JSON.stringify(tail.map((r) => r.context))}）`);
+  assert.ok(seg1, '段 1：有上文 2 行、章末无下文');
+  assert.equal(seg0.lines, 30);
+  assert.equal(seg1.lines, 10);
+  assert.equal(stats.lastChapterUpload.count, 40, '上传段数不变（上下文不进正文）');
+  assert.ok(String(stats.lastChapterUpload.preview[0]).includes('模拟译'));
+});
+await t('同设置重跑：上下文相同 → 键稳定 → 段缓存命中', async () => {
+  resetCtxProgress();
+  const again = await mkPipeline({ level: 'all', concurrency: 1, contextBefore: 2, contextAfter: 2 }).runBook(CTX_KEY);
+  assert.equal(again.stats.uploaded, 1);
+  assert.equal(again.stats.requests, 0, '同上下文 → 键相同 → 命中');
+});
+await t('config.translate 生效（控制台保存路径）：不给运行选项时按 config；关回去旧键仍命中', async () => {
+  resetCtxProgress();
+  // 3/0：段 1 的上文从 2 行变 3 行（新键 → 请求）；段 0 在章首且 after=0（无上下文 → 与关闭态同键 → 命中）。
+  // 这同时钉住「只有上下文真正变化的段才重发」这条缓存语义。
+  store.setConfig('translate', { contextBefore: 3, contextAfter: 0 });
+  const viaConfig = await mkPipeline({ level: 'all', concurrency: 1 }).runBook(CTX_KEY);
+  assert.equal(viaConfig.stats.uploaded, 1);
+  assert.equal(viaConfig.stats.requests, 1, `按 config 生效：只有上下文变化的段 1 需要请求：${JSON.stringify(viaConfig.stats)}`);
+  const stats = await ctxStats();
+  assert.deepEqual(stats.lastTranslate.context, { preceding: 3, following: 0 }, '段 1 按 config：上文 3 行 / 下文 0 行');
+  store.setConfig('translate', { contextBefore: 0, contextAfter: 0 });
+  resetCtxProgress();
+  const backOff = await mkPipeline({ level: 'all', concurrency: 1 }).runBook(CTX_KEY);
+  assert.equal(backOff.stats.requests, 0, '关回去 → 旧键（无上下文）仍命中（零缓存流失）');
 });
 
 console.log('== 调度器（P1：全局并发门 / key 池 / 限流 / 用量） ==');
@@ -202,6 +275,36 @@ await t('调度器：用量按 run 落库（usage 表）', async () => {
   assert.ok(rows.length >= 1 && rows[0].requests > 0 && rows[0].promptTokens > 0, JSON.stringify(rows));
   const totals = store.usageTotals(bookKey);
   assert.ok(totals.rows >= 1 && totals.requests > 0, JSON.stringify(totals));
+});
+await t('调度器：auto 档（maxInFlight=0）429 后许可减半（起步 4 → 2）', async () => {
+  await resetMock();
+  const sch = new LlmScheduler({
+    engine, store, log: quiet,
+    options: { workers: [mkW('au1', 'auk1', '?fail=429')], maxInFlight: 0, transportRetries: 0, cooldownSteps: [800] },
+  });
+  assert.equal(sch.stats().auto, true);
+  assert.equal(sch.stats().maxInFlight, 4, '自动档起步 4');
+  const res = await sch.call(HELLO);
+  assert.equal(res.ok, false, JSON.stringify(res));
+  assert.ok(/429/.test(res.error || ''), JSON.stringify(res));
+  assert.equal(sch.stats().maxInFlight, 2, JSON.stringify(sch.stats()));
+});
+await t('调度器：auto 档连续成功回升（autoRampEvery=2 → 3 次成功到 5）', async () => {
+  await resetMock();
+  const sch = new LlmScheduler({
+    engine, store, log: quiet,
+    options: { workers: [mkW('au2', 'auk2')], maxInFlight: 0, autoRampEvery: 2, transportRetries: 0 },
+  });
+  assert.equal(sch.stats().maxInFlight, 4);
+  for (let i = 0; i < 3; i += 1) {
+    const res = await sch.call(HELLO);
+    assert.equal(res.ok, true, JSON.stringify(res));
+  }
+  assert.equal(sch.stats().maxInFlight, 5, JSON.stringify(sch.stats()));
+  // 热切换回固定档：0 → 2 立即生效（不被 `|| 1` 吞）
+  sch.setOptions({ maxInFlight: 2 });
+  assert.equal(sch.stats().auto, false);
+  assert.equal(sch.stats().maxInFlight, 2);
 });
 await t('控制面：/auth 热更新 workers、/run 单队列串行', async () => {
   const sch = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW('z', 'zk')], maxInFlight: 1 } });
@@ -351,6 +454,29 @@ await t('/settings 预设往返：合法保存、非法回退 base', async () =>
   assert.equal(s.settings.textPreserve.preset, 'base', '非法值回退 base');
   const rulesResp = await fetch(`${S2}/rules`).then((r) => r.json());
   assert.ok(rulesResp.textPreserve && Array.isArray(rulesResp.textPreserve.presets), 'GET /rules 带预设清单');
+  srv.close();
+});
+await t('/settings 翻译上下文往返 + 取值夹紧（0–20；非法忽略）', async () => {
+  const srv = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline: null, checkPipeline: null, makeClient, engine, port: 7376, log: quiet });
+  const S3 = 'http://127.0.0.1:7376';
+  const postCtx = (body) => fetch(`${S3}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ translate: body }) });
+  const getCtx = async () => (await fetch(`${S3}/settings`).then((r) => r.json())).settings.translate;
+  // 「全新实例默认 0/0」由纯函数与管线用例覆盖（关闭态用户消息逐字一致）；这里先归零再验往返与夹紧
+  await postCtx({ contextBefore: 0, contextAfter: 0 });
+  let tx = await getCtx();
+  assert.deepEqual(tx, { contextBefore: 0, contextAfter: 0 }, '0 = 关闭');
+  await postCtx({ contextBefore: 2, contextAfter: 1 });
+  tx = await getCtx();
+  assert.deepEqual(tx, { contextBefore: 2, contextAfter: 1 });
+  await postCtx({ contextBefore: 999, contextAfter: -5 });
+  tx = await getCtx();
+  assert.deepEqual(tx, { contextBefore: 20, contextAfter: 0 }, '999→20、-5→0');
+  await postCtx({ contextBefore: 'x' });
+  tx = await getCtx();
+  assert.deepEqual(tx, { contextBefore: 20, contextAfter: 0 }, '非法值忽略（保留原值）');
+  await postCtx({ contextBefore: 0, contextAfter: 0 });
+  assert.deepEqual(await getCtx(), { contextBefore: 0, contextAfter: 0 }, '关回去');
+  assert.equal(store.getConfig('translate').contextBefore, 0, '落 config.translate');
   srv.close();
 });
 await t('质检集成：默认预设下 <br> 丢失 → TEXT_PRESERVE（无需用户规则）', () => {
@@ -614,6 +740,45 @@ await t('agent：stop() 中止挂起中的追问（decision 取消 + 轮次 abor
   assert.equal(store.getPendingAgentDecision(sessionId), null, '决定应被取消');
   assert.equal(store.getAgentSession(sessionId).state, 'idle');
 });
+await t('agent：ask_user 超时默认选第一项（LG 行为：decision allowed + 回填 selected）', async () => {
+  const q = '?toolcall=ask_user&toolargs=' + encodeURIComponent('{"question":"选哪个？","options":[{"id":"a","label":"A"},{"id":"b","label":"B"}]}');
+  const scheduler = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW('ag4', 'agkey4', q)], maxInFlight: 1 } });
+  const llm = createAgentLlm({ scheduler, log: quiet });
+  const loop = createAgentLoop({
+    store, chat: llm.chat, takeUsage: llm.takeUsage, tools: [askUserTool], log: quiet,
+    options: { decisionTimeoutMs: 1500 },   // 默认 questionDefaultFirst=true
+  });
+  const sessionId = store.createAgentSession({ bookKey: '', title: 'timeout-default' });
+  let questionId = null;
+  const r = await loop.runTurn(sessionId, '问一下', { onEvent: (e) => { if (e.type === 'question') questionId = e.decisionId; } });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(questionId, '应产生提问');
+  const toolRow = store.listAgentMessages(sessionId).find((x) => x.role === 'tool');
+  const parsed = JSON.parse(toolRow.content);
+  assert.equal(parsed.ok, true, JSON.stringify(parsed));
+  assert.equal(parsed.result.answer.selected, 'a', JSON.stringify(parsed.result));
+  assert.equal(parsed.result.answer.reason, 'timeout_default', JSON.stringify(parsed.result));
+  assert.equal(store.getAgentDecision(questionId).status, 'allowed');
+  assert.equal(store.getPendingAgentDecision(sessionId), null);
+});
+await t('agent：ask_user 超时关闭默认项 → 维持取消（ask_cancelled）', async () => {
+  const q = '?toolcall=ask_user&toolargs=' + encodeURIComponent('{"question":"选哪个？","options":[{"id":"a","label":"A"},{"id":"b","label":"B"}]}');
+  const scheduler = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW('ag5', 'agkey5', q)], maxInFlight: 1 } });
+  const llm = createAgentLlm({ scheduler, log: quiet });
+  const loop = createAgentLoop({
+    store, chat: llm.chat, takeUsage: llm.takeUsage, tools: [askUserTool], log: quiet,
+    options: { decisionTimeoutMs: 1500, questionDefaultFirst: false },
+  });
+  const sessionId = store.createAgentSession({ bookKey: '', title: 'timeout-cancel' });
+  let questionId = null;
+  const r = await loop.runTurn(sessionId, '问一下', { onEvent: (e) => { if (e.type === 'question') questionId = e.decisionId; } });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const toolRow = store.listAgentMessages(sessionId).find((x) => x.role === 'tool');
+  const parsed = JSON.parse(toolRow.content);
+  assert.equal(parsed.result.ok, false, JSON.stringify(parsed));
+  assert.equal(parsed.result.error, 'ask_cancelled', JSON.stringify(parsed));
+  assert.equal(store.getAgentDecision(questionId).status, 'cancelled');
+});
 
 console.log('== Agent 只读工具（A2：技能目录 + 书/正文/译文/质检，真实 HTTP） ==');
 const readToolSet = [...createReadTools({ store, engine, makeClient, log: quiet }), doingTool, askUserTool];
@@ -672,6 +837,8 @@ await t('read_skill / list_skills：技能目录注入与读取（含 references
   assert.ok(list.result.skills.some((s) => s.name === 'glossary-workflow'), JSON.stringify(list.result.skills.map((s) => s.name)));
   const read = await runToolOnce('read_skill', { name: 'glossary-workflow' }, { books: true });
   assert.ok(read.result.content.includes('写入门槛'), read.result.content.slice(0, 200));
+  assert.ok(String(read.result.baseUrl).startsWith('file:'), JSON.stringify(read.result.baseUrl));
+  assert.ok(read.result.baseUrl.endsWith('/'), read.result.baseUrl);
   const escape = await runToolOnce('read_skill', { name: 'glossary-workflow', path: '../x' });
   assert.equal(escape.ok, false, JSON.stringify(escape));
   assert.equal(escape.error, 'bad_path');
@@ -692,7 +859,10 @@ const agentQueue = createJobQueue({
   resolveRunner: (job) => ({ translate: qTranslate, check: qCheck, glossary: qGlossary }[job]),
   log: quiet,
 });
-const agentSkills = createSkillCatalog({ roots: [path.join(repoRoot, 'skills')], log: quiet });
+const agentSkills = createSkillCatalog({
+  roots: [{ dir: path.join(repoRoot, 'daemon', '.tmp-skills-user'), source: 'user' }, { dir: path.join(repoRoot, 'skills'), source: 'builtin' }],
+  log: quiet,
+});
 const runWriteToolOnce = async (toolName, args, { approve = true, tools = writeTools } = {}) => {
   const q = `?toolcall=${toolName}&toolargs=${encodeURIComponent(JSON.stringify(args))}`;
   const scheduler = new LlmScheduler({ engine, store, log: quiet, options: { workers: [mkW(`wt-${toolName}`, 'wtkey', q)], maxInFlight: 1 } });
@@ -973,6 +1143,8 @@ await t('/agent/skills 列出目录；未知 @ → 400 带清单', async () => {
     const skills = await agentFetch(7364, '/agent/skills');
     assert.equal(skills.ok, true);
     assert.ok(skills.skills.some((x) => x.name === 'glossary-workflow'), JSON.stringify(skills.skills.map((x) => x.name)));
+    assert.ok(Array.isArray(skills.skills[0].files), 'files 应为路径数组（技能面板用）');
+    assert.equal(skills.skills.find((x) => x.name === 'agent-charter').hidden, true, '隐藏技能应带 hidden 标注');
     const { sessionId } = await agentFetch(7364, '/agent/session', { title: 'bad' });
     const bad = await agentFetch(7364, '/agent/message', { session: sessionId, message: '@nope-skill 看看' });
     assert.equal(bad.ok, false, JSON.stringify(bad));
@@ -980,6 +1152,65 @@ await t('/agent/skills 列出目录；未知 @ → 400 带清单', async () => {
     const snap = await agentFetch(7364, `/agent/snapshot?session=${encodeURIComponent(sessionId)}`);
     assert.equal(snap.messages.length, 0, '400 时不落消息');
   } finally { server.close(); }
+});
+await t('/agent/skill/file：读技能原文（404 文件不存在 / 400 路径越界 / 404 未知技能）', async () => {
+  const { server } = await mkAgentServer(7367, '', [doingTool]);
+  try {
+    const ok = await agentFetch(7367, '/agent/skill/file?name=glossary-workflow');
+    assert.equal(ok.ok, true, JSON.stringify(ok).slice(0, 200));
+    assert.equal(ok.path, 'SKILL.md');
+    assert.ok(String(ok.content).includes('name: glossary-workflow'), '应返回 SKILL.md 原文');
+    const ref = await agentFetch(7367, '/agent/skill/file?name=glossary-extract&path=' + encodeURIComponent('references/extract.md'));
+    assert.equal(ref.ok, true, JSON.stringify(ref).slice(0, 200));
+    assert.ok(String(ref.content).length > 100, 'references 文件应有正文');
+    const missing = await agentFetch(7367, '/agent/skill/file?name=glossary-workflow&path=nope.md');
+    assert.equal(missing.ok, false, JSON.stringify(missing));
+    const evil = await agentFetch(7367, '/agent/skill/file?name=glossary-workflow&path=' + encodeURIComponent('../store.mjs'));
+    assert.equal(evil.ok, false, JSON.stringify(evil));
+    const unknown = await agentFetch(7367, '/agent/skill/file?name=nope-skill');
+    assert.equal(unknown.ok, false, JSON.stringify(unknown));
+  } finally { server.close(); }
+});
+await t('/agent/skill create|save|delete：用户技能免重启生效，内置只读', async () => {
+  const { server } = await mkAgentServer(7368, '', [doingTool]);
+  const userRoot = path.join(repoRoot, 'daemon', '.tmp-skills-user');
+  const rmTmp = () => { try { fs.rmSync(userRoot, { recursive: true, force: true }); } catch { /* ignore */ } };
+  rmTmp();
+  try {
+    const created = await agentFetch(7368, '/agent/skill/create', { name: 'e2e-user-skill', description: '测试用用户技能' });
+    assert.equal(created.ok, true, JSON.stringify(created));
+    const listed = await agentFetch(7368, '/agent/skills');
+    const entry = listed.skills.find((x) => x.name === 'e2e-user-skill');
+    assert.ok(entry, 'create 后免重启即可见（refresh 生效）: ' + JSON.stringify(listed.skills.map((x) => x.name)));
+    assert.equal(entry.source, 'user');
+    assert.equal(entry.writable, true);
+    const builtin = listed.skills.find((x) => x.name === 'glossary-workflow');
+    assert.equal(builtin.source, 'builtin');
+    assert.equal(builtin.writable, false);
+    const dup = await agentFetch(7368, '/agent/skill/create', { name: 'e2e-user-skill' });
+    assert.equal(dup.ok, false, '重复创建应 409: ' + JSON.stringify(dup));
+    const badName = await agentFetch(7368, '/agent/skill/create', { name: 'Bad_Name!' });
+    assert.equal(badName.ok, false, JSON.stringify(badName));
+    const saved = await agentFetch(7368, '/agent/skill/save', { name: 'e2e-user-skill', path: 'SKILL.md', content: '---\nname: e2e-user-skill\ndescription: 改过的描述\n---\n\n新正文' });
+    assert.equal(saved.ok, true, JSON.stringify(saved));
+    const readBack = await agentFetch(7368, '/agent/skill/file?name=e2e-user-skill');
+    assert.ok(String(readBack.content).includes('改过的描述'), String(readBack.content).slice(0, 80));
+    const ro = await agentFetch(7368, '/agent/skill/save', { name: 'glossary-workflow', path: 'SKILL.md', content: 'x' });
+    assert.equal(ro.ok, false, '内置技能保存应被拒: ' + JSON.stringify(ro));
+    const roDel = await agentFetch(7368, '/agent/skill/delete', { name: 'glossary-workflow' });
+    assert.equal(roDel.ok, false, '内置技能删除应被拒: ' + JSON.stringify(roDel));
+    const delSkillMd = await agentFetch(7368, '/agent/skill/delete', { name: 'e2e-user-skill', path: 'SKILL.md' });
+    assert.equal(delSkillMd.ok, false, 'SKILL.md 单删应被拒（包边界）: ' + JSON.stringify(delSkillMd));
+    const escape = await agentFetch(7368, '/agent/skill/save', { name: 'e2e-user-skill', path: '../evil.md', content: 'x' });
+    assert.equal(escape.ok, false, '路径越界应被拒: ' + JSON.stringify(escape));
+    const mention = await agentFetch(7368, '/agent/session', { title: 'pin2' })
+      .then((r) => agentFetch(7368, '/agent/message', { session: r.sessionId, message: '@e2e-user-skill 看一眼', approvalMode: 'auto' }));
+    assert.notEqual(mention.ok, false, '新建技能应可被 @点名（mentions 走 refresh）: ' + JSON.stringify(mention));
+    const del = await agentFetch(7368, '/agent/skill/delete', { name: 'e2e-user-skill' });
+    assert.equal(del.ok, true, JSON.stringify(del));
+    const after = await agentFetch(7368, '/agent/skills');
+    assert.ok(!after.skills.some((x) => x.name === 'e2e-user-skill'), '删除后应消失');
+  } finally { server.close(); rmTmp(); }
 });
 await t('@技能名：该轮系统提示注入技能正文（mock lastSystem 断言）', async () => {
   const { server } = await mkAgentServer(7365, '', [...writeTools, doingTool]);
@@ -1013,6 +1244,73 @@ await t('系统指令：保存 → 下一轮系统提示携带【用户系统指
     assert.ok(stats.lastSystem.includes('先结论'), stats.lastSystem);
   } finally { server.close(); }
 });
+
+console.log('== Agent 会话操作：重命名 / 删除 / 重新生成 / 编辑重发 ==');
+const opsServer = await mkAgentServer(7375, '', [doingTool]);
+const opsSnap = (sid) => agentFetch(7375, `/agent/snapshot?session=${encodeURIComponent(sid)}`);
+const opsTurn = async (sid, message) => {
+  await agentFetch(7375, '/agent/message', { session: sid, message, approvalMode: 'auto' });
+  await pollUntil(async () => { const s = await opsSnap(sid); return !s.running && s.messages.some((m) => m.role === 'assistant'); });
+};
+await t('重命名：POST /agent/session/rename → /agent/config 回读新标题；空标题 400', async () => {
+  const { sessionId } = await agentFetch(7375, '/agent/session', { title: '旧名' });
+  const r = await agentFetch(7375, '/agent/session/rename', { session: sessionId, title: '新名字' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.title, '新名字');
+  const cfg = await agentFetch(7375, '/agent/config');
+  assert.equal((cfg.sessions || []).find((x) => x.id === sessionId).title, '新名字');
+  const bad = await agentFetch(7375, '/agent/session/rename', { session: sessionId, title: '   ' });
+  assert.equal(bad.ok, false, JSON.stringify(bad));
+});
+await t('编辑重发：截断到该条（其后全删）并用新文本重跑', async () => {
+  const { sessionId } = await agentFetch(7375, '/agent/session', { title: 'edit' });
+  await opsTurn(sessionId, '第一问');
+  await opsTurn(sessionId, '第二问');
+  const snap0 = await opsSnap(sessionId);
+  const first = snap0.messages.find((m) => m.role === 'user');
+  const r = await agentFetch(7375, '/agent/message/edit', { session: sessionId, seq: first.seq, message: '改写后的问题' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(r.dropped >= 4, '应截断其后全部消息：' + JSON.stringify(r));
+  await pollUntil(async () => { const s = await opsSnap(sessionId); return !s.running && s.messages.some((m) => m.content === '改写后的问题'); });
+  const snap1 = await opsSnap(sessionId);
+  assert.deepEqual(snap1.messages.filter((m) => m.role === 'user').map((m) => m.content), ['改写后的问题']);
+  assert.equal(snap1.messages.filter((m) => m.role === 'assistant').length, 1, '新一轮只剩一条助手回复');
+});
+await t('编辑重发：非 user 消息 / 非法 seq → 400', async () => {
+  const { sessionId } = await agentFetch(7375, '/agent/session', { title: 'edit-bad' });
+  await opsTurn(sessionId, '问题');
+  const snap = await opsSnap(sessionId);
+  const assistant = snap.messages.find((m) => m.role === 'assistant');
+  const r1 = await agentFetch(7375, '/agent/message/edit', { session: sessionId, seq: assistant.seq, message: 'x' });
+  assert.equal(r1.ok, false, JSON.stringify(r1));
+  const r2 = await agentFetch(7375, '/agent/message/edit', { session: sessionId, seq: 0, message: 'x' });
+  assert.equal(r2.ok, false, JSON.stringify(r2));
+});
+await t('重新生成：用户消息不重复、该轮助手回复被重新生成', async () => {
+  const { sessionId } = await agentFetch(7375, '/agent/session', { title: 'regen' });
+  await opsTurn(sessionId, '唯一问题');
+  const r = await agentFetch(7375, '/agent/message/regenerate', { session: sessionId });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(r.dropped >= 1, '应丢弃该轮的助手/工具消息：' + JSON.stringify(r));
+  await pollUntil(async () => { const s = await opsSnap(sessionId); return !s.running && s.messages.some((m) => m.role === 'assistant'); });
+  const snap = await opsSnap(sessionId);
+  const users = snap.messages.filter((m) => m.role === 'user');
+  assert.equal(users.length, 1, '用户消息不重复：' + JSON.stringify(snap.messages.map((m) => m.role)));
+  assert.equal(users[0].content, '唯一问题');
+});
+await t('删除会话：messages/decisions 一并清掉，会话列表不再列出；重复删除失败', async () => {
+  const { sessionId } = await agentFetch(7375, '/agent/session', { title: 'to-delete' });
+  await opsTurn(sessionId, '待删');
+  const del = await agentFetch(7375, '/agent/session/delete', { session: sessionId });
+  assert.equal(del.ok, true, JSON.stringify(del));
+  const cfg = await agentFetch(7375, '/agent/config');
+  assert.ok(!(cfg.sessions || []).some((x) => x.id === sessionId), '已从会话列表消失');
+  assert.equal(store.listAgentMessages(sessionId).length, 0);
+  assert.equal(store.listAgentDecisions(sessionId).length, 0);
+  const again = await agentFetch(7375, '/agent/session/delete', { session: sessionId });
+  assert.equal(again.ok, false, JSON.stringify(again));
+});
+await t('清理：会话操作服务器', () => { opsServer.server.close(); });
 
 console.log('== 控制面 ==');
 await t('server：/status 有书与进度、/auth 更新凭据', async () => {
@@ -1453,6 +1751,26 @@ await t('/auth 记录 lastSync（origin/UA 摘要/workers 数/auto 标记）→ 
   const settings = await fetch(`${C}/settings`).then((r) => r.json());
   assert.ok(settings.settings.lastSync && settings.settings.lastSync.at > 0, 'GET /settings 也带 lastSync');
 });
+await t('同步请求标志：/auth/request 置位 → /ping.pendingAuth → /auth 清位 → 过期失效', async () => {
+  const req = await fetch(`${C}/auth/request`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then((r) => r.json());
+  assert.equal(req.ok, true, JSON.stringify(req));
+  assert.ok(req.at > 0, JSON.stringify(req));
+  let st = await fetch(`${C}/settings`).then((r) => r.json());
+  assert.ok(st.settings.authRequest && st.settings.authRequest.at > 0, 'settings 暴露 authRequest：' + JSON.stringify(st.settings.authRequest));
+  let ping = await fetch(`${C}/ping`).then((r) => r.json());
+  assert.equal(ping.pendingAuth, true, 'ping 报 pendingAuth');
+  await fetch(`${C}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: 'tok-sync-req' }) });
+  ping = await fetch(`${C}/ping`).then((r) => r.json());
+  assert.equal(ping.pendingAuth, false, '收到推送后清位');
+  st = await fetch(`${C}/settings`).then((r) => r.json());
+  assert.equal(st.settings.authRequest, null);
+  // 过期语义：5 分钟前的请求不再算数（防陈旧请求把 token 又推一遍）
+  await fetch(`${C}/auth/request`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  store.setConfig('authRequest', { at: Date.now() - 6 * 60 * 1000 });
+  ping = await fetch(`${C}/ping`).then((r) => r.json());
+  assert.equal(ping.pendingAuth, false, '过期请求不算数');
+  store.setConfig('authRequest', null);
+});
 await t('跨域白名单：内置默认保留 + serve.origins 附加生效', async () => {
   // 未配置附加条目：其它 origin 的 POST 403
   const deny = await fetch(`${C}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://mirror.example.com' }, body: '{}' });
@@ -1497,7 +1815,7 @@ await t('serve 端口持久化：config.serve.port + .serve-port 落盘（子进
 });
 await t('清理：连接配置服务器', () => { connServer.close(); });
 
-const { UI_HTML } = await imp('ui.mjs');
+const { UI_HTML, renderMarkdown } = await imp('ui.mjs');
 console.log('== LG 导入 GUI：/lg/export、/lg/upload、/lg/verify、/run lg-import ==');
 await t('/ui 内嵌脚本可解析（防 UI_HTML 模板字面量转义回归）', () => {
   const html = UI_HTML;
@@ -1505,16 +1823,58 @@ await t('/ui 内嵌脚本可解析（防 UI_HTML 模板字面量转义回归）'
   assert.ok(body.length > 1000, '脚本体存在');
   // 注意：模板字面量里写 '\n' 会被外层吃掉成真换行 → 内嵌脚本语法错误（页面静默失效）
   new Function(body);
+});
+console.log('== 控制台助手页：markdown 渲染（纯函数，块级/行内/安全） ==');
+await t('转义：模型输出里的原始 HTML 一律不生效', () => {
+  const html = renderMarkdown('<img src=x onerror=alert(1)> 与 <script>b</script>');
+  assert.ok(!html.includes('<img') && !html.includes('<script'), html);
+  assert.ok(html.includes('&lt;img'), html);
+});
+await t('围栏代码块：语言标签 + 复制按钮 + 内容转义', () => {
+  const html = renderMarkdown('```js\nconst a = "<b>";\n```');
+  assert.ok(html.includes('class="code-block"') && html.includes('>js<'), html);
+  assert.ok(html.includes('data-copy'), html);
+  assert.ok(html.includes('&lt;b&gt;'), html);
+});
+await t('未闭合围栏按已解析部分渲染（不吞后续内容）', () => {
+  const html = renderMarkdown('```py\nprint(1)');
+  assert.ok(html.includes('class="code-body"') && html.includes('print(1)'), html);
+});
+await t('表格 / 列表 / 引用 / 标题 / 分割线', () => {
+  const html = renderMarkdown('| a | b |\n|---|---|\n| 1 | 2 |\n\n- x\n- y\n\n> q\n\n## h\n\n---');
+  assert.ok(html.includes('<table>') && html.includes('<th>a</th>') && html.includes('<td>1</td>'), html);
+  assert.ok(html.includes('<ul><li>x</li><li>y</li></ul>'), html);
+  assert.ok(html.includes('<blockquote>'), html);
+  assert.ok(html.includes('<h2>h</h2>') && html.includes('<hr>'), html);
+});
+await t('链接白名单：只有 http(s) 变链接，其它只留文字', () => {
+  const ok = renderMarkdown('见 [站点](https://n.novelia.cc/)');
+  assert.ok(ok.includes('<a href="https://n.novelia.cc/"') && ok.includes('rel="noopener"'), ok);
+  const bad = renderMarkdown('[坏](javascript:alert(1))');
+  assert.ok(!bad.includes('javascript:'), bad);
+  assert.ok(bad.includes('坏'), bad);
+});
+await t('行内：粗体/斜体/行内代码；裸 URL 自动链接且不吞尾标点', () => {
+  const html = renderMarkdown('**粗** *斜* `x<y` 见 https://example.com/a 。');
+  assert.ok(html.includes('<strong>粗</strong>') && html.includes('<em>斜</em>') && html.includes('x&lt;y'), html);
+  assert.ok(html.includes('<a href="https://example.com/a"') && html.includes('https://example.com/a</a> 。'), html);
+});
+await t('/ui 新结构标记：回到底部、空态容器、内联 markdown 实现、消息 class 契约', () => {
+  assert.ok(UI_HTML.includes('id="agent-bottom"'), '回到底部按钮');
+  assert.ok(UI_HTML.includes('class="composer"') && UI_HTML.includes('id="agent-input"'), '输入区');
+  assert.ok(UI_HTML.includes('function renderMarkdown'), 'markdown 实现已内联进页面');
+  assert.ok(UI_HTML.includes("'msg assistant'") && UI_HTML.includes("'tool'") && UI_HTML.includes("'msg system'"), '消息/工具卡 class 契约');
 });const LGG_BOOK = `mock-trans-lg3-${RUN}`;
 store.upsertBook({ key: `web:mock/${LGG_BOOK}`, kind: 'web', providerId: 'mock', novelId: LGG_BOOK, origin: MOCK, title: 'LG GUI 测试' });
 const lgTmp = { exportsDir: path.join(here, '.tmp-lg-exports'), uploadsDir: path.join(here, '.tmp-lg-uploads') };
 for (const d of [lgTmp.exportsDir, lgTmp.uploadsDir]) fs.rmSync(d, { recursive: true, force: true });
 const lgRunner = createLgImportRunner({ store, makeClient, log: quiet });
+const lgReadback = createLgReadbackRunner({ store, makeClient, log: quiet });
 const lgQueue = createJobQueue({
-  resolveRunner: (job) => ({ glossary: glossaryPipeline, check: null, translate: mkPipeline({}), 'lg-import': lgRunner }[job]),
+  resolveRunner: (job) => ({ glossary: glossaryPipeline, check: null, translate: mkPipeline({}), 'lg-import': lgRunner, 'lg-readback': lgReadback }[job]),
   log: quiet,
 });
-const lgServer = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline, scheduler: setSched, agentScheduler: setAgSched, queue: lgQueue, makeClient, engine, port: 7372, log: quiet, lgImportRunner: lgRunner, lgDirs: lgTmp });
+const lgServer = await startServer({ store, pipeline: mkPipeline({}), glossaryPipeline, scheduler: setSched, agentScheduler: setAgSched, queue: lgQueue, makeClient, engine, port: 7372, log: quiet, lgImportRunner: lgRunner, lgReadbackRunner: lgReadback, lgDirs: lgTmp });
 const LG = 'http://127.0.0.1:7372';
 const lgPost = async (p, body) => fetch(LG + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, body: await r.json() }));
 let lgExport = null;
@@ -1582,9 +1942,101 @@ await t('/run lg-import：全量提交 t2/t3；越界 options 被拒', async () 
     if (item && (item.state === 'done' || item.state === 'failed')) break;
   }
   assert.equal(item && item.state, 'done', JSON.stringify(item));
-  assert.equal(item.stats.uploaded, 3, JSON.stringify(item.stats));
+  // 断点续跑：t1 已按同一内容提交过 → 跳过，只传 t2/t3
+  assert.equal(item.stats.uploaded, 2, JSON.stringify(item.stats));
+  assert.equal(item.stats.skipped, 1, JSON.stringify(item.stats));
   const stats = await fetch(`${MOCK}/__stats`).then((r) => r.json());
   assert.equal(stats.lastChapterUpload.chapterId, 't3', JSON.stringify(stats.lastChapterUpload));
+});
+await t('/lg/verify：站点导出格式（mode=jp）的 LG 译文 → 自动识别并对齐 3/3', async () => {
+  // 站点「下载原文」格式夹具：头部 → ############ → 简介，之后每章 `# 标题` + 空行 + 正文，章块间 3 空行
+  const transCount = (id) => (id.endsWith('1') ? 6 : id.endsWith('2') ? 4 : 2);
+  const mkSite = (pre) => {
+    const lines = [`书名 ${LGG_BOOK}`, '', '作者[mock]', '', '标签 / 测试 /', '总计: 3 / GPT: 3', '', '############', '简介。', '', '', ''];
+    for (const id of ['t1', 't2', 't3']) {
+      lines.push(`# 章 ${id}`, '');
+      for (let i = 0; i < transCount(id); i += 1) lines.push(`${pre}第${i + 1}行：アリスが魔導書を読む。`);
+      lines.push('', '', '');
+    }
+    return lines.join('\n');
+  };
+  const mockJp = await fetch(`${MOCK}/api/novel/mock/${LGG_BOOK}/file?mode=jp&translationsMode=parallel&type=txt&filename=jp.${LGG_BOOK}.txt`).then((r) => r.text());
+  const mockJpLines = mockJp.split('\n');
+  assert.ok(mockJpLines.includes('############') && mockJpLines.includes('# 章 t1'), 'mock 的 mode=jp 夹具应是站点导出结构：' + JSON.stringify(mockJpLines.slice(0, 14)));
+  assert.equal(mockJpLines.filter((l) => l.startsWith('第')).length, 12, '与 chapter-task 同源（6+4+2 段）');
+  const up = await lgPost('/lg/upload', { filename: 'lg-result-sitefmt.txt', content: mkSite('【译】') });
+  assert.equal(up.status, 200, JSON.stringify(up.body));
+  const r = await lgPost('/lg/verify', { bookKey: `web:mock/${LGG_BOOK}`, txtPath: up.body.path, manifestPath: lgExport.manifestFile });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.ok(!r.body.globalError, r.body.globalError);
+  assert.equal(r.body.converted, true, '应识别为站点导出格式并自动对齐：' + JSON.stringify(r.body));
+  assert.ok(/站点导出格式/.test(r.body.convertNote || ''), r.body.convertNote);
+  assert.equal(r.body.okCount, 3, JSON.stringify(r.body));
+  assert.ok(r.body.linesIn > r.body.linesTotal, `站点格式原文件行数(${r.body.linesIn}) 应多于清单契约行数(${r.body.linesTotal})`);
+  globalThis.__lgSiteFmt = up.body.path;
+  globalThis.__lgSiteFmtContent = mkSite('【译】');
+});
+const lgWait = async (id) => {
+  for (let i = 0; i < 60; i++) {
+    await new Promise((res) => setTimeout(res, 200));
+    const item = lgQueue.get(id);
+    if (item && (item.state === 'done' || item.state === 'failed')) return item;
+  }
+  return lgQueue.get(id);
+};
+await t('/run lg-import：站点格式 txt（内容与已提交一致）→ 自动对齐 + 断点全跳过', async () => {
+  const run = await lgPost('/run', { bookKey: `web:mock/${LGG_BOOK}`, job: 'lg-import', options: { txtPath: globalThis.__lgSiteFmt, manifestPath: lgExport.manifestFile, limit: 0 } });
+  assert.equal(run.status, 202, JSON.stringify(run.body));
+  const item = await lgWait(run.body.id);
+  assert.equal(item && item.state, 'done', JSON.stringify(item));
+  assert.equal(item.stats.uploaded, 0, JSON.stringify(item.stats));
+  assert.equal(item.stats.skipped, 3, '同一内容重跑应全部跳过（断点续跑）：' + JSON.stringify(item.stats));
+  assert.equal(item.stats.converted, true, '队列统计应标注自动对齐：' + JSON.stringify(item.stats));
+  assert.ok(item.progress && item.progress.phase === 'done' && /断点跳过 3/.test(item.progress.message || ''), JSON.stringify(item.progress));
+});
+await t('/run lg-import：译文内容变化 → 断点不拦（全部重新上传）', async () => {
+  const up = await lgPost('/lg/upload', { filename: 'lg-result-changed.txt', content: globalThis.__lgSiteFmtContent.replace(/【译】/g, '【改】') });
+  assert.equal(up.status, 200, JSON.stringify(up.body));
+  globalThis.__lgChanged = up.body.path;
+  const run = await lgPost('/run', { bookKey: `web:mock/${LGG_BOOK}`, job: 'lg-import', options: { txtPath: globalThis.__lgChanged, manifestPath: lgExport.manifestFile, limit: 0 } });
+  const item = await lgWait(run.body.id);
+  assert.equal(item && item.state, 'done', JSON.stringify(item));
+  assert.equal(item.stats.uploaded, 3, JSON.stringify(item.stats));
+  assert.equal(item.stats.skipped, 0, JSON.stringify(item.stats));
+  const stats = await fetch(`${MOCK}/__stats`).then((r) => r.json());
+  assert.equal(stats.lastChapterUpload.chapterId, 't3', JSON.stringify(stats.lastChapterUpload));
+  assert.ok((stats.lastChapterUpload.preview || []).every((l) => String(l).startsWith('【改】')), JSON.stringify(stats.lastChapterUpload));
+});
+await t('GET /lg/import-state：断点状态（已提交章数 / 清单指纹）', async () => {
+  const r = await fetch(`${LG}/lg/import-state?book=${encodeURIComponent(`web:mock/${LGG_BOOK}`)}`).then((x) => x.json());
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.doneCount, 3, JSON.stringify(r));
+  assert.ok(r.updatedAt > 0 && r.manifestId, JSON.stringify(r));
+  const bad = await fetch(`${LG}/lg/import-state?book=nope`).then((x) => x.json());
+  assert.equal(bad.ok, false);
+});
+await t('/run lg-readback：站点已提交译文 vs 本地 txt → 3/3 一致', async () => {
+  const run = await lgPost('/run', { bookKey: `web:mock/${LGG_BOOK}`, job: 'lg-readback', options: { txtPath: globalThis.__lgChanged, manifestPath: lgExport.manifestFile } });
+  assert.equal(run.status, 202, JSON.stringify(run.body));
+  const item = await lgWait(run.body.id);
+  assert.equal(item && item.state, 'done', JSON.stringify(item));
+  assert.equal(item.stats.ok, 3, JSON.stringify(item.stats));
+  assert.equal(item.stats.total, 3);
+  assert.equal(item.stats.mode, 'site-format');
+  assert.ok(item.progress && item.progress.phase === 'done' && /回读校验：3\/3/.test(item.progress.message || ''), JSON.stringify(item.progress));
+  const runs = store.listRuns(20).filter((r) => r.job === 'lg-readback' && r.bookKey === `web:mock/${LGG_BOOK}`);
+  assert.ok(runs.length >= 1 && runs[0].state === 'done', 'runs 表应有 lg-readback 记录：' + JSON.stringify(runs[0]));
+});
+await t('/run lg-readback：本地某章被改 → 只报该章不一致（带首差行）', async () => {
+  const up = await lgPost('/lg/upload', { filename: 'lg-readback-diff.txt', content: globalThis.__lgSiteFmtContent.replace(/【译】/g, '【改】').replace('【改】第1行：', '【走样】第1行：') });
+  const run = await lgPost('/run', { bookKey: `web:mock/${LGG_BOOK}`, job: 'lg-readback', options: { txtPath: up.body.path, manifestPath: lgExport.manifestFile } });
+  const item = await lgWait(run.body.id);
+  // 校验本身跑完（队列 done），差异体现在 stats：不一致 1 章 + 首差证据
+  assert.equal(item && item.state, 'done', JSON.stringify(item));
+  assert.equal(item.stats.ok, 2, JSON.stringify(item.stats));
+  assert.equal(item.stats.mismatches.length, 1, JSON.stringify(item.stats.mismatches));
+  assert.equal(item.stats.mismatches[0].chapterId, 't1');
+  assert.ok(item.stats.mismatches[0].first && /走样/.test(item.stats.mismatches[0].first.local), JSON.stringify(item.stats.mismatches[0]));
 });
 await t('GET /warnings：质检警告端点（摘要 + 明细）', async () => {
   const r = await fetch(`${LG}/warnings?book=${encodeURIComponent(CHECK_KEY)}&limit=10`).then((x) => x.json());
@@ -1598,6 +2050,104 @@ await t('清理：LG GUI 测试目录与服务器', () => {
   fs.rmSync(lgTmp.exportsDir, { recursive: true, force: true });
   fs.rmSync(lgTmp.uploadsDir, { recursive: true, force: true });
   assert.ok(!fs.existsSync(lgTmp.exportsDir));
+});
+
+// ---- SiteClient 传输层重试（代理链路抖动；纯假 fetch，不需要 mock） ----
+const flakyFetch = (script) => {
+  let calls = 0;
+  const fn = async () => {
+    const step = script[Math.min(calls, script.length - 1)];
+    calls += 1;
+    const value = typeof step === 'function' ? step() : step;
+    if (value instanceof Error) throw value;   // 传输层失败：fetch 抛出
+    return value;
+  };
+  return { fn, calls: () => calls };
+};
+const netErr = () => { const e = new TypeError('fetch failed'); e.cause = { code: 'ECONNRESET' }; return e; };
+const okJson = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+
+await t('SiteClient 重试：传输失败 2 次后成功（第 3 次返回数据，重试可观测）', async () => {
+  const seq = flakyFetch([netErr, netErr, okJson({ titleJp: 'x' })]);
+  const retried = [];
+  const c = new SiteClient({
+    origin: 'https://example.test', token: 't', engine, fetchImpl: seq.fn, retries: 3, retryDelayMs: 1,
+    onRetry: (e, n, label) => retried.push([n, String(label)]),
+  });
+  const dto = await c.getNovel('syosetu', 'n1');
+  assert.equal(seq.calls(), 3);
+  assert.equal(dto.titleJp, 'x');
+  assert.equal(retried.length, 2, JSON.stringify(retried));
+  assert.equal(retried[1][0], 2, JSON.stringify(retried));
+  assert.ok(/novel\/syosetu\/n1/.test(retried[1][1]), JSON.stringify(retried[1]));
+});
+
+await t('SiteClient 重试：耗尽即抛（不无限重试）', async () => {
+  const seq = flakyFetch([netErr]);
+  const c = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: seq.fn, retries: 2, retryDelayMs: 1 });
+  await assert.rejects(() => c.getNovel('s', 'n'), /fetch failed/);
+  assert.equal(seq.calls(), 3, '1 次原始 + 2 次重试');
+});
+
+await t('SiteClient 重试：HTTP 状态错误不重试（裸 401 → forbidden 码，只发 1 次）', async () => {
+  // 上游 401 三义：只有带 WWW-Authenticate invalid_token 的才算凭据问题（见下一条），裸 401 按权限/封禁
+  const seq = flakyFetch([new Response('无权限', { status: 401 })]);
+  const c = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: seq.fn, retries: 3, retryDelayMs: 1 });
+  await assert.rejects(() => c.getNovel('s', 'n'), (e) => e.code === 'forbidden');
+  assert.equal(seq.calls(), 1);
+});
+
+await t('SiteClient 重试：写术语表 PUT 传输失败重试后成功', async () => {
+  const seq = flakyFetch([netErr, new Response('', { status: 200 })]);
+  const c = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: seq.fn, retries: 2, retryDelayMs: 1 });
+  const ok = await c.putGlossaryRaw({ kind: 'web', providerId: 'syosetu', novelId: 'n1' }, { a: 'b' });
+  assert.equal(ok, true);
+  assert.equal(seq.calls(), 2);
+});
+
+await t('SiteClient：术语表 PUT「内容没变」400（修改为空 / 术语表没有改变）按成功处理', async () => {
+  const web = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: async () => new Response('修改为空', { status: 400 }), retries: 0 });
+  assert.equal(await web.putGlossaryRaw({ kind: 'web', providerId: 's', novelId: 'n1' }, { a: 'b' }), true);
+  const wk = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: async () => new Response('术语表没有改变', { status: 400 }), retries: 0 });
+  assert.equal(await wk.putGlossaryRaw({ kind: 'wenku', novelId: 'w1' }, { a: 'b' }), true);
+  // 其它 400 仍是失败（别把真错误吞掉）
+  const other = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: async () => new Response('术语表条目过长', { status: 400 }), retries: 0 });
+  await assert.rejects(() => other.putGlossaryRaw({ kind: 'web', providerId: 's', novelId: 'n1' }, { a: 'b' }), /HTTP 400/);
+});
+
+await t('SiteClient：401 带 WWW-Authenticate invalid_token → unauthorized（凭据问题，走 need-auth）', async () => {
+  const res = new Response('Token不合法或者过期', { status: 401, headers: { 'www-authenticate': 'Bearer error="invalid_token"' } });
+  const c = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: async () => res.clone(), retries: 0 });
+  await assert.rejects(() => c.getNovel('s', 'n1'), (e) => e.code === 'unauthorized' && /重新同步凭据/.test(e.message));
+});
+
+await t('SiteClient：401 不带该头 → forbidden（封禁/权限不足，不误导去重同步凭据）', async () => {
+  const c = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: async () => new Response('无权限', { status: 401 }), retries: 0 });
+  await assert.rejects(() => c.getNovel('s', 'n1'), (e) => e.code === 'forbidden' && /无权限/.test(e.message) && /30 天/.test(e.message));
+});
+
+await t('SiteClient：401 裸 Bearer 挑战（缺 Authorization 头的变体）也算 unauthorized', async () => {
+  const res = new Response('Token不合法或者过期', { status: 401, headers: { 'www-authenticate': 'Bearer' } });
+  const c = new SiteClient({ origin: 'https://example.test', token: '', engine, fetchImpl: async () => res.clone(), retries: 0 });
+  await assert.rejects(() => c.getNovel('s', 'n1'), (e) => e.code === 'unauthorized' && /重新同步凭据/.test(e.message));
+});
+
+await t('mock 保真：两条 401 车道经真实 HTTP 分流（mock-token-bad → unauthorized / mock-forbidden → forbidden）', async () => {
+  const bad = new SiteClient({ origin: MOCK, token: 'x', engine, retries: 0 });
+  await assert.rejects(() => bad.getNovel('mock', 'mock-token-bad'), (e) => e.code === 'unauthorized' && /重新同步凭据/.test(e.message));
+  const forb = new SiteClient({ origin: MOCK, token: 'x', engine, retries: 0 });
+  await assert.rejects(() => forb.getNovel('mock', 'mock-forbidden'), (e) => e.code === 'forbidden' && /无权限/.test(e.message));
+});
+
+await t('mock 保真：术语表 PUT 内容未变 → 400，客户端按成功处理（真实站点语义）', async () => {
+  const key = `web:mock/mock-import-put-${RUN}`;
+  store.upsertBook({ key, kind: 'web', providerId: 'mock', novelId: `mock-import-put-${RUN}`, origin: MOCK, title: '' });
+  const client = makeClient(store.getBook(key));
+  const glossary = { 'アリス': '爱丽丝' };
+  assert.equal(await client.putGlossaryRaw(store.getBook(key), glossary), true);
+  assert.equal(await client.putGlossaryRaw(store.getBook(key), glossary), true, '第二次同内容 → 400「修改为空」也算成功');
+  const put = await fetch(`${MOCK}/__stats`).then((r) => r.json());
+  assert.deepEqual(put.lastGlossaryPut.body, glossary);
 });
 
 console.log(`\n通过 ${pass}，失败 ${fail}`);

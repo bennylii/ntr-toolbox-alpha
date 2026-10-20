@@ -12,9 +12,10 @@ ntr-toolbox-alpha.dev.user.js  由 .gen-dev.mjs 生成（@version 追加 -dev、
 CHANGELOG.md                   版本记录（发布时与 @version / daemon/version.mjs 对齐）
 mock-llm/server.mjs            假 LLM + 假站点（8788 主车道；daemon 测试用 8790）
 debug-env/                     离线站点页面替身（无网络也能开发/截图）
-tools/                         开发/测试脚本（.gen-dev/.engine-test/.run-suite/.run-daemon-stub/.probe-tm-hash-ws/.e2e-*.js/.pack-*）
+tools/                         开发/测试脚本（.gen-dev/.engine-test/.run-suite/.run-daemon-stub/.probe-tm-hash-ws/.probe-empty-paragraphs/.lg-import-sitefmt/.e2e-daemon-sync/.e2e-token-sync/.e2e-*/.pack-*）
 docs/architecture.md           ★ 架构总览（组件图/数据模型/子系统/设计决策/测试矩阵）——新会话先读这个
 docs/cleanroom/                行为规格 spec-01..13（全部已实施）
+docs/upstream-sync.md          auto-novel 站点源码对齐基线（pin commit + 历次核对结论；「上游又更新了」先读这个再动手）
 docs/                          管线说明（html + png）
 skills/                        Agent 技能包（SKILL.md；daemon 运行时读取）
 keywordgacha/                  KeywordGacha 原项目（junction → C:\cache\keywordgacha；用户 fork 独立仓库，不入库）
@@ -27,8 +28,8 @@ daemon/                        本地 daemon（模块地图见下）
 ```
 index.mjs                      入口/CLI（serve|translate|glossary|check|agent|export-src|import-lg|glossary-io|rules|prompt|auth|status…）
 server.mjs                     控制面 HTTP（/ui 页面 + /status /run /auth /settings /rules /prompts /lg/* /warnings /agent/* …）
-ui.mjs                         控制台页面（OpenWebUI 风格；内嵌脚本禁反斜杠转义——见已知陷阱）
-site-client.mjs                站点 API 客户端（5 条契约；Bearer 鉴权；uploadChapter 带 sakuraVersion）
+ui.mjs                         控制台页面（Windows 经典：灰打底（工作区/侧栏/面板），经典蓝只做点缀（VB6 蓝渐变标题栏与侧栏页眉、藏青选中/高亮、主按钮），扁平直角；图标走 Segoe MDL2 Assets；renderMarkdown 在模块作用域、经 MD_SOURCE 内联；内嵌脚本禁反斜杠转义——见已知陷阱）
+site-client.mjs                站点 API 客户端（5 条契约；Bearer 鉴权；uploadChapter 带 sakuraVersion；传输层重试 3 次——HTTP 状态错误不重试）
 engine.mjs                     从油猴脚本加载 GlossaryEngine（与浏览器同一份实现）
 ---- 管线 ----
 translate-pipeline.mjs / translate.mjs      翻译 worker（toc 档位/分段/#编号协议/行数重试/段缓存/上传）
@@ -36,7 +37,7 @@ glossary-pipeline.mjs                        术语管线（SCAN→EXTRACT→VER
 check-pipeline.mjs / quality.mjs             质检 v2（七码判定 + warnings 落库）
 processors.mjs / presets/                    文本处理链（资源投影/保留段/替换表/标点；base 开关）
 preserve.mjs                                 内置保护预设（base/kag/renpy/rpgmaker/wolf + 用户规则合并）
-lg-align.mjs                                 LG 译文对齐（导出/校验/应用 + lg-import 队列 runner）
+lg-align.mjs                                 LG 译文对齐（导出/校验/应用 + lg-import 队列 runner；含站点 mode=jp 整本导出格式自动对齐）
 ---- 调度与存储 ----
 scheduler.mjs                LlmScheduler（双模型池：翻译池 vs 助手/术语池；并发门/冷却/RPM）
 job-queue.mjs                单队列 FIFO（四类任务共用；progress 通道）
@@ -48,7 +49,7 @@ agent-tools.mjs / -read / -write / -lg       工具（doing/ask_user；只读；
 agent-workspace.mjs / workspace-bootstrap.mjs  CodeAct 沙箱工作区（workspace_run / workspace_apply）
 agent-skills.mjs                             技能目录（skills/ 包发现与读取）
 ---- 其它 ----
-tray.vbs / tray.ps1           Windows 托盘（隐藏运行 daemon）
+daemon.cmd（仓库根）/ daemon/tray.cmd   Windows 双击入口：一键启动/重启/停止/状态（逻辑在 launch.ps1 + tray.ps1，无 vbs）
 proxy.mjs                     出网代理（HTTP 绝对形式 + HTTPS CONNECT；站点 API/双池/沙箱统一收口，保存即生效）
 version.mjs                   daemon 版本（/ping 与 CHANGELOG/tag 对齐）
 README.md                     使用说明（命令/控制台/托盘/各专项）
@@ -63,10 +64,13 @@ README.md                     使用说明（命令/控制台/托盘/各专项�
 | 改油猴功能 | `ntr-toolbox-alpha.user.js` → `tools/.gen-dev.mjs` → `tools/engine-test.mjs` + 相关 `.e2e-*` |
 | 改 daemon 功能 | `daemon/index.mjs` + 对应模块 → `daemon/daemon-test.mjs`（先起 8790 mock） |
 | 找某个行为的规格 | `docs/cleanroom/spec-01..13` |
-| 日常使用 / 命令 / 控制台 | `daemon/README.md`；控制台 <http://127.0.0.1:7331/ui>（托盘 `daemon/tray.vbs`） |
+| 测控制台 GUI（点击测试/查 UI 行为） | `tools/.e2e-lg-gui.js`（`window.__LG_GUI_TEST` 分阶段：export/open/verify-start/verify/apply/await）+ `tools/cdp.mjs setfiles`（CDP 原生塞真实文件）/`shot`；mock 车道一把跑完，真机跑法与端口见 `daemon/README.md` 车道清单 |
+| 日常使用 / 命令 / 控制台 | `daemon/README.md`；控制台 <http://127.0.0.1:7331/ui>；双击仓库根 `daemon.cmd` 一键启动（`daemon.cmd restart` 换代码），或 `daemon/tray.cmd` 只起托盘 |
 | 查版本 / 发布 | `CHANGELOG.md`；发布流程见下方「交付流程」 |
 | KeywordGacha 上游（术语管线的出处，含 auto-novel 术语表导出） | `keywordgacha/`（junction 挂载的独立 fork 仓库，不入本库） |
 | LinguaGacha 上游（调度/质检/处理链/提示词/LG 互通的借鉴出处） | `linguagacha/`（junction 挂载，pin `MANUAL_BUILD_v0.125.0`——spec-06..10 引用的就是这一版；源码在 `src/` 下） |
+| auto-novel 站点源码（站点契约出处）／「上游更新了」怎么核对 | `docs/upstream-sync.md`（对齐基线 pin + 权威文件清单 + 历次结论与处置 + 下次同步步骤；本地 clone `C:\Users\bennyli\auto-novel`，只 `git fetch` 不 merge） |
+| 和 LG 流程做同文对比（管线行为/提示词证据/复跑） | `tools/lg-compare/`（两侧可复跑驱动 + 请求全量落盘的 artifacts；结论在 `docs/lg-compare.md`） |
 
 ## 常用命令
 
@@ -77,9 +81,10 @@ node tools/.gen-dev.mjs                      # 生成 ntr-toolbox-alpha.dev.user
 node tools/engine-test.mjs                   # GlossaryEngine 单测（需 mock 在跑）
 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8788/wenku/mock-src"   # 跑 e2e 套件
 node tools/cdp.mjs open <url> | inject | evalf <file> | shot <png> | logs   # 直接操作浏览器（CDP_PORT 环境变量换端口）
+node tools/cdp.mjs setfiles "<css选择器>" <文件…>                                     # 给 <input type=file> 塞真实文件（CDP DOM.setFileInputFiles）
 
 # daemon（详见 daemon/README.md）：
-node daemon/index.mjs serve --port 7331      # 控制台 /ui + 控制面（或双击托盘 daemon/tray.vbs）
+node daemon/index.mjs serve --port 7331      # 控制台 /ui + 控制面（或双击仓库根 daemon.cmd / daemon\tray.cmd）
 PORT=8790 node mock-llm/server.mjs           # daemon 测试车道 mock（8790）
 node daemon/daemon-test.mjs                  # daemon 冒烟（需 8790 mock）
 node daemon/quality-test.mjs                 # 等纯函数套件（quality/translate/processors/prompt/glossary-io/lg-align/agent*，无需 mock）
@@ -107,7 +112,7 @@ CDP_PORT=9334 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8789
 
 1. 跑相关 `.e2e-*` 套件（至少 queue 相关全绿），`node tools/engine-test.mjs` 也跑。
 2. `node tools/.gen-dev.mjs` 生成 dev 构建。
-3. Tampermonkey 里重装：打开 `http://127.0.0.1:8788/ntr-toolbox-alpha.dev.user.js` → 点安装按钮（测试 profile 里装的是**篡改猴测试版/Beta**）。重装后**必须刷新页面**新代码才生效。自动化点「更新」注意：headless 车道下安装对话框落在 TM 扩展的 `ask.html` 页（targets[0]），按钮是 `<input value="更新">`——按 **value** 匹配后 `.click()`。
+3. Tampermonkey 里重装：**先确认 mock 在跑**（`node mock-llm/server.mjs`），打开 `http://127.0.0.1:8788/ntr-toolbox-alpha.dev.user.js`（或正式构建 `…/ntr-toolbox-alpha.user.js`，两个路径 mock 都路由）→ 点安装按钮（测试 profile 里装的是**篡改猴测试版/Beta**）。重装后**必须刷新页面**新代码才生效。自动化点「更新」注意：headless 车道下安装对话框落在 TM 扩展的 `ask.html` 页（targets[0]），按钮是 `<input value="更新">`——按 **value** 匹配后 `.click()`。脚本头没有 `@updateURL`，TM **不会自动更新**；且**测试 profile 里装完 ≠ 用户日常浏览器也更新了**（日常那份要自己再装一次并刷新，否则新功能（如控制台「从站点同步」）不会生效）。
 4. 验证装上的版本 = 本地文件：`node tools/.probe-tm-hash-ws.mjs`（连 TM service worker 取存储正文 sha256），与 `ntr-toolbox-alpha.dev.user.js` **整文件** sha256 比对（去掉用户脚本头再算会不一致——TM 存的是整文件）。
 5. 真机 HTTPS 页面访问本机 daemon 受 Chrome 本地网络访问（LNA）管辖：真实用户首次会看到授权提示；**headless 测试车道必须加 `--disable-features=LocalNetworkAccessChecks`** 才能自动化验证（否则 fetch 直接 Failed to fetch，daemon 侧一切正常也连不上）。
 
@@ -128,6 +133,8 @@ CDP_PORT=9334 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8789
 
 ## 已知陷阱
 
+- **站点会话键换过**：2026-10 起是 `web-kit:session:v1`（`{token, adminMode}`，无旧键迁移），旧键 `auth-v2` 只作回落。读 token 一律走 `readSiteToken()`（user.js）/ `SITE_SESSION_SOURCES`，**别再写死 `auth-v2`**——写死会让 daemon 拿不到凭据、全线 401。核对结论见 `docs/upstream-sync.md` ①。
+- **旧 GPT 工作区已删除（2026-10 上游 `fd90b2d4`）**：`/workspace/gpt` 重定向到 `/workspace/gpt-pipeline`，`/workspace` 默认重定向到 `/workspace/sakura-pipeline`。GPT 翻译器**只在 `workspace-gpt-pipeline`**，任务队列仍与 `workspace-gpt` 共用；按路径取键一律用 `StorageUtils.keysForPath()`（过渡路径 `/workspace/gpt` 也映射到 pipeline workers）。普通链路只走 `readWorkspaceGptWorkers()`，**别再读 `workspace-gpt.workers`**——那是死数据，唯一入口是「合并旧工作区翻译器」模块。「复制翻译器到 BETA 工作区」「工作区翻译器自动同步」两个模块已删除（`docs/upstream-sync.md` ①②）。
 - **队列 init 的 2.5s 定时器**：初始化后约 2.5 秒会把 `running` 任务改成 `pending`（不受「自动续跑」设置门控），并可能触发 `runLoop()`。测试套件要么在内存里把「自动续跑」置 false 并还原，要么在开头 `await sleep(2800)` 等它先跑完。
 - **mock 的 429 会触发引擎冷却**（几秒内不再发请求），想要"失败"请用 `?fail=empty`（不冷却）。
 - **`Q.put()` 不会触发队列面板重绘**：写库后要 `await Q.openPanel(); await sleep(400);` 或 `refreshPanel()` 才能点到新行的按钮。
@@ -136,8 +143,9 @@ CDP_PORT=9334 node tools/.run-suite.mjs tools/.e2e-xxx.js "http://127.0.0.1:8789
 - `GlossaryQueue` 状态在 IndexedDB（库名见源码），用例结束记得 `Q.stop()` + 清任务 + 移除 `#ntr-queue-overlay`。
 - 新设置行/按钮在「术语队列」右键设置面板，源码里 `queueSettings()` / `jobRuntime()` 是运行时覆盖入口（并发/RPM/逾时，0 = 跟随主设置）。
 - TM 的 `@match` 只覆盖真实站点域名，不含 127.0.0.1 —— mock 页上装好的 TM 脚本**不会**注入（属正常），mock 测试一律走 `cdp.mjs inject`。
-- **`daemon/ui.mjs` 的 UI_HTML 是模板字面量**：内嵌 JS 里写 `'\n'` 这类转义会被外层吃掉成真换行 → 整页脚本静默语法错误（页面渲染但毫无功能）；要么写 `\\n`、要么避免反斜杠。daemon-test 有「/ui 内嵌脚本可解析」守卫，改 UI 后必须全量跑。
+- **`daemon/ui.mjs` 的 UI_HTML 是模板字面量**：内嵌 JS 里写 `'\n'` 这类转义会被外层吃掉成真换行 → 整页脚本静默语法错误（页面渲染但毫无功能）；要么写 `\\n`、要么避免反斜杠。需要正则转义的代码（如 markdown 渲染器）放**模块作用域**再用 `${MD_SOURCE}`（toString）内联，别写进模板正文。图标字形用 `String.fromCodePoint(0xE8BD)` 生成（别写 `\u` 转义或 CSS `content`）；`data-icon="0x…"` 的元素由 `paintIcons()` 在启动时填充。daemon-test 有「/ui 内嵌脚本可解析」守卫 + `renderMarkdown` 纯函数单测，改 UI 后必须全量跑。
 - mock 8788/8790 掉线时：engine-test 会**跳过**「请求层/编排」集成段（计数变少但 0 失败，别误判），daemon-test 则会卡住等 fetch——跑 daemon 系测试前先确认 mock 活着。
+- **站点只能走代理且链路抖动**（墙内直连 ECONNRESET）：`SiteClient` 内建传输层重试（HTTP 状态错误不重试），次数在控制台设置页「站点与凭据 → 站点请求重试」可调 0–8（`config.site.retries`，默认 3，保存即生效）——整本 167 章逐章抓取实测约 1/3 请求首发失败，3 次重试每轮仍剩 2 章左右，8 次基本清零；自己写临时脚本直连站点时要带重试，别用裸 fetch。大文件/长响应（`file?mode=jp` 整本 2MB+、200+ 段大章）失败率更高，跑整本前先看链路（`/proxy/test` 或连打几次 chapter-task 数成功率）。
 - TM 安装/重装对话框落在扩展的 `ask.html`（targets[0]），按钮是 `<input value="更新/重新安装">`——按 **value** 匹配点击；同版本重装按钮文案是「重新安装」。
 
 ## 上游与许可

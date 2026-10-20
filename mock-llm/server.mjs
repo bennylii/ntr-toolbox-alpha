@@ -205,8 +205,24 @@ const transBook = (novelId) => {
   return transStates.get(novelId);
 };
 const transChapters = (novelId) => (/mock-trans-r/.test(novelId) ? ['r1', 'r2', 'r3'] : ['t1', 't2', 't3']);
+// 已提交译文（POST /chapter/ 的 paragraphsZh 原样存下来）：mode=zh 整本导出与 chapter-task 的
+// oldParagraphZh 都回读它 —— 回读校验（本地 txt vs 站点已提交内容）用例靠这份数据做闭环。
+const transUploads = new Map();
+const uploadsOf = (novelId) => {
+  if (!transUploads.has(novelId)) transUploads.set(novelId, new Map());
+  return transUploads.get(novelId);
+};
 const transParagraphCount = (chapterId) => (chapterId.endsWith('1') ? 6 : chapterId.endsWith('2') ? 4 : 2);
 const transParagraphs = (chapterId) => Array.from({ length: transParagraphCount(chapterId) }, (_, i) => `第${i + 1}行：アリスが魔導書を読む。`);
+// 空段夹具（④）：真站点 paragraphJp 含空段/空白段——验证 daemon「空段不进请求 + 提交前原位回填」
+const emptyParagraphs = () => ['第1行：アリスが魔導書を読む。', '', '   ', '第4行：ローズも来た。'];
+// 上下文夹具：40 段短句（每段都以句末标点结尾）→ daemon 按 30 行/段切成 2 段，
+// 正好覆盖「章首无上文 / 段间有上文 / 段末无下文」；且 chapter-task 永远报「未译」，
+// 便于用「重置进度」造重跑（验证段缓存键随上下文变化）。上传仍会记录 lastChapterUpload。
+const ctxParagraphs = () => Array.from({ length: 40 }, (_, i) => `第${i + 1}段：アリスが魔導書を読む。`);
+const isCtxBook = (novelId) => /mock-ctx/.test(String(novelId || ''));
+const chaptersFor = (novelId) => (/mock-empty/.test(novelId) ? ['e1'] : (isCtxBook(novelId) ? ['c1'] : transChapters(novelId)));
+const paragraphsFor = (novelId, chapterId) => (/mock-empty/.test(novelId) ? emptyParagraphs() : (isCtxBook(novelId) ? ctxParagraphs() : transParagraphs(chapterId)));
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || HOST}`);
@@ -254,6 +270,21 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 401 语义用例（上游 Authentication.kt 同一状态码三义）：
+  //   mock-token-bad → 带 WWW-Authenticate: Bearer error="invalid_token"（真凭据问题）
+  //   mock-forbidden → 不带该头（封禁 / 权限不足，术语表写入要求 member 且注册满 30 天）
+  if (/^\/api\//.test(url.pathname) && /mock-token-bad|mock-forbidden/.test(url.pathname)) {
+    const bad = /mock-token-bad/.test(url.pathname);
+    res.writeHead(401, {
+      ...cors,
+      'content-type': 'text/plain; charset=utf-8',
+      ...(bad ? { 'www-authenticate': 'Bearer error="invalid_token"' } : {}),
+      'cache-control': 'no-store',
+    });
+    res.end(bad ? 'Token不合法或者过期' : '无权限');
+    return;
+  }
+
   // 指南合规用例：PUT 术语表 → 记录写入体（断言 #备注 写入/保留）
   if (req.method === 'PUT' && /\/glossary$/.test(url.pathname)) {
     const chunks = [];
@@ -261,8 +292,16 @@ const server = http.createServer(async (req, res) => {
     let body = {};
     try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { /* ignore */ }
     stats.lastGlossaryPut = { path: url.pathname, body };
+    const storeKey = url.pathname.replace(/\/glossary$/, '');
+    // 与真实站点一致：内容没变时主动 400（web「修改为空」/文库「术语表没有改变」）
+    const prev = glossaryStore.get(storeKey);
+    if (prev && JSON.stringify(prev) === JSON.stringify(body)) {
+      res.writeHead(400, { ...cors, 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(/\/wenku\//.test(url.pathname) ? '术语表没有改变' : '修改为空');
+      return;
+    }
     // 只对 glossary-io 用例家族持久（回读校验）；其它书保持静态夹具（套件顺序无关）
-    if (/mock-import/.test(url.pathname)) glossaryStore.set(url.pathname.replace(/\/glossary$/, ''), body);
+    if (/mock-import/.test(url.pathname)) glossaryStore.set(storeKey, body);
     res.writeHead(200, { ...cors, 'content-type': 'application/json', 'cache-control': 'no-store' });
     res.end('{}');
     return;
@@ -279,7 +318,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { ...cors, 'content-type': 'application/json', 'cache-control': 'no-store' });
     const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || (url.pathname.split('/').filter(Boolean)[3] || 'mock-novel');
     const state = transBook(novelId);
-    if (/\/chapter-task\//.test(url.pathname) && !/mock-trans/.test(novelId)) {
+    if (/\/chapter-task\//.test(url.pathname) && !/mock-trans/.test(novelId) && !/mock-empty/.test(novelId) && !isCtxBook(novelId)) {
       // 非 mock-trans 的书：rich 风格（25/12 段 + 对齐旧译，供修句/回扫用例）
       const ch = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
       const n = ch === 'ch2' ? 12 : 25;
@@ -296,11 +335,14 @@ const server = http.createServer(async (req, res) => {
     }
     if (/\/chapter-task\//.test(url.pathname)) {
       const chapterId = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
-      const done = state.get(chapterId);
-      const paragraphs = transParagraphs(chapterId);
+      // mock-ctx：永远当「未译」（不返回旧译）→ 便于重置进度后重跑，验证上下文参与的段缓存键
+      const done = isCtxBook(novelId) ? undefined : state.get(chapterId);
+      const paragraphs = paragraphsFor(novelId, chapterId);
+      const uploaded = uploadsOf(novelId).get(chapterId);
       res.end(JSON.stringify({
         paragraphJp: paragraphs,
-        oldParagraphZh: done ? paragraphs.map((_, i) => `【已译】第${i + 1}行`) : null,
+        // 提交过就回读提交内容（与真站点一致）；没提交但标记为已译时给合成旧译
+        oldParagraphZh: uploaded || (done ? paragraphs.map((_, i) => `【已译】第${i + 1}行`) : null),
         glossaryId: TRANS_GLOSSARY_ID,
         glossary: {},
         oldGlossaryId: done || null,
@@ -311,12 +353,13 @@ const server = http.createServer(async (req, res) => {
     if (/\/chapter\//.test(url.pathname)) {
       const chapterId = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
       state.set(chapterId, body.glossaryId || TRANS_GLOSSARY_ID);
+      if (Array.isArray(body.paragraphsZh)) uploadsOf(novelId).set(chapterId, body.paragraphsZh.map((p) => String(p == null ? '' : p)));
       stats.lastChapterUpload = {
         path: url.pathname,
         chapterId,
         glossaryId: body.glossaryId,
         count: Array.isArray(body.paragraphsZh) ? body.paragraphsZh.length : 0,
-        preview: Array.isArray(body.paragraphsZh) ? body.paragraphsZh.slice(0, 2) : [],
+        preview: Array.isArray(body.paragraphsZh) ? body.paragraphsZh.slice(0, 8) : [],
       };
       res.end(JSON.stringify({ jp: 1, zh: 1 }));
       return;
@@ -330,7 +373,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && /^\/api\/(novel|wenku)\//.test(url.pathname)) {
     const segs = url.pathname.split('/').filter(Boolean);
     const rich = /mock-src/.test(url.pathname);
-    const trans = /mock-trans/.test(url.pathname);
+    const trans = /mock-trans/.test(url.pathname) || /mock-empty/.test(url.pathname) || /mock-ctx/.test(url.pathname);   // mock-empty：空段夹具（④）；mock-ctx：上下文夹具
     const boost = /mock-boost/.test(url.pathname);
     const noted = /mock-noted/.test(url.pathname);
     const check = /mock-check/.test(url.pathname);
@@ -362,6 +405,67 @@ const server = http.createServer(async (req, res) => {
         ].join('\n'));
         return;
       }
+      if (trans && url.searchParams.get('mode') === 'zh') {
+        // 站点「整本译文」导出（mode=zh&translations=gpt）：与 mode=jp 同构，正文换成该译者的当前译文
+        // （提交过就用提交内容；没提交过的章回落到原文，模拟站点「该译者没有译文」的实况）。
+        const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || (url.pathname.split('/').filter(Boolean)[3] || 'mock-novel');
+        const chapters = chaptersFor(novelId);
+        const state = transBook(novelId);
+        const lines = [
+          `书名 ${novelId}（译）`,
+          '',
+          '作者[mock]',
+          '',
+          '标签 / 测试 / ',
+          `总计: ${chapters.length} / GPT: ${chapters.length}`,
+          '',
+          '############',
+          '简介：这是 mock 的站点译文导出夹具。',
+          '',
+          '',
+          '',
+        ];
+        for (const chapterId of chapters) {
+          // 上游 makeTxt.kt（c11cdbfe）：每个 toc 项标题前先写两个空行，标题后一个结构空行，章尾 3 空行
+          lines.push('', '', `# 章 ${chapterId}`, '');
+          const paragraphs = paragraphsFor(novelId, chapterId);
+          const uploaded = uploadsOf(novelId).get(chapterId);
+          const zh = uploaded || (isCtxBook(novelId) ? null : (state.get(chapterId) ? paragraphs.map((_, i) => `【已译】第${i + 1}行`) : null));
+          // 没有该译者的译文时站点写占位标记、正文一行不写（不是回落到原文）
+          if (!zh) { lines.push('GPT翻译缺失。', ''); continue; }
+          for (const p of zh) lines.push(p);
+          lines.push('', '', '');
+        }
+        res.end(lines.join('\n'));
+        return;
+      }
+      if (trans && url.searchParams.get('mode') === 'jp') {
+        // 站点「下载原文」格式（mode=jp）：头部 → ############ → 简介，之后每章 = `# 标题` + 空行 + 逐段正文，
+        // 章块之间 3 行结构空行；段落与 chapter-task 同源（transParagraphs），保证 daemon 的 sha1 对齐能过。
+        const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || (url.pathname.split('/').filter(Boolean)[3] || 'mock-novel');
+        const chapters = chaptersFor(novelId);
+        const lines = [
+          `书名 ${novelId}`,
+          '',
+          '作者[mock]',
+          '',
+          '标签 / 测试 / ',
+          `总计: ${chapters.length} / GPT: ${chapters.length}`,
+          '',
+          '############',
+          '简介：这是 mock 的站点导出格式夹具。',
+          '',
+          '',
+          '',
+        ];
+        for (const chapterId of chapters) {
+          lines.push('', '', `# 章 ${chapterId}`, '');
+          for (const p of paragraphsFor(novelId, chapterId)) lines.push(p);
+          lines.push('', '', '');
+        }
+        res.end(lines.join('\n'));
+        return;
+      }
       res.end('アルテは笑った\nオルトが来た\nアリスが魔導書を読む。\nローズも来た。\n');
       return;
     }
@@ -369,8 +473,20 @@ const server = http.createServer(async (req, res) => {
     if (trans && /\/translate-v2\//.test(url.pathname)) {
       const novelId = /mock-trans[^/]*/.exec(url.pathname)?.[0] || (url.pathname.split('/').filter(Boolean)[3] || 'mock-novel');
       const state = transBook(novelId);
+      // 文库与 web 的形状不同（上游 RouteWenkuNovel.getTranslateTask）：只有书级 glossaryId + 逐章 glossaryId，
+      // 没有 title/glossary；未译章省略该键（explicitNulls=false）。见 docs/upstream-sync.md ⑥
+      if (/^\/api\/wenku\//.test(url.pathname)) {
+        res.end(JSON.stringify({
+          glossaryId: TRANS_GLOSSARY_ID,
+          toc: chaptersFor(novelId).map((chapterId) => {
+            const g = state.get(chapterId);
+            return g ? { chapterId, glossaryId: g } : { chapterId };
+          }),
+        }));
+        return;
+      }
       res.end(JSON.stringify({
-        toc: transChapters(novelId).map((chapterId) => ({ chapterId, titleJp: `章 ${chapterId}`, glossaryUuid: state.get(chapterId) || undefined })),
+        toc: chaptersFor(novelId).map((chapterId) => ({ chapterId, titleJp: `章 ${chapterId}`, glossaryUuid: state.get(chapterId) || undefined })),
         glossaryUuid: TRANS_GLOSSARY_ID,
         glossary: {},
       }));
@@ -571,12 +687,29 @@ const server = http.createServer(async (req, res) => {
   if (userContent.includes('你是一个轻小说翻译者') || userContent.includes('注意要保留每一段开头的编号')) {
     const numbered = [...userContent.matchAll(/^#(\d+)[:：](.*)$/gm)].map((m) => ({ id: Number(m[1]), text: m[2] }));
     const glossaryLines = [...userContent.matchAll(/^.+ => .+$/gm)].length;
-    stats.lastTranslate = {
+    // 相邻段上下文块（daemon 的「参考上文/参考下文」）：数块内行数，供 e2e/daemon-test 断言请求形状
+    const countContextBlock = (text, marker) => {
+      const lines = String(text || '').split('\n');
+      const start = lines.findIndex((line) => line.startsWith(marker));
+      if (start < 0) return 0;
+      let n = 0;
+      for (let i = start + 1; i < lines.length; i += 1) {
+        const line = lines[i];
+        if (line.startsWith('【') || line.startsWith('#') || line.startsWith('翻译的时候参考下面的术语表') || line.startsWith('小说原文如下')) break;
+        if (line.trim() === '') continue;
+        n += 1;
+      }
+      return n;
+    };
+    const record = {
       lines: numbered.length,
       glossaryLines,
+      context: { preceding: countContextBlock(userContent, '【参考上文】'), following: countContextBlock(userContent, '【参考下文】') },
       system: String(((body.messages || []).find((m) => m.role === 'system') || {}).content || '').slice(0, 300),
       userHead: String(userContent || '').slice(0, 160),
     };
+    stats.lastTranslate = record;
+    stats.translateLog = [...(stats.translateLog || []), record].slice(-5);   // 最近 5 条（多段并发/重跑用）
     const out = numbered.length > 0
       ? numbered.map((line) => `#${line.id}:【模拟译】第${line.id}段：这是由本地模拟端点生成的译文。`)
       : ['#1:【模拟译】这是由本地模拟端点生成的译文。'];

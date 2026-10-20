@@ -1,20 +1,23 @@
-// 「翻译器」下拉：应列出工作区 GPT 翻译器 + 「全部（自动轮换）」，且打开设置时刷新列表
-// 覆盖两个存储：老工作区 workspace-gpt 与「GPT工作区BETA」的 workspace-gpt-pipeline
+// 「翻译器」下拉：只列新版 GPT 工作区（workspace-gpt-pipeline）+「全部（自动轮换）」，
+// 且打开设置时刷新列表；旧 workspace-gpt 的 workers 已退役，不应再出现。
 const out = { checks: [], notes: [] };
 const check = (label, cond, extra) => out.checks.push({ ok: !!cond, label, extra });
-const KEY = 'workspace-gpt';
-const BETA_KEY = 'workspace-gpt-pipeline';
-const backup = localStorage.getItem(KEY);
-const betaBackup = localStorage.getItem(BETA_KEY);
-const seed = (workers) => localStorage.setItem(KEY, JSON.stringify({ workers, jobs: [], uncompletedJobs: [] }));
-const betaSeed = (workers) => localStorage.setItem(BETA_KEY, JSON.stringify({ workers, jobs: [], uncompletedJobs: [] }));
-localStorage.removeItem(BETA_KEY);   // 基线：先保证 BETA 存储不存在
+const PIPE = 'workspace-gpt-pipeline';
+const LEGACY = 'workspace-gpt';
+const pipeBackup = localStorage.getItem(PIPE);
+const legacyBackup = localStorage.getItem(LEGACY);
+const seed = (workers) => localStorage.setItem(PIPE, JSON.stringify({ workers, jobs: [], uncompletedJobs: [] }));
+const seedLegacy = (workers) => localStorage.setItem(LEGACY, JSON.stringify({ workers, jobs: [], uncompletedJobs: [] }));
+localStorage.removeItem(PIPE);   // 基线：先保证 pipeline 存储不存在
+localStorage.setItem(LEGACY, JSON.stringify({ workers: [], jobs: [], uncompletedJobs: [] }));
+
+const w = (id, model, endpoint, key) => ({ id, type: 'api', model, endpoint, key });
 
 let fixtures = window.__selWorkers;
 if (!Array.isArray(fixtures)) {
   fixtures = [
-    { id: 'gpt-甲', type: 'api', model: 'gpt-4o-mini', endpoint: 'http://127.0.0.1:8788/v1', key: 'sk-a' },
-    { id: 'gpt-乙', type: 'api', model: 'gpt-4o', endpoint: 'http://127.0.0.1:8788/v1', key: 'sk-b' },
+    w('gpt-甲', 'gpt-4o-mini', 'http://127.0.0.1:8788/v1', 'sk-a'),
+    w('gpt-乙', 'gpt-4o', 'http://127.0.0.1:8788/v1', 'sk-b'),
   ];
 }
 seed(fixtures);
@@ -41,7 +44,7 @@ const sel1 = await openSettings();
 check('设置面板已打开且能找到选择框', !!sel1);
 const snap1 = readSelect(sel1);
 check('包含「全部（自动轮换）」且值为空串', snap1.options.some((o) => o.v === '' && /全部/.test(o.t)), snap1.options);
-check('列出工作区翻译器 gpt-甲/乙（带模型）', snap1.options.some((o) => o.v === 'gpt-甲' && /gpt-4o-mini/.test(o.t)) && snap1.options.some((o) => o.v === 'gpt-乙'), snap1.options);
+check('列出 pipeline 翻译器 gpt-甲/乙（带模型）', snap1.options.some((o) => o.v === 'gpt-甲' && /gpt-4o-mini/.test(o.t)) && snap1.options.some((o) => o.v === 'gpt-乙'), snap1.options);
 check('默认选中「全部」', snap1.value === '', snap1.value);
 
 // 选中 gpt-甲 → 写入配置
@@ -49,10 +52,8 @@ sel1.value = 'gpt-甲';
 sel1.dispatchEvent(new Event('change', { bubbles: true }));
 check('选择后写进配置', mod.settings.find((s) => s.name === '翻译器').value === 'gpt-甲', mod.settings.find((s) => s.name === '翻译器').value);
 
-// 工作区新增一个翻译器 → 再打开设置应看到（不用刷新页面）
-seed(JSON.parse(localStorage.getItem(KEY)).workers.concat([
-  { id: 'gpt-丙', type: 'api', model: 'qwen3-8b', endpoint: 'http://127.0.0.1:8788/v1', key: 'sk-c' },
-]));
+// pipeline 新增一个翻译器 → 再打开设置应看到（不用刷新页面）
+seed(JSON.parse(localStorage.getItem(PIPE)).workers.concat([w('gpt-丙', 'qwen3-8b', 'http://127.0.0.1:8788/v1', 'sk-c')]));
 await closeSettings();
 const sel2 = await openSettings();
 const snap2 = readSelect(sel2);
@@ -60,7 +61,7 @@ check('新加的 gpt-丙 不用刷新就出现', snap2.options.some((o) => o.v =
 check('之前选中的 gpt-甲 仍在且保持选中', snap2.value === 'gpt-甲', snap2.value);
 
 // 翻译器被删掉时：补一条当前值，不让选中项凭空消失
-seed([{ id: 'gpt-丁', type: 'api', model: 'x', endpoint: 'http://127.0.0.1:8788/v1', key: 'sk-d' }]);
+seed([w('gpt-丁', 'x', 'http://127.0.0.1:8788/v1', 'sk-d')]);
 await closeSettings();
 const sel3 = await openSettings();
 const snap3 = readSelect(sel3);
@@ -74,29 +75,29 @@ const fakeMod = (translator) => ({ name: 'AI提取术语表', settings: [
 const all = await Dev.resolveGlossaryWorkers(fakeMod(''));
 const one = await Dev.resolveGlossaryWorkers(fakeMod('gpt-丁'));
 const none = await Dev.resolveGlossaryWorkers(fakeMod('不存在'));
-check('翻译器=空 → 用全部工作区翻译器', all.length === 1 && all[0].id === 'gpt-丁', all);
+check('翻译器=空 → 用全部 pipeline 翻译器', all.length === 1 && all[0].id === 'gpt-丁', all);
 check('翻译器=指定 id → 只返回该翻译器（含 model/endpoint/key）', one.length === 1 && one[0].id === 'gpt-丁' && one[0].model === 'x', one);
 check('翻译器=已删除的 id → 0 个（由调用方提示）', none.length === 0, none);
 
-// GPT工作区BETA（/workspace/gpt-pipeline）另存一份 workspace-gpt-pipeline：那里的翻译器也要能选到
-betaSeed([
-  { id: 'gpt-戊BETA', type: 'api', model: 'qwen3-14b', endpoint: 'http://127.0.0.1:8788/v1', key: 'sk-e' },
-  { id: 'gpt-丁', type: 'api', model: 'x', endpoint: 'http://127.0.0.1:8788/v1', key: 'sk-d' },   // 与老存储完全重复
+// 旧 workspace-gpt 的 workers 已退役：同 id/独有 id 都不应出现
+seedLegacy([
+  w('gpt-丁', 'legacy-model', 'http://legacy/v1', 'sk-legacy'),
+  w('legacy-己', 'legacy-only', 'http://legacy/v1', 'sk-legacy-2'),
 ]);
 await closeSettings();
 const sel4 = await openSettings();
 const snap4 = readSelect(sel4);
-check('BETA 工作区的翻译器出现在下拉里', snap4.options.some((o) => o.v === 'gpt-戊BETA' && /qwen3-14b/.test(o.t)), snap4.options);
-check('老工作区的翻译器仍在', snap4.options.some((o) => o.v === 'gpt-丁'), snap4.options);
-check('两处完全重复的翻译器只列一次', snap4.options.filter((o) => o.v === 'gpt-丁').length === 1, snap4.options.filter((o) => o.v === 'gpt-丁'));
-const betaAll = await Dev.resolveGlossaryWorkers(fakeMod(''));
-const betaOne = await Dev.resolveGlossaryWorkers(fakeMod('gpt-戊BETA'));
-check('翻译器=空 → 合并两个存储（2 个唯一）', betaAll.length === 2, betaAll.map((w) => w.id));
-check('能按 id 选中 BETA 工作区的翻译器', betaOne.length === 1 && betaOne[0].model === 'qwen3-14b', betaOne);
+check('旧仓独有 id 不出现', !snap4.options.some((o) => o.v === 'legacy-己'), snap4.options);
+check('旧仓同 id 不覆盖 pipeline 版本', snap4.options.filter((o) => o.v === 'gpt-丁').length === 1
+  && /x/.test(snap4.options.find((o) => o.v === 'gpt-丁').t), snap4.options.filter((o) => o.v === 'gpt-丁'));
+const legacyOnly = await Dev.resolveGlossaryWorkers(fakeMod('legacy-己'));
+const sameId = await Dev.resolveGlossaryWorkers(fakeMod('gpt-丁'));
+check('按旧仓独有 id 解析 → 0 个', legacyOnly.length === 0, legacyOnly);
+check('按同 id 解析 → 只返回 pipeline 的一条', sameId.length === 1 && sameId[0].model === 'x', sameId);
 
-// 清理（这个 profile 原本就没有 workspace-gpt，直接删掉还原）
-localStorage.removeItem(KEY);
-if (betaBackup !== null) localStorage.setItem(BETA_KEY, betaBackup); else localStorage.removeItem(BETA_KEY);
+// 清理：两个键都还原；配置里的翻译器复位
+if (pipeBackup !== null) localStorage.setItem(PIPE, pipeBackup); else localStorage.removeItem(PIPE);
+if (legacyBackup !== null) localStorage.setItem(LEGACY, legacyBackup); else localStorage.removeItem(LEGACY);
 const translatorSetting = mod.settings.find((s) => s.name === '翻译器');
 if (translatorSetting) {
   translatorSetting.value = '';   // 别把测试用的 id 留在配置里（连持久化的那份一起复位）

@@ -1,9 +1,10 @@
-// tools/.run-daemon-stub.mjs —— 「Daemon 连接」e2e 用的 stub（端口 7343）：POST /auth + GET /ping + GET /last
+// tools/.run-daemon-stub.mjs —— 「Daemon 连接」e2e 用的 stub（端口 7343）：POST /auth + GET /ping + GET /last + POST /request-auth
 // 跑法：node tools/.run-daemon-stub.mjs （另开一个终端，与 e2e 同时运行）
 import http from 'node:http';
 
 let last = {};
 let authCount = 0;
+let pendingAuth = false;   // 模拟 daemon 的「同步请求」标志：/request-auth 置位、/auth 清位
 const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -16,7 +17,13 @@ http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204, headers); res.end(); return; }
   if (req.method === 'GET' && req.url === '/ping') {
     res.writeHead(200, { ...headers, 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, name: 'ntr-daemon', port: 7343, version: 'v0.0.0-stub' }));
+    res.end(JSON.stringify({ ok: true, name: 'ntr-daemon', port: 7343, version: 'v0.0.0-stub', pendingAuth }));
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/request-auth') {
+    pendingAuth = true;
+    res.writeHead(200, { ...headers, 'content-type': 'application/json' });
+    res.end('{"ok":true}');
     return;
   }
   if (req.method === 'POST' && req.url === '/auth') {
@@ -24,6 +31,7 @@ http.createServer(async (req, res) => {
     for await (const c of req) chunks.push(c);
     try { last = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { last = {}; }
     authCount += 1;
+    pendingAuth = false;   // 真 daemon 收到推送后同样清位
     res.writeHead(200, { ...headers, 'content-type': 'application/json' });
     res.end('{"ok":true}');
     return;
@@ -34,7 +42,7 @@ http.createServer(async (req, res) => {
     return;
   }
   if (req.method === 'POST' && req.url === '/reset') {
-    last = {}; authCount = 0;
+    last = {}; authCount = 0; pendingAuth = false;
     res.writeHead(200, { ...headers, 'content-type': 'application/json' });
     res.end('{"ok":true}');
     return;

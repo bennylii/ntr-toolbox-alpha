@@ -1,5 +1,6 @@
-// 行为定格（重构前基线）：添加GPT/Sakura翻译器、删除翻译器、启动翻译器
-// 这些模块直接读写 localStorage（127.0.0.1 下 gpt='workspace-gpt'、sakura='sakura-workspace'），
+// 行为定格：添加GPT/Sakura翻译器、删除翻译器、启动翻译器
+// 2026-10 上游删除了旧 GPT 工作区：GPT worker 一律写 workspace-gpt-pipeline（任务队列仍在 workspace-gpt），
+// /workspace/gpt 只是重定向、过渡期也按新工作区处理；Sakura 走 /workspace/sakura-pipeline。
 // 删除/启动分支按 location.href 判定工作区类型 —— 用 pushState 切换，无需真导航。
 // 跑法：node tools/.run-suite.mjs tools/.e2e-translator-mgmt.js "http://127.0.0.1:8788/wenku/mock-src"
 const out = { checks: [], notes: [], errors: [] };
@@ -7,10 +8,11 @@ const check = (label, cond, extra) => { out.checks.push({ label, ok: !!cond, ext
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (fn, ms = 3000) => { const t0 = Date.now(); while (!fn() && Date.now() - t0 < ms) await sleep(80); return fn(); };
 
-const GPT_KEY = 'workspace-gpt';      // StorageUtils.gpt（127.0.0.1 分支）
-const SK_KEY = 'sakura-workspace';    // StorageUtils.sakura（非 n.novelia.cc 分支）
+const GPT_PIPE = 'workspace-gpt-pipeline';  // StorageUtils.gptPipeline（worker 仓）
+const GPT_JOBS = 'workspace-gpt';           // StorageUtils.gpt（共享任务队列）
+const SK_KEY = 'sakura-workspace';          // StorageUtils.sakura（非 n.novelia.cc 分支）
 const savedKeys = {};
-[GPT_KEY, SK_KEY].forEach((k) => { savedKeys[k] = localStorage.getItem(k); });
+[GPT_PIPE, GPT_JOBS, SK_KEY].forEach((k) => { savedKeys[k] = localStorage.getItem(k); });
 const origHref = location.href;
 let confirmCalls = 0;
 const origConfirm = window.confirm;
@@ -27,6 +29,7 @@ const toastObs = new MutationObserver(() => {
 toastObs.observe(document.body, { childList: true, subtree: true });
 
 const readWorkers = (key) => { try { return (JSON.parse(localStorage.getItem(key)) || {}).workers || []; } catch (e) { return []; } };
+const readRaw = (key) => { try { return JSON.parse(localStorage.getItem(key)) || {}; } catch (e) { return {}; } };
 const setSetting = (modName, name, value) => {
     const mod = window._NTRToolBox.configuration.modules.find((m) => m.name === modName);
     const s = mod.settings.find((x) => x.name === name);
@@ -34,12 +37,15 @@ const setSetting = (modName, name, value) => {
     s.value = value;
 };
 const run = (modName) => window._NTRToolBox.runModule(modName);
+let storageEvents = [];
+const onStorage = (e) => { if (e.key === GPT_PIPE) storageEvents.push(e); };
 
 try {
     // ---------- A. 添加GPT翻译器 ----------
-    localStorage.removeItem(GPT_KEY);
-    let storageEvents = [];
-    const onStorage = (e) => { if (e.key === GPT_KEY) storageEvents.push(e); };
+    // 默认目标应是新 pipeline 仓（即使当前页面不是工作区页）
+    localStorage.removeItem(GPT_PIPE);
+    localStorage.removeItem(GPT_JOBS);
+    storageEvents = [];
     window.addEventListener('storage', onStorage);
     setSetting('添加GPT翻译器', '数量', 3);
     setSetting('添加GPT翻译器', '名称', '甲');
@@ -47,19 +53,20 @@ try {
     setSetting('添加GPT翻译器', '链接', 'http://127.0.0.1:8788/v1');
     setSetting('添加GPT翻译器', 'Key', 'k1');
     run('添加GPT翻译器');
-    await waitFor(() => readWorkers(GPT_KEY).length === 3);
-    const gptWorkers = readWorkers(GPT_KEY);
+    await waitFor(() => readWorkers(GPT_PIPE).length === 3);
+    const gptWorkers = readWorkers(GPT_PIPE);
+    check('添加GPT：默认写入 workspace-gpt-pipeline', gptWorkers.length === 3 && readWorkers(GPT_JOBS).length === 0, { pipe: gptWorkers.length, jobs: readWorkers(GPT_JOBS).length });
     check('添加GPT：数量=3 生成 甲1..甲3', JSON.stringify(gptWorkers.map(w => w.id)) === JSON.stringify(['甲1', '甲2', '甲3']), gptWorkers.map(w => w.id));
     check('添加GPT：worker 字段 type/model/endpoint/key', gptWorkers.every(w => w.type === 'api' && w.model === 'm1' && w.endpoint === 'http://127.0.0.1:8788/v1' && w.key === 'k1'), gptWorkers[0]);
-    const gptRaw = JSON.parse(localStorage.getItem(GPT_KEY));
+    const gptRaw = readRaw(GPT_PIPE);
     check('添加GPT：数据带 jobs/uncompletedJobs 归一化', Array.isArray(gptRaw.jobs) && Array.isArray(gptRaw.uncompletedJobs), Object.keys(gptRaw));
-    check('添加GPT：写入派发 StorageEvent(key=workspace-gpt)', storageEvents.length >= 1, storageEvents.length);
+    check('添加GPT：写入派发 StorageEvent(key=workspace-gpt-pipeline)', storageEvents.length >= 1, storageEvents.length);
     // 重跑同 id 覆盖（不新增）
     setSetting('添加GPT翻译器', '数量', 1);
     setSetting('添加GPT翻译器', '模型', 'm2');
     run('添加GPT翻译器');
-    await waitFor(() => (readWorkers(GPT_KEY)[0] || {}).model === 'm2');
-    check('添加GPT：同 id 覆盖不新增', readWorkers(GPT_KEY).length === 3 && readWorkers(GPT_KEY)[0].model === 'm2' && readWorkers(GPT_KEY)[1].model === 'm1', readWorkers(GPT_KEY).map(w => w.id + ':' + w.model));
+    await waitFor(() => (readWorkers(GPT_PIPE)[0] || {}).model === 'm2');
+    check('添加GPT：同 id 覆盖不新增', readWorkers(GPT_PIPE).length === 3 && readWorkers(GPT_PIPE)[0].model === 'm2' && readWorkers(GPT_PIPE)[1].model === 'm1', readWorkers(GPT_PIPE).map(w => w.id + ':' + w.model));
 
     // ---------- B. 添加Sakura翻译器 ----------
     localStorage.removeItem(SK_KEY);
@@ -72,44 +79,53 @@ try {
     check('添加Sakura：数量=2 生成 乙1..乙2', JSON.stringify(skWorkers.map(w => w.id)) === JSON.stringify(['乙1', '乙2']), skWorkers.map(w => w.id));
     check('添加Sakura：worker 字段 endpoint/prevSegLength/segLength', skWorkers.every(w => w.endpoint === 'http://sakura.example' && w.prevSegLength === 500 && w.segLength === 500), skWorkers[0]);
 
-    // ---------- C. 删除翻译器（/workspace/gpt 分支） ----------
-    history.pushState({}, '', '/workspace/gpt');
-    localStorage.setItem(GPT_KEY, JSON.stringify({ workers: [{ id: '甲1' }, { id: '甲2' }, { id: '甲3' }, { id: '共享' }], jobs: [], uncompletedJobs: [] }));
+    // ---------- C. 删除翻译器（新 GPT 工作区 /workspace/gpt-pipeline） ----------
+    history.pushState({}, '', '/workspace/gpt-pipeline');
+    localStorage.setItem(GPT_PIPE, JSON.stringify({ workers: [{ id: '甲1' }, { id: '甲2' }, { id: '甲3' }, { id: '共享' }], jobs: [{ id: 'j1' }], uncompletedJobs: [] }));
+    localStorage.setItem(GPT_JOBS, JSON.stringify({ workers: [{ id: '旧仓残留' }], jobs: [{ id: 'j0' }], uncompletedJobs: [{ id: 'u0' }] }));
     setSetting('删除翻译器', '确认删除', true);
     setSetting('删除翻译器', '排除', '共享,本机,AutoDL');
     run('删除翻译器');
-    await waitFor(() => readWorkers(GPT_KEY).length === 1);
-    check('删除GPT：排除名单外全删、共享保留', JSON.stringify(readWorkers(GPT_KEY).map(w => w.id)) === JSON.stringify(['共享']), readWorkers(GPT_KEY).map(w => w.id));
+    await waitFor(() => readWorkers(GPT_PIPE).length === 1);
+    check('删除GPT：排除名单外全删、共享保留', JSON.stringify(readWorkers(GPT_PIPE).map(w => w.id)) === JSON.stringify(['共享']), readWorkers(GPT_PIPE).map(w => w.id));
+    check('删除GPT：只动 pipeline 的 workers，jobs 与旧仓不动', readRaw(GPT_PIPE).jobs.length === 1 && readWorkers(GPT_JOBS).length === 1 && readRaw(GPT_JOBS).jobs.length === 1, { pipeJobs: readRaw(GPT_PIPE).jobs.length, legacyWorkers: readWorkers(GPT_JOBS).length });
     check('删除GPT：确认弹窗出现且被接受', confirmCalls >= 1, confirmCalls);
     check('删除GPT：成功 toast', toasts.some(t => t.includes('已删除 GPT 翻译器')), toasts);
     // confirm=false → 取消
     const cancelMark = toasts.length;
     window.confirm = () => false;
-    localStorage.setItem(GPT_KEY, JSON.stringify({ workers: [{ id: '甲1' }, { id: '甲2' }], jobs: [], uncompletedJobs: [] }));
+    localStorage.setItem(GPT_PIPE, JSON.stringify({ workers: [{ id: '甲1' }, { id: '甲2' }], jobs: [], uncompletedJobs: [] }));
     run('删除翻译器');
     await sleep(400);
     check('删除GPT：confirm=false → 已取消删除 toast', toasts.slice(cancelMark).some(t => t.includes('已取消删除')), toasts.slice(cancelMark));
-    check('删除GPT：取消后 worker 不变', readWorkers(GPT_KEY).length === 2, readWorkers(GPT_KEY).map(w => w.id));
+    check('删除GPT：取消后 worker 不变', readWorkers(GPT_PIPE).length === 2, readWorkers(GPT_PIPE).map(w => w.id));
     // 确认删除=false → 不弹窗直接删
     window.confirm = () => { confirmCalls++; return true; };
     const confirmBefore = confirmCalls;
     setSetting('删除翻译器', '确认删除', false);
     run('删除翻译器');
-    await waitFor(() => readWorkers(GPT_KEY).length === 0);
-    check('删除GPT：关闭确认 → 直接删空且不再弹窗', readWorkers(GPT_KEY).length === 0 && confirmCalls === confirmBefore, { workers: readWorkers(GPT_KEY).length, confirmCalls });
-    // sakura 分支
-    history.pushState({}, '', '/workspace/sakura');
+    await waitFor(() => readWorkers(GPT_PIPE).length === 0);
+    check('删除GPT：关闭确认 → 直接删空且不再弹窗', readWorkers(GPT_PIPE).length === 0 && confirmCalls === confirmBefore, { workers: readWorkers(GPT_PIPE).length, confirmCalls });
+    // 过渡期路径 /workspace/gpt（重定向目标）也写新仓
+    history.pushState({}, '', '/workspace/gpt');
+    localStorage.setItem(GPT_PIPE, JSON.stringify({ workers: [{ id: '重定向页' }], jobs: [], uncompletedJobs: [] }));
+    localStorage.setItem(GPT_JOBS, JSON.stringify({ workers: [], jobs: [], uncompletedJobs: [] }));
+    run('删除翻译器');
+    await waitFor(() => readWorkers(GPT_PIPE).length === 0);
+    check('删除GPT：/workspace/gpt 也清 pipeline（不碰旧仓 workers）', readWorkers(GPT_PIPE).length === 0 && readRaw(GPT_PIPE).jobs.length === 0, readWorkers(GPT_PIPE).map(w => w.id));
+    // sakura pipeline 分支
+    history.pushState({}, '', '/workspace/sakura-pipeline');
     localStorage.setItem(SK_KEY, JSON.stringify({ workers: [{ id: '乙1' }, { id: '乙2' }], jobs: [], uncompletedJobs: [] }));
     run('删除翻译器');
     await waitFor(() => readWorkers(SK_KEY).length === 0);
-    check('删除Sakura：toast 且清空', toasts.some(t => t.includes('已删除 Sakura 翻译器')) && readWorkers(SK_KEY).length === 0, readWorkers(SK_KEY));
+    check('删除Sakura：/workspace/sakura-pipeline 命中 sakura 仓', toasts.some(t => t.includes('已删除 Sakura 翻译器')) && readWorkers(SK_KEY).length === 0, readWorkers(SK_KEY));
     // 非工作区 URL → 静默 no-op
     history.replaceState({}, '', origHref);
     const delMark = toasts.length;
-    localStorage.setItem(GPT_KEY, JSON.stringify({ workers: [{ id: '甲1' }], jobs: [], uncompletedJobs: [] }));
+    localStorage.setItem(GPT_PIPE, JSON.stringify({ workers: [{ id: '甲1' }], jobs: [], uncompletedJobs: [] }));
     run('删除翻译器');
     await sleep(400);
-    check('删除：非工作区 URL → 无 toast、数据不动', toasts.length === delMark && readWorkers(GPT_KEY).length === 1, { newToasts: toasts.slice(delMark) });
+    check('删除：非工作区 URL → 无 toast、数据不动', toasts.length === delMark && readWorkers(GPT_PIPE).length === 1, { newToasts: toasts.slice(delMark) });
 
     // ---------- D. 启动翻译器 ----------
     const stage = document.createElement('div');
@@ -145,7 +161,7 @@ try {
 } finally {
     Object.keys(savedKeys).forEach((k) => { if (savedKeys[k] === null) localStorage.removeItem(k); else localStorage.setItem(k, savedKeys[k]); });
     window.confirm = origConfirm;
-    window.removeEventListener('storage', () => { });
+    window.removeEventListener('storage', onStorage);
     history.replaceState({}, '', origHref);
     document.querySelectorAll('#ntr-e2e-launch-stage').forEach((e) => e.remove());
     toastObs.disconnect();

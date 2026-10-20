@@ -1,16 +1,18 @@
 # spec-04：上游模块定义段（10 个模块的 settings + run）
 
-重构对象：`defaultModules` 里上游的 10 个模块定义（约 930 行）。分叉自有的 6 个模块（AI提取术语表、导入术语表(KWG)、回滚术语表、术语队列、复制翻译器到BETA工作区、工作区翻译器自动同步）不动。
-等价验证：`.e2e-translator-mgmt.js`（18）、`.e2e-collect-tasks.js`（15）、`.e2e-auto-retry.js`（14）、`.e2e-fill-paginate.js`（20）、`.e2e-web/wenku-dryrun.js`、`.e2e-sync-storage.js`、`.e2e-panel-basics.js`（控件/图标）+ 全套 e2e。
+重构对象：`defaultModules` 里上游的 10 个模块定义（约 930 行）。分叉自有的 6 个模块（AI提取术语表、导入术语表(KWG)、回滚术语表、术语队列、工作区备份、合并旧工作区翻译器）不动。
+等价验证：`.e2e-translator-mgmt.js`、`.e2e-collect-tasks.js`、`.e2e-auto-retry.js`、`.e2e-fill-paginate.js`、`.e2e-web/wenku-dryrun.js`、`.e2e-sync-storage.js`、`.e2e-panel-basics.js`（控件/图标）+ 全套 e2e；旧工作区迁移由 `.e2e-workspace-migrate.js` 定格。
 模块名/设置名/白名单保持不变（配置存储与面板按这些字符串对号）。
 
 ## 1. 添加翻译器（两个模块）
 - 添加Sakura翻译器（whitelist `/workspace/sakura`）：设置 数量(number,5)/名称(string,'NTR translator ')/链接(string,'https://sakura-share.one')/bind。run → `StorageUtils.addSakuraWorker(名称, 链接, 数量)`。
-- 添加GPT翻译器（whitelist `/workspace/gpt`）：设置 数量/名称/模型('deepseek-chat')/链接('https://api.deepseek.com')/Key('sk-wait-for-input')/bind。run → `StorageUtils.addGPTWorker(名称, 模型, 链接, Key, 数量)`。
+- 添加GPT翻译器（whitelist `/workspace/gpt`，兼容新路径 `/workspace/gpt-pipeline`）：设置 数量/名称/模型('deepseek-chat')/链接('https://api.deepseek.com')/Key('sk-wait-for-input')/bind。run → `StorageUtils.addGPTWorker(名称, 模型, 链接, Key, 数量, keysForPath(pathname)?.workers || null)`；缺省目标已是 `workspace-gpt-pipeline`。
+  - 注记（2026-10-12，对 site 源码 auto-novel 核对）：站点 `GptWorker` 已无 `type` 字段（`web/src/model/Translator.ts`，提交 `6a49aca6` 移除 web 模式），我们写入的 `type:'api'` 在站点侧被原样保留但忽略；`workspace-gpt-pipeline` 的 worker 另有 `concurrency`/`profile` 两个字段（我们只写基础字段，站点读时按默认值补）。
+  - 注记（2026-10-20，对 `fd90b2d4` 核对）：上游删除旧 GPT 工作区，`/workspace/gpt` 重定向到 `/workspace/gpt-pipeline`；worker 仓恒为 `workspace-gpt-pipeline`，任务队列仍与 `workspace-gpt` 共用。本模块不再向 `workspace-gpt` 写 worker（见 spec-02 §5）；`/workspace/gpt` 过渡路径经 `keysForPath` 也落到 pipeline 仓。删除翻译器（§2）与清空任务（§6）各取自己那半的键，不再用「href 以 gpt/sakura 结尾」单键判定。
 
 ## 2. 删除翻译器（whitelist `/workspace`）
 设置 确认删除(boolean,true)/排除(string,'共享,本机,AutoDL')/bind。run：
-- 排除按逗号拆分去空；按 `location.href` 以 `gpt`/`sakura` 结尾选工作区键，都不是 → 当前 workers 空。
+- 排除按逗号拆分去空；按 `location.pathname` 取 `StorageUtils.keysForPath(pathname)`，取不到 → 静默 return；否则用其 `workers` 仓（`/workspace/gpt-pipeline` 与过渡期 `/workspace/gpt` = `workspace-gpt-pipeline`，Sakura 两路径 = sakura 仓）。
 - 确认删除开且可删数>0 → `confirm('确定要删除 N 个翻译器吗？')`；拒绝 → warning『已取消删除』并 return。
 - 然后 gpt 分支 removeAllWorkers(gpt键, 排除) + success『已删除 GPT 翻译器』；sakura 分支同理『已删除 Sakura 翻译器』；两键都不是 → 静默。
 
@@ -46,7 +48,7 @@
    - `script.delay(10)`（不 await）；relaunch 真值 → `script.runModule('启动翻译器')`（即使 retry 按钮不存在也每轮触发）。
 
 ## 6. 清空任务（whitelist `/workspace/*`）
-设置 确认清空(true)/仅清空已完成(false)。run：按 pathname 含 workspace/sakura → sakura 键、workspace/gpt → gpt 键、否则 error『无法确定工作区类型』；仅清空已完成 → warning『仅清空已完成功能需配合网站API』直接 return（**未实现的死设置**）；确认清空开且任务>0 → `confirm('确定要清空 N 个任务吗？此操作不可恢复！')` 拒绝 → warning『已取消清空』；清空 jobs + success『已清空 N 个任务』。
+设置 确认清空(true)/仅清空已完成(false)。run：取 `StorageUtils.keysForPath(pathname)`，取不到 → error『无法确定工作区类型』；否则用其 `jobs` 仓（GPT 两路径 = `workspace-gpt`，与 pipeline worker 仓分属两键；Sakura 两路径 = sakura 仓）；仅清空已完成 → warning『仅清空已完成功能需配合网站API』直接 return（**未实现的死设置**）；确认清空开且任务>0 → `confirm('确定要清空 N 个任务吗？此操作不可恢复！')` 拒绝 → warning『已取消清空』；清空 jobs + success『已清空 N 个任务』。
 
 ## 7. 资料同步（whitelist `/workspace/*`，hidden）
 设置 bind。run 为空——上游未实现的占位模块，保持 no-op。
@@ -73,3 +75,20 @@
   1. 手动点击清零计数：`tagName === 'button'`（小写永假）→ 大小写不敏感比较，清零真正生效；
   2. 「重启翻译器」开关：`设置值 || 3`（false 短路成 3，关不掉）→ 布尔直读（`=== true`），关闭即不再触发重启。
   对应 `.e2e-auto-retry.js` 的 F/G/H 段断言已同步改写为修复后行为。
+
+## 11. 工作区备份（2026-10-12 追加；本仓库自研，非上游移植）
+- 模块名「工作区备份」；`type:'onclick'`；**无 whitelist**（localStorage 按域共享，站点域内任意页面可用）；设置 `导出含 API key`(boolean,true)/`bind`。run → 打开覆盖层面板 `#ntr-workspace-backup-overlay`。
+- 面板：概览（三个工作区键的翻译器/待排队/已完成记录 + 脚本术语队列任务数）／导出（分区勾选、含 key 开关、导出为文件、复制 JSON、只读 JSON textarea）／导入（模式 合并|整表替换、选择文件|粘贴、预览差异、应用导入；应用前自动下载当前状态快照作回滚点 + confirm）。
+- 语义与文件格式：见 `spec-02-helper-layer.md` §5.1/§5.2（`StorageUtils`）。预览里每条任务按站点 `TranslateTaskDescriptor` 格式渲染成可点书链接（`web/{provider}/{novel}` → `/novel/{provider}/{novel}`，`wenku/{novel}` → `/wenku/{novel}`）。
+- 定格的必须是**站点侧 ABI**：`e2e` 直接打 `_NTRGlossaryDev.StorageUtils`（同一份实现）+ `runModule('工作区备份')` 驱动面板（`.e2e-workspace-backup.js`，含 B0 段 pipeline 双仓分写与 jobOnly 语义）；面板 DOM id 前缀 `wb-`（`wb-summary`/`wb-sec-*`/`wb-export-file`/`wb-copy`/`wb-export-json`/`wb-mode`/`wb-pick`/`wb-preview`/`wb-apply`/`wb-import-json`/`wb-preview-box`/`wb-close`）。
+
+## 12. 合并旧工作区翻译器（2026-10-20 追加；本仓库自研，替代已删除的两个同步模块）
+- 模块名「合并旧工作区翻译器」；`type:'onclick'`；whitelist `['/workspace', '/novel', '/wenku', '/favorite']`；设置 `覆盖同名翻译器`(boolean,false)/`bind`。
+- 背景：上游删除旧 GPT 工作区后，`workspace-gpt.workers` 成为没有页面维护的死数据；普通链路（下拉/术语提取/Daemon 推送/备份）都只读 `workspace-gpt-pipeline`。本模块是**唯一**按需读取旧 workers 的入口。
+- run：
+  1. 直接读 `localStorage['workspace-gpt']`，取 `workers` 数组；缺 id/endpoint 的条目与前后的 `type:'web'` 条目跳过并计数。
+  2. 读目标 `workspace-gpt-pipeline`（经 `StorageUtils._getData` 归一化）；逐条按 id 合并：新 id 追加，同 id 默认跳过，勾选「覆盖同名翻译器」则整条替换。
+  3. 目标仓的 `jobs`/`uncompletedJobs` 原样保留；旧仓**一个字节都不写**；写入走 `_setData`（归一化 + 合成 StorageEvent）。
+  4. 通知汇总「新增/覆盖/跳过同名/跳过旧 web/跳过无效」；旧仓为空或全部同名时给 warning（同名时提示可勾选覆盖）；没有新增也没有覆盖 → 不写 localStorage。
+- 可重复执行且幂等（第二次跑默认全跳过、不写）；目标键不存在时创建 `{workers, jobs:[], uncompletedJobs:[]}`。
+- 测试：`.e2e-workspace-migrate.js`（注册与旧模块缺席、普通读取不含旧仓、默认合并/覆盖、web 与无效条目、目标 jobs 保留、旧仓不变、StorageEvent、toast 计数、空旧仓、目标键缺失、幂等）。

@@ -4,7 +4,7 @@
 // 与翻译工作区同一入口，即"模拟 GPT 翻译器提交"。
 import fs from 'node:fs';
 import path from 'node:path';
-import { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport } from './lg-align.mjs';
+import { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport, alignLgResult } from './lg-align.mjs';
 
 const safeName = (s) => String(s || '').replace(/[/|\\:*?"<>]/g, '').slice(0, 60) || 'book';
 
@@ -36,11 +36,12 @@ export function createLgTools() {
     if (manifest.book && manifest.book.key && manifest.book.key !== book.key) {
       throw Object.assign(new Error(`清单属于另一本书：${manifest.book.key} ≠ ${book.key}`), { code: 'bad_manifest' });
     }
-    return verifyImport({
-      resultLines: splitResultLines(txt),
-      manifest,
-      getChapter: getChapterFn(clientOf(deps, book), book),
-    });
+    const client = clientOf(deps, book);
+    // 站点「下载原文」经 LG 翻译的 txt（mode=jp 格式）会自动抓原文对齐；契约格式零额外请求
+    const aligned = await alignLgResult({ client, book, manifest, resultLines: splitResultLines(txt) });
+    if (aligned.fatal) throw Object.assign(new Error(aligned.fatal), { code: 'bad_manifest' });
+    const report = await verifyImport({ resultLines: aligned.lines, manifest, getChapter: getChapterFn(client, book) });
+    return { ...report, converted: aligned.converted, convertNote: aligned.note || '' };
   };
 
   return [
@@ -96,7 +97,8 @@ export function createLgTools() {
         return {
           action: args.apply === false ? '校验 LG 译文（不提交）' : '校验并提交到站点 GPT 端',
           book: String(args.book),
-          linesTotal: report.total > 0 ? undefined : undefined,
+          converted: report.converted || false,
+          convertedNote: report.convertNote || '',
           okChapters: report.okCount,
           totalChapters: report.total,
           untranslatedLines: report.untranslated,
@@ -112,7 +114,7 @@ export function createLgTools() {
           return { ok: false, error: 'align_failed', details: report.globalError, okChapters: 0, totalChapters: report.total };
         }
         if (args.apply === false) {
-          return { ok: true, verifiedOnly: true, okChapters: report.okCount, totalChapters: report.total, untranslatedLines: report.untranslated, issues: report.chapters.filter((c) => !c.ok).map((c) => ({ chapter: c.title || c.chapterId, reason: c.reason })) };
+          return { ok: true, verifiedOnly: true, converted: report.converted || false, convertedNote: report.convertNote || '', okChapters: report.okCount, totalChapters: report.total, untranslatedLines: report.untranslated, issues: report.chapters.filter((c) => !c.ok).map((c) => ({ chapter: c.title || c.chapterId, reason: c.reason })) };
         }
         const deps = getDeps(ctx);
         const book = getBook(ctx.store, args.book);

@@ -48,7 +48,8 @@ export class LlmScheduler {
     // 出网收口：默认全局 fetch；daemon 装配时注入代理转发（daemon/proxy.mjs），两条请求路径共用
     this._callFetch = typeof fetchImpl === 'function' ? fetchImpl : ((...args) => globalThis.fetch(...args));
     this.options = {
-      maxInFlight: 1,            // 全局同刻在途请求数（单线程 Gemini 场景 = 1）
+      maxInFlight: 1,            // 全局同刻在途请求数（单线程 Gemini 场景 = 1）；0 = 自动伸缩（起步 4，429/503 减半，上限 16）
+      autoRampEvery: 10,         // 自动伸缩：连续成功 N 次后 +1 许可
       rpm: 0,                    // 每分钟派发上限；0 = 不限
       transportRetries: 3,       // 传输层重试次数（业务错误不重试）
       cooldownSteps: [15000, 30000, 60000],
@@ -65,7 +66,11 @@ export class LlmScheduler {
     this.workers = [];
     this._keyState = new Map();   // id -> { step, until, failures }
     this._index = -1;
-    this._permits = Math.max(1, Number(this.options.maxInFlight) || 1);
+    // 自动伸缩态：maxInFlight=0 时 _permits 由 _autoLimit 驱动（options.maxInFlight 保持 0 原样）
+    this._auto = Number(this.options.maxInFlight) === 0;
+    this._autoLimit = this._auto ? 4 : Math.max(1, Number(this.options.maxInFlight) || 1);
+    this._autoStreak = 0;
+    this._permits = this._autoLimit;
     this._waiters = [];
     this._inFlight = 0;
     this._peak = 0;
@@ -91,17 +96,42 @@ export class LlmScheduler {
     this._index = -1;
   }
 
-  // 运行中热更新参数（GUI/控制面用）：maxInFlight 变化会即时调整许可池
+  // 许可池重算（固定档与自动伸缩共用）：改上限并唤醒等待者
+  _setAutoLimit(n) {
+    this._autoLimit = Math.max(1, Math.floor(Number(n) || 1));
+    this._permits = Math.max(0, this._autoLimit - this._inFlight);
+    while (this._permits > 0 && this._waiters.length > 0) {
+      this._permits -= 1;
+      this._waiters.shift().resolve();
+    }
+  }
+
+  // 自动伸缩：成功连击爬坡 +1（上限 16）；限流/超载（非业务错误）减半（下限 1）
+  _autoAdjust(ok, result) {
+    if (!this._auto) return;
+    if (ok) {
+      this._autoStreak += 1;
+      if (this._autoStreak >= Math.max(1, Number(this.options.autoRampEvery) || 10)) {
+        this._autoStreak = 0;
+        if (this._autoLimit < 16) this._setAutoLimit(this._autoLimit + 1);
+      }
+      return;
+    }
+    const status = Number(result && result.status) || 0;
+    if (!isBusinessError(result) && (Number(result && result.retryAfterMs) > 0 || status === 429 || status === 503)) {
+      this._autoStreak = 0;
+      if (this._autoLimit > 1) this._setAutoLimit(Math.max(1, Math.floor(this._autoLimit / 2)));
+    }
+  }
+
+  // 运行中热更新参数（GUI/控制面用）：maxInFlight 变化会即时调整许可池（0 = 自动档）
   setOptions(partial = {}) {
     this.options = { ...this.options, ...partial };
     if (partial.maxInFlight !== undefined) {
-      const max = Math.max(1, Number(this.options.maxInFlight) || 1);
-      this.options.maxInFlight = max;
-      this._permits = Math.max(0, max - this._inFlight);
-      while (this._permits > 0 && this._waiters.length > 0) {
-        this._permits -= 1;
-        this._waiters.shift().resolve();
-      }
+      this._auto = Number(this.options.maxInFlight) === 0;
+      this._autoStreak = 0;
+      if (!this._auto) this.options.maxInFlight = Math.max(1, Number(this.options.maxInFlight) || 1);
+      this._setAutoLimit(this._auto ? 4 : this.options.maxInFlight);
     }
   }
 
@@ -360,11 +390,13 @@ export class LlmScheduler {
 
       if (result.ok) {
         this._markOk(picked.worker);
+        this._autoAdjust(true, result);
         this._account(messages, result, usage);
         return result;
       }
       st.failures += 1;
       this._stats.lastError = result.error || '';
+      this._autoAdjust(false, result);
       const business = isBusinessError(result);
       if (!business) this._markCooling(picked.worker, result.retryAfterMs);
       attempts += 1;
@@ -396,7 +428,8 @@ export class LlmScheduler {
     }
     return {
       workers: this.workers.length,
-      maxInFlight: this.options.maxInFlight,
+      maxInFlight: this._auto ? this._autoLimit : this.options.maxInFlight,   // auto 档显示当前动态许可（观测点）
+      auto: this._auto,
       requests: this._stats.requests,
       transportRetries: this._stats.transportRetries,
       promptTooLong: this._stats.promptTooLong,

@@ -1,0 +1,23 @@
+[
+  {
+    "entry_id": "Q4MDH",
+    "src": "天宮繭",
+    "dst": "天宫茧",
+    "info": "女性人名",
+    "case_sensitive": false
+  },
+  {
+    "entry_id": "T7VDW",
+    "src": "胡桃みくる",
+    "dst": "胡桃美久",
+    "info": "女性人名",
+    "case_sensitive": false
+  },
+  {
+    "entry_id": "B01V6",
+    "src": "GF文庫",
+    "dst": "GF文库",
+    "info": "组织",
+    "case_sensitive": false
+  }
+]

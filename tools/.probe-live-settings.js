@@ -30,7 +30,8 @@ try {
   out.workers = (() => {
     try {
       const read = (k) => { const raw = localStorage.getItem(k); return raw ? (JSON.parse(raw).workers || []) : []; };
-      return [...read('workspace-gpt-pipeline'), ...read('workspace-gpt')].map((w) => ({ id: w.id, model: w.model, endpoint: (w.endpoint || '').slice(0, 40) }));
+      // 旧 workspace-gpt.workers 已退役（上游删除旧 GPT 工作区），普通链路只读 pipeline
+      return read('workspace-gpt-pipeline').map((w) => ({ id: w.id, model: w.model, endpoint: (w.endpoint || '').slice(0, 40) }));
     } catch (e) { return String(e); }
   })();
 } catch (e) { out.err = String((e && e.stack) || e); }

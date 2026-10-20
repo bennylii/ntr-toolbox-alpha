@@ -8,6 +8,10 @@ import https from 'node:https';
 import net from 'node:net';
 import tls from 'node:tls';
 import zlib from 'node:zlib';
+import { createCurlFetch, curlAvailable } from './curl-fetch.mjs';
+
+// 兜底可用性探测（/proxy/test 报告用）
+export { curlAvailable };
 
 export const DEFAULT_NO_PROXY = '127.0.0.1,localhost,::1';
 const MAX_REDIRECTS = 5;
@@ -22,6 +26,7 @@ export function normalizeProxyConfig(raw) {
     enabled: cfg.enabled === true,
     url: String(cfg.url || '').trim(),
     noProxy: noProxy.split(',').map((s) => s.trim()).filter(Boolean).join(','),
+    curlFallback: cfg.curlFallback !== false,   // 默认开：仅在 undici 传输层失败时回落 curl 重发
   };
 }
 
@@ -58,11 +63,21 @@ export function shouldBypass(hostname, noProxy) {
 
 // ---- fetch 注入 ----
 
+// 传输层失败判定（HTTP 状态错误是正常响应，不兜底；调用方取消/超时也不兜底）
+export function isTransportError(e) {
+  if (!e || e.name === 'AbortError' || e.noRetry) return false;
+  const code = e.cause && (e.cause.code || e.cause.errno);
+  if (code && /^(ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EAI_AGAIN|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|UND_ERR)/i.test(String(code))) return true;
+  return /fetch failed|socket hang up|other side closed|terminated|network/i.test(String(e.message || ''));
+}
+
 // createProxyFetch({ getProxy }) → fetch(url, init) 兼容函数
-// getProxy 每次请求现读（返回存储里的原始配置），保存后立即生效；tls 仅供测试（自签证书）。
-export function createProxyFetch({ getProxy, base, tls: tlsOverrides = null } = {}) {
+// getProxy 每次请求现读（返回存储里的原始配置），保存后立即生效；tls 仅供测试（自签证书）；
+// log 可选：回落 curl 传输时打一行（站点代理链路抖动时便于定位）。
+export function createProxyFetch({ getProxy, base, tls: tlsOverrides = null, log = null } = {}) {
   const baseFetch = base || ((...args) => globalThis.fetch(...args));
-  return async function proxyFetch(url, init = {}, redirectsLeft = MAX_REDIRECTS) {
+  const say = (m) => { try { log && log(m); } catch { } };
+  const once = async (url, init = {}, redirectsLeft = MAX_REDIRECTS) => {
     const proxy = pickProxy(getProxy);
     let target;
     try { target = new URL(String(url)); } catch { return baseFetch(url, init); }
@@ -79,9 +94,25 @@ export function createProxyFetch({ getProxy, base, tls: tlsOverrides = null } = 
       const headers = normalizeHeaders(init.headers);
       const nextInit = { ...init, method, headers, redirect: 'follow' };
       if (method === 'GET') { delete nextInit.body; delete headers['content-type']; }
-      return proxyFetch(next.href, nextInit, redirectsLeft - 1);
+      return once(next.href, nextInit, redirectsLeft - 1);
     }
     return res;
+  };
+  // 兜底：undici/代理路径传输失败时用 curl 子进程重发同一请求（本机代理链路抖动：ECONNRESET 等）
+  return async function proxyFetch(url, init = {}, redirectsLeft = MAX_REDIRECTS) {
+    try {
+      return await once(url, init, redirectsLeft);
+    } catch (e) {
+      const raw = (() => { try { return typeof getProxy === 'function' ? getProxy() : getProxy; } catch { return null; } })();
+      const cfg = normalizeProxyConfig(raw);
+      if (!cfg.curlFallback || !isTransportError(e) || !curlAvailable()) throw e;
+      let target = null;
+      try { target = new URL(String(url)); } catch { /* 非法 URL 交回原错误 */ }
+      const useProxy = !!(cfg.enabled && cfg.url && target && (target.protocol === 'http:' || target.protocol === 'https:') && !shouldBypass(target.hostname, cfg.noProxy));
+      const cause = (e && e.cause && (e.cause.code || e.cause.message)) || (e && e.message) || e;
+      say(`[proxy] undici 传输失败（${cause}），回落 curl 传输${useProxy ? '（经代理 ' + cfg.url + '）' : '（直连）'}：${String(url).slice(0, 90)}`);
+      return createCurlFetch({ proxy: useProxy ? cfg.url : '' })(url, init);
+    }
   };
 }
 

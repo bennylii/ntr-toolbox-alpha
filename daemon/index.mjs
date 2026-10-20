@@ -12,6 +12,7 @@
 //   export-src --book key [--out file]   导出站点原文为 LG 可翻译的纯文本（+对齐清单）
 //   import-lg --book key --txt file --manifest file [--apply] [--limit N]   LG 译文结果对齐导入（gpt 端）
 //   translate [--book key] [--level expire|normal|all] [--concurrency 2] [--max-chapters N]
+//             [--context-before N] [--context-after N]   相邻段参考上下文行数（不给则用 config.translate，0 = 关闭）
 //   watch [--interval 分钟]  常驻：定期按 expire 档补翻未译/过期章节
 //   serve [--port 7331]     本机控制面（/status /progress /auth /run）
 //   status                  控制台状态
@@ -31,7 +32,7 @@ const { GlossaryPipeline } = await imp('glossary-pipeline.mjs');
 const { CheckPipeline, samplesToTsv } = await imp('check-pipeline.mjs');
 const { parseLgGlossary, planImport, applyImport, toLgGlossary } = await imp('glossary-io.mjs');
 const { parseBookUrl } = await imp('book-url.mjs');
-const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport, exportBookSource, applyImportReport, createLgImportRunner } = await imp('lg-align.mjs');
+const { collectChapters, buildSourceExport, manifestOf, splitResultLines, verifyImport, alignLgResult, exportBookSource, applyImportReport, createLgImportRunner, createLgReadbackRunner, readImportState } = await imp('lg-align.mjs');
 const { createAgentLlm } = await imp('agent-llm.mjs');
 const { createAgentLoop } = await imp('agent-loop.mjs');
 const { doingTool, askUserTool } = await imp('agent-tools.mjs');
@@ -74,11 +75,17 @@ function getWorkers() {
 
 // 出网代理：配置每次请求现读（控制台保存即生效）；站点 API 与两个模型池共用同一份配置
 const getProxy = () => store.getConfig('proxy');
-const proxyFetch = createProxyFetch({ getProxy });
+const proxyFetch = createProxyFetch({ getProxy, log: (m) => log.log(m) });
 
 function makeClient(book) {
   const origin = book.origin || store.getConfig('origin') || 'https://n.novelia.cc';
-  return new SiteClient({ origin, token: store.getConfig('token') || '', engine, fetchImpl: proxyFetch });
+  const siteCfg = store.getConfig('site') || {};
+  const retries = Number.isFinite(Number(siteCfg.retries)) ? Math.max(0, Math.min(8, Math.floor(Number(siteCfg.retries)))) : 3;
+  return new SiteClient({
+    origin, token: store.getConfig('token') || '', engine, fetchImpl: proxyFetch, retries,
+    // 传输层重试可观测（代理链路抖动：ECONNRESET / fetch failed / 超时）；次数在控制台「站点与凭据」可调
+    onRetry: (e, n, label) => log.log(`  站点请求失败，重试 ${n}/${retries}：${(e && e.message) || e}（${String(label).slice(0, 80)}）`),
+  });
 }
 
 // 调度器（全局并发门默认 1 = 单线程 Gemini 场景）；配置优先级：CLI 旗标 > config.llm > 默认
@@ -94,7 +101,7 @@ const scheduler = new LlmScheduler({
   engine, store, log,
   fetchImpl: proxyFetch,
   options: {
-    maxInFlight: Math.max(1, pickNum(flags['max-in-flight'], llmConfig.maxInFlight, 1)),
+    maxInFlight: Math.max(0, pickNum(flags['max-in-flight'], llmConfig.maxInFlight, 1)),   // 0 = 自动伸缩
     rpm: pickNum(flags.rpm, llmConfig.rpm, 0),
     transportRetries: pickNum(flags['transport-retries'], llmConfig.transportRetries, 3),
     maxPromptChars: Math.max(1000, pickNum(flags['max-prompt-chars'], llmConfig.maxPromptChars, 12000)),
@@ -111,7 +118,7 @@ const agentScheduler = new LlmScheduler({
   engine, store, log,
   fetchImpl: proxyFetch,
   options: {
-    maxInFlight: Math.max(1, pickNum(undefined, agentLlmCfg.maxInFlight, 1)),
+    maxInFlight: Math.max(0, pickNum(undefined, agentLlmCfg.maxInFlight, 1)),   // 0 = 自动伸缩
     rpm: pickNum(undefined, agentLlmCfg.rpm, 0),
     transportRetries: pickNum(undefined, agentLlmCfg.transportRetries, 3),
     maxPromptChars: Math.max(1000, pickNum(undefined, agentLlmCfg.maxPromptChars, 12000)),
@@ -130,6 +137,9 @@ const pipeline = new TranslationPipeline({
     level: typeof flags.level === 'string' ? flags.level : 'expire',
     concurrency: Math.max(1, Number(flags.concurrency) || 2),
     maxChapters: Math.max(0, Number(flags['max-chapters']) || 0),
+    // 相邻段上下文行数：不给旗标则留 undefined → 由 config.translate 决定（控制台保存即生效）
+    contextBefore: pickNum(flags['context-before'], undefined, undefined),
+    contextAfter: pickNum(flags['context-after'], undefined, undefined),
     rssLimitMB: RSS_LIMIT_MB,
   },
 });
@@ -152,11 +162,18 @@ const checkPipeline = new CheckPipeline({ store, engine, makeClient, log });
 
 // Agent（助手池 = agentScheduler；与翻译池互不抢并发门）
 const lgImportRunner = createLgImportRunner({ store, makeClient, log });
+const lgReadbackRunner = createLgReadbackRunner({ store, makeClient, log });
 const jobQueue = createJobQueue({
-  resolveRunner: (job) => ({ glossary: glossaryPipeline, check: checkPipeline, translate: pipeline, 'lg-import': lgImportRunner }[job]),
+  resolveRunner: (job) => ({ glossary: glossaryPipeline, check: checkPipeline, translate: pipeline, 'lg-import': lgImportRunner, 'lg-readback': lgReadbackRunner }[job]),
   log,
 });
-const skillCatalog = createSkillCatalog({ roots: [path.join(repoRoot, 'skills')], log });
+// 技能双根：user（daemon/skills-user，面板/agent 沙箱可写，覆盖同名内置）优先于 builtin（repo skills/，只读）
+const skillsUserRoot = path.join(repoRoot, 'daemon', 'skills-user');
+fs.mkdirSync(skillsUserRoot, { recursive: true });
+const skillCatalog = createSkillCatalog({
+  roots: [{ dir: skillsUserRoot, source: 'user' }, { dir: path.join(repoRoot, 'skills'), source: 'builtin' }],
+  log,
+});
 const readTools = createReadTools({ store, engine, makeClient, log });
 const agentLlm = createAgentLlm({ scheduler: agentScheduler, log });
 const agentEvents = createAgentEvents();
@@ -172,12 +189,18 @@ const agentLoop = createAgentLoop({
   options: {
     approvalMode: agentApprovalDefault,
     bookKey: typeof flags.book === 'string' ? flags.book : '',
-    extraSystem: skillCatalog.promptText(),
+    // 追问超时策略（设置页「助手参数」保存后经 /settings → setOptions 热更新）
+    ...(typeof agentCfg0.questionDefaultFirst === 'boolean' ? { questionDefaultFirst: agentCfg0.questionDefaultFirst } : {}),
+    ...(Number.isFinite(Number(agentCfg0.decisionTimeoutMs)) && Number(agentCfg0.decisionTimeoutMs) >= 5000
+      ? { decisionTimeoutMs: Math.floor(Number(agentCfg0.decisionTimeoutMs)) } : {}),
+    extraSystem: skillCatalog.promptText(),   // 兜底；loop 内每步优先 deps.skills.promptText()（技能可运行时增改）
     deps: {
       engine,
       makeClient,
       getProxy,
       skills: skillCatalog,
+      skillsUserRoot,
+      skillsBuiltinRoot: path.join(repoRoot, 'skills'),   // 内置技能根：沙箱只读（技能自带脚本可 import）
       enqueue: (payload) => jobQueue.enqueue(payload),
       queueBusy: () => jobQueue.busy(),
       exportsDir: path.join(repoRoot, 'daemon', 'exports'),
@@ -470,11 +493,15 @@ switch (command) {
     const ioClient = makeClient(ioBook);
     const ioLines = splitResultLines(fs.readFileSync(path.resolve(flags.txt), 'utf8'));
     const ioManifest = JSON.parse(fs.readFileSync(path.resolve(flags.manifest), 'utf8'));
+    const ioAligned = await alignLgResult({ client: ioClient, book: ioBook, manifest: ioManifest, resultLines: ioLines, log: (m) => log.log(m) });
+    if (ioAligned.fatal) { log.error(ioAligned.fatal); break; }
+    if (ioAligned.converted) log.log(`  ↻ ${ioAligned.note}`);
     const ioReport = await verifyImport({
-      resultLines: ioLines,
+      resultLines: ioAligned.lines,
       manifest: ioManifest,
       getChapter: (chapterId, volumeId) => ioClient.getChapterTask(ioBook, chapterId, 'gpt', volumeId),
     });
+    if (ioReport.needAuth) { log.error(`${ioReport.globalError}——凭据重同步后重跑（GUI 的导入面板会按断点跳过已完成章）`); break; }
     if (ioReport.globalError) { log.error(ioReport.globalError); break; }
     for (const c of ioReport.chapters) {
       log.log(`  ${c.ok ? '✓' : '✗'} ${c.title || c.chapterId}（${c.count} 段）${c.ok ? '' : '：' + c.reason}`);
@@ -487,6 +514,10 @@ switch (command) {
     });
     for (const r of applied.results) {
       if (r.status === 'failed') log.error(`  提交失败：${r.title || r.chapterId}：${r.error}`);
+    }
+    if (applied.stopped === 'need-auth') {
+      log.error(`提交中断：401 未授权（本批已停止，已提交 ${applied.uploaded} 章）——凭据重同步后重跑；GUI 的导入面板会按断点跳过已完成章`);
+      break;
     }
     log.log(`提交完成：成功 ${applied.uploaded}，失败 ${applied.failed}，未过校验 ${ioReport.total - ioReport.okCount}`);
     break;
@@ -517,7 +548,7 @@ switch (command) {
     const cfgServe = store.getConfig('serve') || {};
     const port = Math.max(1, Number(flags.port) || Number(cfgServe.port) || 7331);
     try { fs.writeFileSync(path.join(here, '.serve-port'), String(port), 'utf8'); } catch { }
-    await startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler, queue: jobQueue, makeClient, engine, agentLoop, agentEvents, port, log, lgImportRunner });
+    await startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler, queue: jobQueue, makeClient, engine, agentLoop, agentEvents, port, log, lgImportRunner, lgReadbackRunner });
     log.log('serve 模式：Ctrl-C 退出');
     await new Promise(() => { });
   }

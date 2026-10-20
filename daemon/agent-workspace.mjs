@@ -93,7 +93,7 @@ function writeReferenceDocs(root) {
     '- await ws.read({ kind: "chapter", chapterId, volumeId? })：读章节正文 {paragraphJp, oldParagraphZh, glossaryId}（站点数据不落快照，按需拉取）',
     '',
     '## 沙箱边界',
-    '- 文件：可读整个工作区；可写 changes/ 与 work/；其余拒绝',
+    '- 文件：可读整个工作区；可写 changes/ 与 work/；配置了用户技能根（skillsUserRoot）时该目录可读写（agent 可在此生成/修改技能包）；配置了内置技能根（skillsBuiltinRoot）时该目录只读——技能自带脚本可用 `await import(new URL(\'scripts/xxx.mjs\', baseUrl).href)` 加载（baseUrl 来自 read_skill 返回值）',
     '- 禁止子进程 / worker / 原生扩展（Node --permission 默认拒绝）；网络可用（fetch）',
     '- 每次调用独立进程，120s 超时 SIGKILL；跨调用数据放文件',
   ].join('\n'), 'utf8');
@@ -236,6 +236,13 @@ async function runScript(ctx, { root, script, client }) {
         `--allow-fs-read=${root}`,
         `--allow-fs-write=${path.join(root, 'changes')}`,
         `--allow-fs-write=${path.join(root, 'work')}`,
+        // 用户技能根：agent 可在此生成/修改技能（下轮 refresh 后即可被 @点名 / read_skill）
+        ...(ctx.deps && ctx.deps.skillsUserRoot ? [
+          `--allow-fs-read=${ctx.deps.skillsUserRoot}`,
+          `--allow-fs-write=${ctx.deps.skillsUserRoot}`,
+        ] : []),
+        // 内置技能根：只读（技能自带脚本可被 import；写入撞权限模型，天然防住）
+        ...(ctx.deps && ctx.deps.skillsBuiltinRoot ? [`--allow-fs-read=${ctx.deps.skillsBuiltinRoot}`] : []),
         `--import=${pathToFileURL(bootstrapPath).href}`,
       ],
       stdio: ['ignore', outFd, errFd, 'ipc'],
@@ -514,7 +521,7 @@ export function createWorkspaceTools() {
       name: 'workspace_run',
       description: [
         'CodeAct：执行一段 JavaScript（ESM）脚本完成程序化数据处理（读取/分页/筛选/关联/去重/聚合/检查/准备变更清单）。',
-        '每次调用启动独立沙箱 Node 进程（--permission）：可读整个工作区、可写 changes/ 与 work/，禁止子进程/worker/原生扩展，网络可用，120s 超时 SIGKILL。',
+        '每次调用启动独立沙箱 Node 进程（--permission）：可读整个工作区、可写 changes/ 与 work/（以及用户技能根 daemon/skills-user，可把新技能写成 <name>/SKILL.md），内置技能根（repo skills/）只读——技能自带脚本可用 read_skill 返回的 baseUrl 加载（await import(new URL(\'scripts/xxx.mjs\', baseUrl).href)）；禁止子进程/worker/原生扩展，网络可用，120s 超时 SIGKILL。',
         '全局对象 ws：ws.contract（契约，含数据集路径与变更 schema）；await ws.doing(text) 汇报进度；await ws.read({kind:"read", subkind:"chapter", chapterId, volumeId?}) 读章节 {paragraphJp, oldParagraphZh, glossaryId}。',
         '数据集文件（JSONL，行内带 fp）：project_meta.json、progress/entries.jsonl、rules/entries.jsonl、glossary/entries.jsonl、warnings/entries.jsonl、prompts.json、runs/entries.jsonl；详见 reference/workspace.md。',
         '要提交修改时：把变更行写入 changes/<域>/<op>.jsonl（schema 见 ws.contract.changes），再用 workspace_apply 提交。跨调用数据放 work/ 下文件。',

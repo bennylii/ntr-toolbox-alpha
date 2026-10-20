@@ -25,6 +25,7 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
     compactThresholdTokens: 120000,
     keepRecentMessages: 12,
     decisionTimeoutMs: 300000,
+    questionDefaultFirst: true,     // 追问超时默认选第一项（LG 行为；可在设置页关闭）
     bookKey: '',
     extraSystem: '',
     deps: {},                      // A2/A3：makeClient / pipelines / engine / skills 等
@@ -40,6 +41,7 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
       compactThresholdTokens: opt.compactThresholdTokens,
       keepRecentMessages: opt.keepRecentMessages,
       decisionTimeoutMs: opt.decisionTimeoutMs,
+      questionDefaultFirst: opt.questionDefaultFirst,
     },
   });
 
@@ -71,7 +73,8 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
   }
 
   // 一轮对话。返回 { ok, content?, steps?, error? }；异常不抛出（除 aborted 以外都转成结果）
-  async function runTurn(sessionId, userText, { signal, onEvent, approvalMode, pinnedSkills } = {}) {
+  // appendUserMessage=false：不落新的用户消息，直接以传入文本续跑（重新生成用）
+  async function runTurn(sessionId, userText, { signal, onEvent, approvalMode, pinnedSkills, appendUserMessage = true } = {}) {
     const session = store.getAgentSession(sessionId);
     if (!session) throw new Error(`会话不存在：${sessionId}`);
     const controller = new AbortController();
@@ -92,8 +95,11 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
       registry,
     };
     store.touchAgentSession(sessionId, { state: 'running' });
-    store.appendAgentMessage({ sessionId, role: 'user', content: String(userText == null ? '' : userText) });
-    emit({ type: 'user_message', text: String(userText == null ? '' : userText) });
+    try { opt.deps?.skills?.refresh?.(); } catch { /* 目录重扫失败不影响本轮（沿用上次快照） */ }
+    if (appendUserMessage) {
+      store.appendAgentMessage({ sessionId, role: 'user', content: String(userText == null ? '' : userText) });
+      emit({ type: 'user_message', text: String(userText == null ? '' : userText) });
+    }
     let steps = 0;
     try {
       for (;;) {
@@ -105,8 +111,9 @@ export function createAgentLoop({ store, chat, takeUsage = null, tools = [], log
         }
         steps += 1;
 
-        // 压缩（失败不影响主流程）+ 硬预算裁剪
-        let extraSystem = opt.extraSystem;
+        // 压缩（失败不影响主流程）+ 硬预算裁剪；
+        // 技能目录运行时可变（面板/沙箱增改用户技能），每步优先走目录现值，opt.extraSystem 只是无 skills 时的兜底
+        let extraSystem = (opt.deps && typeof opt.deps.skills?.promptText === 'function') ? opt.deps.skills.promptText() : opt.extraSystem;
         if (session.bookKey) {
           const bk = store.getBook(session.bookKey);
           const title = bk && bk.title ? String(bk.title).replace(/\s+/g, ' ').slice(0, 60) : '';
@@ -180,15 +187,23 @@ ${String(loaded.content || '').slice(0, 6000)}`;
     }
   }
 
-  // 运行中热更新（GUI / 设置页用）：只接受数值预算与审批模式
+  // 运行中热更新（GUI / 设置页用）：只接受数值预算、审批模式与追问超时策略
   function setOptions(partial = {}) {
     for (const [key, raw] of Object.entries(partial || {})) {
       if (['maxContextTokens', 'compactThresholdTokens', 'keepRecentMessages', 'maxSteps', 'toolResultMaxChars'].includes(key)) {
         const n = Math.floor(Number(raw));
         if (Number.isFinite(n) && n > 0) opt[key] = n;
       }
+      if (key === 'decisionTimeoutMs') {
+        const n = Math.floor(Number(raw));
+        if (Number.isFinite(n) && n >= 5000) opt.decisionTimeoutMs = n;
+      }
+      if (key === 'questionDefaultFirst' && typeof raw === 'boolean') opt.questionDefaultFirst = raw;
       if (key === 'approvalMode' && (raw === 'auto' || raw === 'manual')) opt.approvalMode = raw;
     }
+    // 追问超时策略在会话层生效（ask 的默认超时与超时分支都读它），与循环层同源
+    sessionApi.options.decisionTimeoutMs = opt.decisionTimeoutMs;
+    sessionApi.options.questionDefaultFirst = opt.questionDefaultFirst;
     return { ...opt };
   }
 

@@ -13,7 +13,7 @@
 │   │    ├─ 术语管线 UI（提取/队列/回滚/导入）──── 走站点 API（Bearer）          │
 │   │    ├─ Daemon 连接模块 ──── 自动同步凭据（/ping 探测 + /auth 推送，指纹去重）│
 │   │    └─ 面板角标 ────────── daemon 在线/离线                                 │
-│   └─ 站点 GPT/Sakura 工作区（BETA pipeline 等）                              │
+│   └─ 站点 GPT/Sakura 工作区（gpt-pipeline / sakura-pipeline；旧 /workspace/gpt 已重定向）│
 └──────────────┬──────────────────────────────────────────┬───────────────────┘
                │ HTTPS（经本地代理 6789 出网）               │ http://127.0.0.1:7331
                ▼                                          ▼ （CORS 白名单 + LNA 授权）
@@ -34,12 +34,12 @@
                                                             LLM 端点（OpenAI 兼容；默认单线程逆向 Gemini）
 ```
 
-分工：**浏览器端**负责「拿站点数据 + 写站点术语表 + 把凭据喂给 daemon」；**daemon** 负责「调 LLM 干活 + 按站点契约回写 + 提供控制台/Agent」。两者对同一本书互斥（单队列 + 书锁），避免双写。daemon 的出网（站点 API 与 LLM 端点）可经「网络代理」走本机代理——默认关闭、控制台保存即生效（§4.10）。
+分工：**浏览器端**负责「拿站点数据 + 写站点术语表 + 把凭据喂给 daemon」；**daemon** 负责「调 LLM 干活 + 按站点契约回写 + 提供控制台/Agent」。两者对同一本书互斥（单队列 + 书锁），避免双写。daemon 的出网（站点 API 与 LLM 端点）可经「网络代理」走本机代理——默认关闭、控制台保存即生效（§4.10）。站点工作区的**翻译器与任务队列**都只存在浏览器 localStorage（GPT 翻译器在 `workspace-gpt-pipeline`、共享任务队列在 `workspace-gpt`，Sakura 在 `workspace-sakura`；站点自身没有任何导出/备份功能），脚本的「工作区备份」模块负责它们的导出/导入（契约见 `cleanroom/spec-02-helper-layer.md` §5.1/§5.2；旧 GPT 仓只备份队列，遗留翻译器用「合并旧工作区翻译器」迁移），daemon 侧看不到也管不到这两份数据。
 
 ## 2. 进程与目录
 
 - **油猴**：`ntr-toolbox-alpha.user.js` 单文件；dev 构建由 `tools/.gen-dev.mjs` 生成。
-- **daemon**：`daemon/index.mjs` 入口（CLI 子命令 + `serve` 常驻）；`serve` 托管控制面 HTTP、管线、Agent；托盘（`tray.vbs`/`tray.ps1`）可选拉起隐藏进程。
+- **daemon**：`daemon/index.mjs` 入口（CLI 子命令 + `serve` 常驻）；`serve` 托管控制面 HTTP、管线、Agent；启动入口 = 仓库根 `daemon.cmd`（一键：start/restart/stop/status）或 `daemon/tray.cmd`，实现全在 PowerShell（`launch.ps1` / `tray.ps1`），可选拉起隐藏进程。
 - **存储**：一个 SQLite（默认 `daemon/daemon.db`，`--db` 可换）——全部状态可序列化、可续跑；文件系统只有三类产物：`exports/`（LG 导出）、`uploads/`（LG 结果上传）、`work/<sessionId>/`（Agent 工作区，已 gitignore）。
 - **mock**：`mock-llm/server.mjs` 一个进程同时模拟 LLM 上游与站点 API（8788 主车道 / 8790 daemon 车道）。
 - **KeywordGacha 原项目**：`keywordgacha/`（junction → `C:\cache\keywordgacha`，用户 fork 独立 git 仓库，已 gitignore 不入库）——术语管线提示词与轮次收敛的出处，含「分析结果 → auto-novel 术语表」导出。
@@ -66,9 +66,15 @@
 2. `POST .../translate-v2/{t}/chapter-task/{ch}?sync=false` → `paragraphJp` + 旧译（`sync` 必填，缺了 404）；
 3. `POST .../translate-v2/gpt/chapter/{id}` body `{glossaryId, paragraphsZh, sakuraVersion:'0.9'}` → 章节提交（`sakuraVersion` 是站点工作区客户端的固定常量，段落数严格一致）；
 4. `PUT .../glossary` 全量替换（写前快照 + 写后回读校验）；
-5. `GET .../file?mode=jp-zh&filename=…`（`filename` 必填，缺了 404）。
+5. `GET .../file?mode=jp-zh&filename=…`（`filename` 必填，缺了 404；另有 `mode=jp`（站点「下载原文」整本导出）与 `mode=zh`（整本译文，回扫/验收用），daemon 用它们做站点格式自动对齐与导入后比对）。
 
-鉴权 = `Authorization: Bearer <auth-v2.token>`；站点 API **不使用 Cookie**（refresh cookie 是 HttpOnly 且属站点域，daemon 无法也无需持有）。
+鉴权 = `Authorization: Bearer <站点会话 token>`。会话键：站点 2026-10 起改用 `@novelia/web-kit` 存会话（键名 `web-kit:session:v1`，值 `{token, adminMode}`，**无旧键迁移**），我们按 `web-kit:session:v1` → `auth-v2` → `auth`（`auth.profile.token`）的顺序取（油猴侧 `readSiteToken()`，三处链路共用；见 spec-11）；站点 API **不使用 Cookie**（refresh cookie 是 HttpOnly 且属站点域，daemon 无法也无需持有）。
+
+2026-10-20 上游 `fd90b2d4` 复核：`server/src` 只有 3 个文件变化，**上面 1–5 条契约全部未变**。变化的是 `PUT /api/novel/{provider}/{id}/translation`（元数据写入，toc key 改为 `chapterId ?: titleJp`，本项目不调用）、`GET /api/novel/{provider}/{id}` 的同名章节 toc 合并值（结构不变）、Pixiv `createAt` 开始有值；Go Banner API 另一组变化与本项目无关。明细见 `docs/upstream-sync.md`「2026-10-20 后端 API 差异明细」。
+
+401 有两义：带 `WWW-Authenticate: Bearer error="invalid_token"` → 真凭据失效（`code='unauthorized'`，触发 need-auth 自愈链路）；无该头 → 封禁/权限不足（`code='forbidden'`，不触发 need-auth、不中止不重试）。术语表 PUT 的「内容没变 → 400」（web `修改为空` / 文库 `术语表没有改变`）按**幂等成功**处理。证据与处置见 `docs/upstream-sync.md` ⑦⑧。
+
+传输层重试：站点在墙内只经代理可达、链路抖动（`ECONNRESET` / `fetch failed` / 超时）频繁，`SiteClient` 对**网络层失败**默认重试 3 次（退避 300ms×n，`onRetry` 回调让 CLI 打出「站点请求失败，重试 n/3」；次数在控制台「站点与凭据」可调 0–8，存 `config.site.retries`）；**HTTP 状态错误（401/400/404/5xx 响应）不重试**，语义不变——章节提交与术语表 PUT 都是内容幂等的整章/整表写，重试安全。实测整本导入的校验通过率由此从 115/167 章升到 165–167/167（同一代理链路）。
 
 ### 4.2 LlmScheduler 与双模型池
 
@@ -104,6 +110,7 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 - **循环**：系统提示（含【当前项目】与技能目录）→ 模型 → 顺序派发工具 → `role:'tool'` 回填 → 至无工具调用或 `maxSteps`；支持中止/失败续聊/摘要压缩（`summaryUpTo` 切点）。
 - **工具分层**：只读（自动）/ 执行（队列）/ 写入（审批）。审批 = decision broker（预览即真实 diff；GUI 卡片/CLI y/N；`workspace_apply` 的批次预览与实际提交是同一份差异）。
 - **项目绑定**：会话绑书（控制台新会话挂当前项目）；每轮注入【当前项目】，工具 book 参数缺省即此书。
+- **会话操作**：重命名（写 title）、删除（连带 messages/decisions，内存事件桶 `agentEvents.forget`；跑轮次中 409）、重新生成与编辑重发——两者都按**截断点**重跑：重新生成保留该条用户消息、只删其后的助手/工具消息并以原文续跑（`runTurn({appendUserMessage:false})`），编辑重发删 `seq ≥ 目标` 后用新文本走正常轮次；摘要若跨过截断点则整段清掉（`resetSummaryIfBeyond`，摘要由模型生成无法重算）；`agent_decisions` 与消息无关联字段，不按消息清理。截断会让 seq 复用 → 控制台在这两类操作后整表重建消息节点。
 - **技能**：`skills/` SKILL.md 包（含隐藏前置 writing-guide / agent-charter），`read_skill` + `@点名`。
 - **工作区（CodeAct，LG 同款）**：`workspace_run {script}` 在 `--permission` 沙箱子进程执行模型脚本（fs 限工作区、禁子进程/worker，网络开放；120s 超时）；`ws` API = `contract`（数据集/变更契约）+ `doing`（进度）+ `read`（站点章节按需拉取）。数据集/变更清单是 JSONL 文件（`changes/**`），`workspace_apply {}` 解析→fp 漂移检测→审批→逐 op 提交→回执 `{status, applied, rejected, destroyed}`。变更域 v1 = rules / glossary / prompts；章节译文不走工作区。（规格 `docs/cleanroom/spec-12`）
 
@@ -111,32 +118,45 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 
 - **术语表**：`glossary-io` 双向 JSON（导入含引擎审计与 regex→规则分流）。
 - **译文**：`export-src`（GUI 同款）导出「一行一段」纯文本 + 对齐清单（每章 `start/count/jpSha1`）→ LinguaGacha 翻译（txt 天然保行号）→ `import-lg`/GUI「导入 LG 译文」按清单切片回章，**三层校验**（总行数 / 每章行数+空行模式 / 源 sha1）后按 §4.1-3 契约提交；GUI 里以 `lg-import` 队列任务跑，进度经队列 progress 通道实时回显。（规格 `docs/cleanroom/spec-13`）
+- **也接受站点「下载原文」格式**：站点 `mode=jp` 整本导出（头部 → `############` → 简介，之后每章 `# 标题` + 空行 + 正文；上游 `11fbbb9f` 起标题前另有两个空行）经 LG 翻译后仍是同格式，会在「行数不符 + 文本像站点导出」时自动抓原文逐章 sha1 对齐（**块作用域前向扫描**定位原文块——标题前空行数 0/1/2 与卷/分组标题块都能吸收；逐段空/非空模式；任一章不过即拒绝），契约格式路径零额外请求；抓原文是 2MB 级请求，失败分轮重试并把原因带进错误。纯函数 `convertSiteFormat`/`fetchSiteExportLines`/`alignLgResult` 在 `lg-align.mjs`（四处调用点共用：`/lg/verify`、`lg-import` runner、CLI、Agent 工具）。**缺译标记章**（`GPT/百度/有道/Sakura翻译缺失。`、`该章节缺失。`、文库的 `// 该分段翻译缺失。`）按清单 `count` 展开空行、提交侧跳过（不污染已译章）。**文库不走这条路**：站点禁用 `mode=jp`、下载逐卷且无标题块结构 → 命中即报错提示改用契约格式 txt。
+- **折叠空行版回落（`convertSiteFormatLoose`）**：有些来路的站点格式译文把连续空行折成单个空行（与站点原文不同构，绝对行号切片必然错位）。严格模式失败后自动回落「块序 + 非空行映射」：`splitBlocks` 按 `# 标题` 切块、块内锚定定位原文块（sha1 命中且块内剩余行全空）、译文块按块序号取、要求两侧非空行数一致，再把译文非空行按序铺回原文段落数组（空段落回填空串）；块数/逐章 sha1/非空行数/重建行数四项硬校验不打折，报告带 `convertMode: 'strict'|'loose'`。真数据实测：`web:syosetu/n5731ie`（449 章 / 462 块）折叠空行版译文经此路径重建，与站点实际内容逐章 **449/449 一致**。
+- **提交后回读校验（`verifySubmitted` + `lg-readback` 队列任务）**：抓站点 `mode=zh&translations=gpt` 整本译文（`getBookZhText`，一次 11MB 级请求）与本地 txt 逐章比对非空行——本地侧支持契约格式（按清单切片）与站点导出格式（块序），站点侧「有正文的块」按序对应章节（缺清单抓 TOC），两侧章节数不符即拒绝；输出 N/M 章一致 + 不一致章首差行 + 站点侧假名残留行数，落 `runs(job='lg-readback')`，GUI 项目卡「回读校验」按钮/导入面板入口，`GET /lg/import-state` 回显断点（已提交 N 章）。
+- **断点续跑与 401 收口**：逐章提交成功后把「章 id + 译文内容 sha」写 `chunks`（`lg-import-state`），重跑跳过内容一致的已完成章（内容变则 sha 变 → 自动重传）；`verifyImport`/`applyImportReport` 对 401 先退避重试 2 次，仍失败即中止本批并返回 `needAuth`/`stopped:'need-auth'`（不再逐章吞成「章节获取失败」），runner 置 `book.state='need-auth'`、自动置 `authRequest`（触发油猴重推凭据）、进度打 `phase:'need-auth'`，GUI 出「继续提交」入口。
 
-### 4.9 控制台（`/ui`，OpenWebUI 风格）
+### 4.9 控制台（`/ui`，Windows 经典灰 + 扁平直角）
 
-「项目」为一级容器：侧栏「当前项目」切换器全站跟随（通用 = 全局视角）；项目页卡片（进度/最近 run/队列/提案 + 导出/导入 LG 按钮）；任务/规则/提示词/助手/状态默认作用于当前项目；规则页另含「内置保护预设」选择器。提示词与技能是**全局资源**（LG 式）。设置页八个区块（连接 / 双模型池×2 / 调度×2 / 助手参数 / 站点与凭据 / 网络代理）。
+「项目」为一级容器：侧栏「当前项目」切换器全站跟随（通用 = 全局视角）；项目页卡片（进度/最近 run/队列/提案 + 导出/导入 LG 按钮）；任务/规则/提示词/助手/状态默认作用于当前项目；规则页另含「内置保护预设」选择器。提示词与技能是**全局资源**（LG 式）。设置页八个区块（连接 / 双模型池×2 / 调度×2 / 助手参数 / 站点与凭据——origin、从站点同步、token、站点请求重试 0–8 / 网络代理）。
+
+外观：**Windows 经典（PB/VB 年代）** —— **灰打底**（工作区/侧栏/分组框/表格皆 `#c0c0c0`，字段白底，对话区是白底"文档窗口"浮在灰工作区上）、1px `#808080` 描边、**零圆角**；**经典蓝只做点缀**（窗口标题栏与侧栏页眉 VB6/Office97 蓝渐变 `#0a246a → #a6caf0`、悬停/选中藏青 `#000080` 白字、表格行浅蓝 `#d6e2f5`、主按钮与焦点）、经典提示条配色（`#ffffe1`）、16px 方块滚动条（窄屏 10px）；图标用系统自带 **Segoe MDL2 Assets** 单色字形（JS `String.fromCodePoint(0xE8BD)` 生成，不写 `\u`/CSS `content` 转义）。经典体系只有浅色，**无深色主题**。滚动条两侧对称预留（`scrollbar-gutter: stable both-edges`）——聊天区与各页内容列因此与滚动条无关，不会出现"右侧多半个滚动条宽"的错位。
+
+会话界面是纯前端渲染：单文件内嵌 CSS/JS + 模块作用域的极简 markdown 渲染器（`renderMarkdown` 经 `${MD_SOURCE}` toString 内联进页面——既避开模板字面量的转义陷阱，又能在 Node 侧单测），消息按 `seq` 增量 diff 更新（保住滚动位置与 `<details>` 展开态）；**没有逐字流式**（助手文本整段到达，只以闪烁光标 + 步数指示表意）；消息悬停提供 复制/编辑（内联重发）/重新生成，顶栏与侧栏提供 会话重命名/删除（见 §4.7 会话操作语义）。
 
 ### 4.10 连接与凭据
 
 - `GET /ping`（免凭据，带版本）供探测；`POST /auth` 收 `{token, workers, origin, auto}`，只回元数据不回 token；
-- **自动同步**：油猴侧 30s glance tick 顺带做「指纹（token+workers+origin）变化才推」，页面加载即推、token 刷新 ≤30s 自愈，无变化零请求；`lastSync.mode = auto|manual` 可观测；
+- **自动同步**：油猴侧 5s glance tick 顺带做「指纹（token+workers+origin）变化才推」，页面加载即推、token 刷新 ≤5s 自愈，无变化零请求；`lastSync.mode = auto|manual` 可观测；
+- **控制台请求同步**：设置页「从站点同步」→ `POST /auth/request` 置位（5 分钟过期）→ 油猴从 `/ping.pendingAuth` 看到标志后绕过指纹去重强推一次 → `/auth` 清位；控制台轮询 `lastSync.at` 变化回报结果（token 只存在站点页面 localStorage，daemon 无法自取）；
 - CORS：内置 `n.novelia.cc` + localhost（不可移除）+ `config.serve.origins` 附加条目；仅监听 127.0.0.1；LNA/PNA 头已应答（真实用户首次需浏览器授权一次；headless 车道需禁用 LocalNetworkAccessChecks）。（规格 `docs/cleanroom/spec-11`）
-- **出网代理**：`config.proxy = { enabled, url, noProxy }`；站点 API 与双池的 LLM 调用统一经 `daemon/proxy.mjs` 注入的 fetch（http 目标走代理绝对形式，https 目标走 CONNECT 隧道，支持 `user:pass@` 凭据）；**每次请求现读配置 → 控制台保存即生效**；直连列表默认 `127.0.0.1,localhost,::1`（mock/测试零影响），代理关闭时全部直连（与旧版一致）；不支持 SOCKS5；`POST /proxy/test` 对同一目标做「直连 vs 代理」双探测。工作区沙箱在 fork 时注入 `HTTP_PROXY/HTTPS_PROXY/NO_PROXY/NODE_USE_ENV_PROXY`，脚本出网与 daemon 同路。
+- **出网代理**：`config.proxy = { enabled, url, noProxy, curlFallback }`；站点 API 与双池的 LLM 调用统一经 `daemon/proxy.mjs` 注入的 fetch（http 目标走代理绝对形式，https 目标走 CONNECT 隧道，支持 `user:pass@` 凭据）；**每次请求现读配置 → 控制台保存即生效**；直连列表默认 `127.0.0.1,localhost,::1`（mock/测试零影响），代理关闭时全部直连（与旧版一致）；不支持 SOCKS5；`POST /proxy/test` 对同一目标做「直连 vs 代理」双探测并报告 `curlFallback`/`curlAvailable`。工作区沙箱在 fork 时注入 `HTTP_PROXY/HTTPS_PROXY/NO_PROXY/NODE_USE_ENV_PROXY`，脚本出网与 daemon 同路。
+- **curl 传输兜底**：个别站点对 Node/undici 指纹稳定 `ECONNRESET`（实测 `n.novelia.cc` 经 Clash 6789：undici 8/8 失败、同代理 curl ~85% 成功）。`daemon/curl-fetch.mjs` 用**异步 spawn**（同步 spawn 会阻塞事件循环）把同一请求交给 curl（`-L`/`--retry`/`--max-time`/同代理判定/signal kill），`isTransportError` 只对传输层失败触发（HTTP 状态错误与调用方 abort 不触发），默认开、可关，回落时打日志。
 
 ### 4.11 托盘
 
-`tray.vbs` → `tray.ps1`（PowerShell NotifyIcon，零依赖）：隐藏拉起 daemon（端口自读 `config.serve.port`/`.serve-port`），菜单 = 控制台/状态/日志/重启/退出，意外退出气泡提醒。
+`daemon.cmd` / `tray.cmd` → `launch.ps1` / `tray.ps1`（PowerShell NotifyIcon，零依赖）：一键启动/重启（按端口定位进程）/停止/状态；托盘隐藏拉起 daemon（端口自读 `config.serve.port`/`.serve-port`），菜单 = 控制台/状态/日志/重启/退出，意外退出气泡提醒；日志按端口分文件（`.tray-<端口>.log`）。
 
 ## 5. 控制面 API 速查
 
 | 方法/路径 | 用途 |
 |---|---|
 | `GET /ping` `/status` `/settings` `/rules` `/prompts` `/books` `/progress` `/runs` `/proposals` `/snapshots` `/warnings` `/agent/*` | 只读面（探测/状态/配置回读/列表） |
-| `POST /auth` | 凭据 + 翻译器推送（油猴自动/手动共用，带 auto 标记） |
-| `POST /run` | 派发 `translate / glossary / check / lg-import`（单队列，lg-import 校验路径白名单） |
+| `POST /auth` | 凭据 + 翻译器推送（油猴自动/手动共用，带 auto 标记）；收到即清「同步请求」标志 |
+| `POST /auth/request` | 控制台请求站点页面立刻推一次凭据（油猴经 `/ping.pendingAuth` 响应） |
+| `POST /run` | 派发 `translate / glossary / check / lg-import / lg-readback`（单队列，lg-import/lg-readback 路径白名单） |
 | `POST /settings` | llm / agent（含 workers、llm 子对象）/ origin / serve（port、origins）/ textPreserve.preset / proxy（enabled、url、noProxy） |
-| `POST /proxy/test` | 出网代理探测：同一目标「直连 / 代理」各一次，返回状态与耗时（判断是否被墙） |
-| `POST /books` `/rules` `/prompts` `/snapshots/restore` `/proposals/close|apply` `/lg/export|upload|verify` `/agent/*` | 各域写操作 |
+| `POST /proxy/test` | 出网代理探测：同一目标「直连 / 代理」各一次，返回状态与耗时（判断是否被墙）+ `curlFallback`/`curlAvailable` |
+| `POST /books` `/rules` `/prompts` `/snapshots/restore` `/proposals/close|apply` `/lg/export|upload|verify` | 各域写操作 |
+| `POST /agent/session/rename` `/agent/session/delete` | 会话重命名 / 删除（删除连带消息与决定；跑轮次中 409） |
+| `POST /agent/message/regenerate` `/agent/message/edit` | 重新生成该轮回答 / 编辑用户消息后重发（均按截断点重跑，见 §4.7） |
 
 写请求的 Origin 必须在白名单内；`/lg/verify` 与 `lg-import` 的文件路径必须在 `exports/` 或 `uploads/` 下（防任意文件读）。
 
@@ -152,9 +172,11 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 | warnings 全量替换而非增量 | 源译文随时变，增量难保一致；全量 + 事务简单可靠 |
 | 工作区 CodeAct 用文件（JSONL）跨调用 | 与 LG 契约一致；脚本无状态、可审计（changes 文件即提交意图） |
 | 沙箱网络开放 | 与 LG 一致；fs 由 `--permission` 收紧，子进程/worker 被默认拒绝 |
-| 自动同步挂 30s glance tick | 零新增定时器；指纹短路保证无变化零请求 |
+| 自动同步挂 5s glance tick | 零新增定时器；指纹短路保证无变化零请求；5s 才能让控制台「从站点同步」按钮几秒内生效（探测是免凭据的本机回环请求，代价可忽略） |
 | 出网代理自研转发（而非 Node `NODE_USE_ENV_PROXY`） | 内置开关只在进程启动前解析代理环境变量、首值终身缓存，做不到「保存即生效」；自研转发挂在既有 fetchImpl 收口（site-client + scheduler 两条请求路径），配置每请求现读，且无 Node 版本门槛 |
+| 站点请求带传输层重试（默认 3 次退避） | 站点只经代理可达、链路抖动频繁（整本导入实测约 1/3 请求首发出错）；只重试网络层失败、HTTP 状态错误照旧直抛，且章/术语表写都是内容幂等的，重试不改语义。次数在控制台「站点与凭据」可调 0–8（默认 3：整本 167 章逐章抓取每轮约 2 章失败，8 次基本清零） |
 | cookie 通道不做 | 站点 API 只认 Bearer；真正续期的 refresh cookie 是 HttpOnly，页面读不到 |
+| 滚动条两侧对称预留（`scrollbar-gutter: stable both-edges`） | 聊天区滚动条占在窗口内部，会把居中的 928px 消息列挤偏半个滚动条宽（8px），而输入框/审批面板在窗口外不跟着动 → 一长对话就错位；两侧预留后内容盒宽度恒定，布局与滚动条有无无关（各页内容列同理保持居中） |
 | UI_HTML 内嵌脚本禁反斜杠转义 | 模板字面量会吃掉 `\n` → 整页静默失效；守卫测试在 daemon-test |
 
 ## 7. 测试矩阵
@@ -164,9 +186,9 @@ SCAN（分块缓存）→ EXTRACT（爬楼式轮次收敛）→ VERIFY（证据�
 | 用户脚本引擎 | `tools/engine-test.mjs` | mock 8788 |
 | 油猴页面流 | `tools/.e2e-*.js`（inject）+ `tools/.run-suite.mjs` | mock 8788/8790 + CDP 车道 |
 | daemon 纯函数 | quality / translate / processors / prompt / glossary-io / lg-align / agent / agent-skills `-test.mjs` | 无 |
-| daemon 代理 | `daemon/proxy-test.mjs`（本地回环测试代理 + 自签证书 fixture） | 无 |
-| daemon 冒烟 | `daemon/daemon-test.mjs`（102 例：管线/调度/质检/Agent/工作区/LG 导入/连接/托盘端口） | mock 8790 |
-| 浏览器 e2e | `.e2e-agent-ui.js`（助手页）、`.e2e-lg-gui.js`（导入 GUI）、`.e2e-daemon-sync.js`（连接/自动同步） | mock 8790 + stub 7343 + CDP 车道 |
+| daemon 代理 | `daemon/proxy-test.mjs`（本地回环测试代理 + 自签证书 fixture；含 curl 兜底：回落成功 / 开关关闭 / noRetry 不触发 / curl 走代理） | 无 |
+| daemon 冒烟 | `daemon/daemon-test.mjs`（151 例：管线/调度/质检/Agent/会话操作/工作区/LG 导入（含站点 mode=jp 自动对齐）/站点请求重试/连接/术语表 400 幂等/401 分类/托盘端口） | mock 8790 |
+| 浏览器 e2e | `.e2e-agent-ui.js`（助手页）、`.e2e-agent-session-ops.js`（会话操作）、`.e2e-lg-gui.js`（导入 GUI：mock 车道一把 51 项；真机分阶段 `__LG_GUI_TEST` + `cdp setfiles` 真实文件）、`.e2e-daemon-sync.js`（连接/自动同步，含只推 pipeline）、`.e2e-workspace-backup.js`（工作区备份 + pipeline 双仓/jobOnly）、`.e2e-workspace-migrate.js`（旧仓翻译器迁移） | mock 8790 + stub 7343 + CDP 车道 |
 | 真机 | TM 重装（sha256 整文件比对）→ 实站全流程 | 测试 profile + LNA 旗标 |
 
 ## 8. 版本与发布

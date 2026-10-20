@@ -8,10 +8,11 @@ const check = (label, cond, extra) => { out.checks.push({ label, ok: !!cond, ext
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (fn, ms = 4000) => { const t0 = Date.now(); while (!fn() && Date.now() - t0 < ms) await sleep(80); return fn(); };
 
-const GPT_KEY = 'workspace-gpt';
+const GPT_KEY = 'workspace-gpt-pipeline';   // GPT worker 仓（旧 workspace-gpt 只留 jobs）
+const GPT_JOBS = 'workspace-gpt';
 const SK_KEY = 'sakura-workspace';
 const savedKeys = {};
-[GPT_KEY, SK_KEY].forEach((k) => { savedKeys[k] = localStorage.getItem(k); });
+[GPT_KEY, GPT_JOBS, SK_KEY].forEach((k) => { savedKeys[k] = localStorage.getItem(k); });
 const origHref = location.href;
 
 const readData = (key) => { try { return JSON.parse(localStorage.getItem(key)); } catch (e) { return undefined; } };
@@ -85,10 +86,18 @@ try {
 
     // ---------- E. 主循环 href 变化 → StorageUtils.update()：读改写回 + 缺字段补齐 ----------
     localStorage.setItem(GPT_KEY, JSON.stringify({ workers: [{ id: '仅有worker' }] }));   // 故意缺 jobs/uncompletedJobs
+    localStorage.setItem(GPT_JOBS, JSON.stringify({ jobs: [{ id: 'j1' }] }));             // 任务仓也缺字段
     history.pushState({}, '', '/workspace/gpt?b=1');   // 与 D 的 URL 不同，确保 href 判定变化成立
-    await waitFor(() => { const d = readData(GPT_KEY); return d && Array.isArray(d.jobs) && Array.isArray(d.uncompletedJobs); }, 6000);
+    await waitFor(() => {
+        const d = readData(GPT_KEY);
+        const j = readData(GPT_JOBS);
+        return d && Array.isArray(d.jobs) && Array.isArray(d.uncompletedJobs)
+            && j && Array.isArray(j.workers) && Array.isArray(j.jobs) && Array.isArray(j.uncompletedJobs);
+    }, 6000);
     const updated = readData(GPT_KEY);
-    check('update()：href 切到 workspace 后读改写回并补齐缺字段', updated && updated.workers.length === 1 && Array.isArray(updated.jobs) && Array.isArray(updated.uncompletedJobs), updated && Object.keys(updated));
+    const updatedJobs = readData(GPT_JOBS);
+    check('update()：href 切到 workspace 后读改写回并补齐 worker 仓缺字段', updated && updated.workers.length === 1 && Array.isArray(updated.jobs) && Array.isArray(updated.uncompletedJobs), updated && Object.keys(updated));
+    check('update()：worker 仓与任务仓分家时两个键都归一化', updatedJobs && updatedJobs.jobs.length === 1 && Array.isArray(updatedJobs.workers) && Array.isArray(updatedJobs.uncompletedJobs), updatedJobs);
     history.replaceState({}, '', origHref);
     // 非 workspace 路径下再切一次：不应报错、数据保持
     localStorage.setItem(GPT_KEY, JSON.stringify({ workers: [], jobs: [], uncompletedJobs: [] }));

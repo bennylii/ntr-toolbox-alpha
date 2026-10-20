@@ -11,8 +11,9 @@ const stage = (modules) => localStorage.setItem(KEY, JSON.stringify({ version: 2
 
 try {
   const before = JSON.parse(backup || '{}');
-  // 基线：优先用存储里的模块数；全新 origin（例如 mock 离线测试页）localStorage 是空的，就退回当前实例的模块数
-  const baselineCount = (before.modules && before.modules.length) || box.configuration.modules.length;
+  // 基线 = 当前实例的模块集（代码为准）：存储里的那份可能来自旧版本，加过新模块就会对不上，
+  // 而这里要钉的其实是「拿老配置重载后模块集合不丢不加」
+  const baselineCount = box.configuration.modules.length;
 
   // 1) 老配置：老模块名 + 缺新设置项 + 陈旧白名单 + 幽灵设置项 + 缺模块
   stage([

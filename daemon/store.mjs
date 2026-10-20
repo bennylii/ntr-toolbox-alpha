@@ -249,6 +249,20 @@ export class Store {
     const r = this.db.prepare('DELETE FROM agent_messages WHERE sessionId = ? AND seq <= ?').run(sessionId, Number(upToSeq) || 0);
     return Number(r.changes) || 0;
   }
+  // 截断到 fromSeq 之前（含该条）：重新生成 / 编辑重发用；删尾后新消息会复用 seq，调用方需整表重建 UI
+  deleteAgentMessagesFrom(sessionId, fromSeq) {
+    const r = this.db.prepare('DELETE FROM agent_messages WHERE sessionId = ? AND seq >= ?').run(sessionId, Number(fromSeq) || 0);
+    return Number(r.changes) || 0;
+  }
+  // 删除会话：连带消息与决定（schema 无外键，手动三连）
+  deleteAgentSession(id) {
+    const sid = String(id || '');
+    if (sid === '' || !this.getAgentSession(sid)) return false;
+    this.db.prepare('DELETE FROM agent_messages WHERE sessionId = ?').run(sid);
+    this.db.prepare('DELETE FROM agent_decisions WHERE sessionId = ?').run(sid);
+    this.db.prepare('DELETE FROM agent_sessions WHERE id = ?').run(sid);
+    return true;
+  }
   agentSessionUsage(sessionId) {
     const rows = this.db.prepare("SELECT usageJson FROM agent_messages WHERE sessionId = ? AND usageJson != ''").all(sessionId);
     const total = { promptTokens: 0, completionTokens: 0, requests: 0 };

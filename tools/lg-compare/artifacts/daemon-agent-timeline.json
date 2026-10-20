@@ -1,0 +1,99 @@
+{
+  "result": {
+    "ok": true,
+    "content": "完成（mock）：经过 4 次工具调用。",
+    "steps": 5
+  },
+  "roles": [
+    "user",
+    "assistant",
+    "tool",
+    "assistant",
+    "tool",
+    "assistant",
+    "tool",
+    "assistant",
+    "tool",
+    "assistant"
+  ],
+  "events": [
+    {
+      "type": "user_message",
+      "text": "@writing-guide 演示：技能点名注入 → read_skill → 审批写入 → 提问"
+    },
+    {
+      "type": "skill_pinned"
+    },
+    {
+      "type": "step"
+    },
+    {
+      "type": "assistant_message"
+    },
+    {
+      "type": "tool_result"
+    },
+    {
+      "type": "skill_pinned"
+    },
+    {
+      "type": "step"
+    },
+    {
+      "type": "assistant_message"
+    },
+    {
+      "type": "doing",
+      "text": "daemon agent 演示：进度汇报"
+    },
+    {
+      "type": "tool_result"
+    },
+    {
+      "type": "skill_pinned"
+    },
+    {
+      "type": "step"
+    },
+    {
+      "type": "assistant_message"
+    },
+    {
+      "type": "decision",
+      "decisionId": 1
+    },
+    {
+      "type": "decision_resolved",
+      "decisionId": 1
+    },
+    {
+      "type": "tool_result"
+    },
+    {
+      "type": "skill_pinned"
+    },
+    {
+      "type": "step"
+    },
+    {
+      "type": "assistant_message"
+    },
+    {
+      "type": "question",
+      "decisionId": 2
+    },
+    {
+      "type": "tool_result"
+    },
+    {
+      "type": "skill_pinned"
+    },
+    {
+      "type": "step"
+    },
+    {
+      "type": "assistant_message",
+      "text": "完成（mock）：经过 4 次工具调用。"
+    }
+  ]
+}

@@ -6,7 +6,7 @@
 
 ## 功能
 
-- **AI提取术语表** — 分块 → LLM 提取 → 爬楼式轮次收敛（失败块次轮重试）；`预览 / 写入` 两种模式；翻译器下拉（读 GPT 工作区 / BETA 工作区）、临时端点（测试用）、调试日志（Console + 环形缓冲 + 导出）。
+- **AI提取术语表** — 分块 → LLM 提取 → 爬楼式轮次收敛（失败块次轮重试）；`预览 / 写入` 两种模式；翻译器下拉（只读新 GPT 工作区 `workspace-gpt-pipeline`）、临时端点（测试用）、调试日志（Console + 环形缓冲 + 导出）。
 - **术语队列** — IndexedDB 持久化的任务队列：
   - 断点续跑（分块缓存，成功块不重发）、行覆盖率显示；
   - 「重试」只补没覆盖到的正文行；「重跑」整本重算；工具栏「重试未完成」一键收拢没跑完的任务（都只改状态，开跑由「开始/续跑」控制）；
@@ -16,9 +16,9 @@
 - **导入术语表(KWG)** — KWG 默认 `output.json` 数组 / 扁平 JSON / `原文 => 译文` 文本 / 剪贴板 / 点选或拖入文件，统一进 diff 弹层（新增/冲突/相同/仅已有）。
 - **回滚术语表** — 每次写入前自动快照（每目标保留最近 20 版）→ 选版本 → diff 预览 → 回滚。
 - **站点自检** — 启动/路由切换时检查脚本依赖的「站点挂点」是否因改版变动，变动时面板角标告警。
-- **Daemon 连接** — 把站点凭据（auth-v2 token）与 GPT 工作区翻译器推给本地 daemon：一键探测+同步；「自动同步」默认开（页面加载即推、token 刷新后 ≤30s 自动重推、指纹去重无变化零请求）；连接状态行 + 行尾在线/离线角标。
-- 翻译器小工具：添加/删除/启动翻译器、复制翻译器到 BETA 工作区、工作区翻译器自动同步、填充术语表（可自动翻页至末页）。
-- 本地 daemon（GPT 翻译 worker + 控制台 + Agent + LG 互通）见 **`daemon/README.md`**；安装后油猴会自动把凭据同步过去。站点被墙时在控制台设置页「**网络代理**」填本机代理（保存即生效，直连列表默认含回环），一并按「测试」做直连/代理对比探测。
+- **Daemon 连接** — 把站点凭据（站点会话键里的 token，`web-kit:session:v1` → `auth-v2` → `auth` 依次回落到第一个能读到的）与 GPT 工作区翻译器（只取 `workspace-gpt-pipeline`）推给本地 daemon：一键探测+同步；「自动同步」默认开（页面加载即推、token 刷新后 ≤5s 自动重推、指纹去重无变化零请求）；控制台「站点与凭据」里的「从站点同步」按钮可当场请求推送；连接状态行 + 行尾在线/离线角标。
+- 翻译器小工具：添加/删除/启动翻译器、合并旧工作区翻译器（把旧 `workspace-gpt` 里遗留的翻译器一次性迁到新 `workspace-gpt-pipeline`）、工作区备份（导出/导入翻译器与任务队列）、填充术语表（可自动翻页至末页）。
+- 本地 daemon（GPT 翻译 worker + 控制台 + Agent + LG 互通）见 **`daemon/README.md`**；安装后油猴会自动把凭据同步过去。**双击仓库根 `daemon.cmd` 一键启动**（已在跑则只开控制台；`daemon.cmd restart` 换新代码）。站点被墙时在控制台设置页「**网络代理**」填本机代理（保存即生效，直连列表默认含回环），一并按「测试」做直连/代理对比探测。
 
 ## 目录导航（新会话/新读者从哪开始）
 
@@ -32,12 +32,17 @@
 | 版本记录 | [`CHANGELOG.md`](CHANGELOG.md) |
 | KeywordGacha 原项目（术语管线出处） | `keywordgacha/`（junction 挂载的独立 fork 仓库，不入本库） |
 | LinguaGacha 上游（调度/质检/提示词/LG 互通的借鉴出处） | `linguagacha/`（junction 挂载，pin `MANUAL_BUILD_v0.125.0`，不入本库） |
+| auto-novel 站点源码（站点契约出处；与上游的对齐基线与历次核对结论） | [`docs/upstream-sync.md`](docs/upstream-sync.md) |
 | 给 AI 代理的工作说明 | [`AGENTS.md`](AGENTS.md)（新会话自动加载） |
 
 ## 安装
 
 1. 安装 Tampermonkey。
-2. 安装 `ntr-toolbox-alpha.user.js`（或 `ntr-toolbox-alpha.dev.user.js`，开发构建：`@version` 带 `-dev` 后缀、无更新 URL）。
+2. 装脚本，三选一：
+   - 直接装仓库里的 `ntr-toolbox-alpha.user.js`（正式构建）；
+   - 走本地 mock 装（**需先起 mock**：`node mock-llm/server.mjs`）：浏览 <http://127.0.0.1:8788/ntr-toolbox-alpha.user.js>（mock 会把主文件的 `@updateURL/@downloadURL` 就地注释，防止装完被自动更新顶掉）；
+   - 开发构建：`node tools/.gen-dev.mjs` 生成后装 <http://127.0.0.1:8788/ntr-toolbox-alpha.dev.user.js>（`@version` 带 `-dev` 后缀、无更新地址）。
+3. 脚本头**没有** `@updateURL/@downloadURL` → **Tampermonkey 不会自动更新**：拿到新代码要重新打开对应 URL 装一次，并在站点页面**刷新**后才生效（测试 profile 里重装 ≠ 你日常浏览器里也更新了，两边各自要装）。
 
 ## 开发
 

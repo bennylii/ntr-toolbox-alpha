@@ -27,6 +27,7 @@
 1. `renderSystemPrompt(template)`：全槽位默认 → 直接返回 `TRANSLATE_SYSTEM_PROMPT`（逐字一致）；否则 `prefix + '\n' + base + (suffix ? '\n' + suffix : '')`，`{format_rules}` 被协议文本替换。
 2. 模板无效判定：缺少 `{format_rules}`、渲染后不含协议关键词（行数/编号）或长度 <10 字符 → **整体回退默认模板**并记警告。
 3. 用户消息由 `daemon/translate.mjs` 现有逻辑生成（术语表注入 + `#i:line` + 单行「原文到此为止」），模板系统不改动这部分结构；`thinking` 段追加在用户消息最前。
+   - 2026-10-12 追加：用户消息还可带**代码注入**的 `【参考上文】/【参考下文】` 两块（相邻段上下文，`config.translate.contextBefore/contextAfter`，默认 0 行 = **不出现，用户消息与旧实现逐字相同**；渲染在 `thinking` 之后、术语表之前，块内行首 `#` 转全角）。与 `{format_rules}` 一样属代码注入、模板不可覆盖；`buildTranslateMessages` 的解析假设（`#n:` 编号行）不受影响。
 4. 模板来源优先级：该书 `prompts(bookKey)` → 全局 `prompts('')` → 代码默认。空文本 = 未设置。
 5. 模板变更不影响段缓存键（提示词属于模型输入侧；如需强制重译，用 `translate --level all`）。
 

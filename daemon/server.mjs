@@ -11,10 +11,11 @@ import { PROMPT_SLOTS, DEFAULT_TEMPLATE, FORMAT_RULES } from './prompt.mjs';
 import { UI_HTML } from './ui.mjs';
 import { createJobQueue } from './job-queue.mjs';
 import { restoreSnapshot, applyProposal } from './glossary-io.mjs';
-import { exportBookSource, splitResultLines, verifyImport } from './lg-align.mjs';
+import { exportBookSource, splitResultLines, verifyImport, alignLgResult, readImportState } from './lg-align.mjs';
 import { PRESET_NAMES, presetInfo, readTextPreserveConfig } from './preserve.mjs';
 import { VERSION } from './version.mjs';
-import { createProxyFetch, normalizeProxyConfig, assertProxyConfig } from './proxy.mjs';
+import { createProxyFetch, normalizeProxyConfig, assertProxyConfig, curlAvailable } from './proxy.mjs';
+import { resetSummaryIfBeyond } from './agent-session.mjs';
 
 const DAEMON_DIR = path.dirname(fileURLToPath(import.meta.url));
 const UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
@@ -59,7 +60,19 @@ const maskKey = (key) => {
   return s.length <= 8 ? s.slice(0, 2) + '…' : s.slice(0, 4) + '…' + s.slice(-2);
 };
 
-export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler = null, queue, makeClient, engine, agentLoop, agentEvents, port = 7331, log = console, lgImportRunner = null, lgDirs = null }) {
+// 站点请求传输层重试次数（config.site.retries；默认 3，0–8）
+const normalizeSiteRetries = (raw) => {
+  const n = Math.floor(Number(raw && raw.retries));
+  return Number.isFinite(n) ? Math.max(0, Math.min(8, n)) : 3;
+};
+
+// 翻译上下文行数（config.translate.contextBefore/contextAfter；默认 0 = 关闭，0–20）
+const normalizeContextLines = (raw, field) => {
+  const n = Math.floor(Number(raw && raw[field]));
+  return Number.isFinite(n) ? Math.max(0, Math.min(20, n)) : 0;
+};
+
+export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, scheduler, agentScheduler = null, queue, makeClient, engine, agentLoop, agentEvents, port = 7331, log = console, lgImportRunner = null, lgReadbackRunner = null, lgDirs = null }) {
   // 单队列（控制面 /run 与 Agent 工具共用；未传入时按本进程管线自建）
   const jobQueue = queue || createJobQueue({
     resolveRunner: (job) => ({ glossary: glossaryPipeline, check: checkPipeline, translate: pipeline }[job]),
@@ -68,7 +81,8 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
 
   const llmConfig = () => store.getConfig('llm') || {};
   const schedulerOptionsFrom = (llm) => ({
-    ...(llm.maxInFlight !== undefined ? { maxInFlight: Math.max(1, Number(llm.maxInFlight) || 1) } : {}),
+    // maxInFlight 0 = 自动伸缩（起步 4，429/503 减半，上限 16）——不能被 `|| 1` 吞成 1
+    ...(llm.maxInFlight !== undefined ? { maxInFlight: Math.max(0, Math.floor(Number(llm.maxInFlight) || 0)) } : {}),
     ...(llm.rpm !== undefined ? { rpm: Math.max(0, Number(llm.rpm) || 0) } : {}),
     ...(llm.transportRetries !== undefined ? { transportRetries: Math.max(0, Number(llm.transportRetries) || 0) } : {}),
     ...(llm.maxPromptChars !== undefined ? { maxPromptChars: Math.max(1000, Number(llm.maxPromptChars) || 12000) } : {}),
@@ -77,6 +91,17 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
 
   // 助手池显式配置 = config.agent.workers 非空；空/缺省 = 跟随翻译池（/auth 推送镜像过去）
   const agentPoolExplicit = (cfgAgent) => Array.isArray(cfgAgent && cfgAgent.workers) && cfgAgent.workers.length > 0;
+
+  // @技能点名：解析文本里的技能；未知名返回错误与可用清单（发送/重发/编辑共用）
+  // 查询前重扫技能目录（用户技能可被面板/沙箱运行时增改，对齐 LG「每查询现扫磁盘」）
+  const agentMentions = (text) => {
+    const s = String(text == null ? '' : text);
+    if (!s.includes('@') || !agentLoop || !agentLoop.skills) return { skills: [] };
+    try { agentLoop.skills.refresh?.(); } catch { /* 沿用上次快照 */ }
+    const m = agentLoop.skills.mentions(s);
+    if (m.unknown.length > 0) return { error: `未知技能：${m.unknown.join('、')}`, knownSkills: agentLoop.skills.list().map((x) => x.name) };
+    return { skills: m.skills };
+  };
 
   // worker 列表合并：GET 永远只回掩码 key；客户端保存时 key 留空（或仍是掩码）= 沿用同 id 既有明文 key
   const maskMergeWorkers = (incoming, existing) => {
@@ -93,6 +118,14 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
 
   const serveConfig = () => store.getConfig('serve') || {};
   const extraOrigins = () => (Array.isArray(serveConfig().origins) ? serveConfig().origins : []);
+
+  // 「从站点同步」请求标志：控制台置位 → 油猴在 /ping 里看到 → 推一次凭据（/auth 清位）；5 分钟过期防陈旧请求
+  const AUTH_REQUEST_TTL_MS = 5 * 60 * 1000;
+  const authRequestFresh = () => {
+    const r = store.getConfig('authRequest');
+    if (!r || !r.at) return null;
+    return (Date.now() - Number(r.at)) < AUTH_REQUEST_TTL_MS ? r : null;
+  };
 
   // LG 译文导入（GUI 与 CLI 同一套函数）：文件只在 exports/ 与 uploads/ 流转
   const lgDirsResolved = {
@@ -135,7 +168,8 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         return;
       }
       if (req.method === 'GET' && url.pathname === '/ping') {
-        send(200, { ok: true, name: 'ntr-daemon', port, version: VERSION });
+        // pendingAuth：控制台请求了「从站点同步」，等油猴下次探测时推凭据（免凭据接口，别泄露别的）
+        send(200, { ok: true, name: 'ntr-daemon', port, version: VERSION, pendingAuth: Boolean(authRequestFresh()) });
         return;
       }
       if (req.method === 'GET' && url.pathname === '/status') {
@@ -171,8 +205,14 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
             tokenSet: Boolean(store.getConfig('token')),
             workers: maskList(workers),
             lastSync: store.getConfig('lastSync') || null,
+            authRequest: authRequestFresh(),
             serve: { port, ...serveConfig() },
             proxy: normalizeProxyConfig(store.getConfig('proxy')),
+            site: { retries: normalizeSiteRetries(store.getConfig('site')) },
+            translate: {
+              contextBefore: normalizeContextLines(store.getConfig('translate'), 'contextBefore'),
+              contextAfter: normalizeContextLines(store.getConfig('translate'), 'contextAfter'),
+            },
             textPreserve: { ...readTextPreserveConfig(store), presets: presetInfo() },
           },
         });
@@ -220,6 +260,25 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           }
           store.setConfig('serve', next);
         }
+        if (body.site && typeof body.site === 'object') {
+          const cur = store.getConfig('site') || {};
+          const n = Math.floor(Number(body.site.retries));
+          if (Number.isFinite(n)) {
+            // 站点请求传输层重试次数（墙内代理链路抖动大时加档；0=不重试，上限 8）
+            store.setConfig('site', { ...cur, retries: Math.max(0, Math.min(8, n)) });
+          }
+        }
+        if (body.translate && typeof body.translate === 'object') {
+          const cur = store.getConfig('translate') || {};
+          const next = { ...cur };
+          // 相邻段上下文行数（0 = 关闭；0–20）。管线每轮现读，保存即生效
+          for (const field of ['contextBefore', 'contextAfter']) {
+            if (body.translate[field] === undefined) continue;
+            const n = Math.floor(Number(body.translate[field]));
+            if (Number.isFinite(n)) next[field] = Math.max(0, Math.min(20, n));
+          }
+          store.setConfig('translate', next);
+        }
         if (body.textPreserve && typeof body.textPreserve === 'object') {
           const cur = store.getConfig('textPreserve') || {};
           const raw = String(body.textPreserve.preset || '');
@@ -258,9 +317,9 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         };
         const [direct, proxied] = await Promise.all([
           probe((...args) => globalThis.fetch(...args)),
-          probe(createProxyFetch({ getProxy: () => cfg })),
+          probe(createProxyFetch({ getProxy: () => cfg, log: (m) => log.log(m) })),
         ]);
-        send(200, { ok: true, target: target.href, config: cfg, direct, proxied });
+        send(200, { ok: true, target: target.href, config: cfg, direct, proxied, curlFallback: cfg.curlFallback !== false, curlAvailable: curlAvailable() });
         return;
       }
       if (req.method === 'GET' && url.pathname === '/rules') {
@@ -401,6 +460,14 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         send(200, { ok: true, ...result });
         return;
       }
+      // 控制台「从站点同步」：置一条同步请求，油猴下次探测（≤5s）看到 pendingAuth 就推一次凭据
+      if (req.method === 'POST' && url.pathname === '/auth/request') {
+        const at = Date.now();
+        store.setConfig('authRequest', { at, ua: uaSummary(req.headers['user-agent']) });
+        log.log('[auth] 已请求站点页面同步凭据（等待推送）');
+        send(200, { ok: true, at });
+        return;
+      }
       if (req.method === 'POST' && url.pathname === '/auth') {
         const body = await readBody();
         if (body.token) store.setConfig('token', body.token);
@@ -418,6 +485,7 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           tokenSet: Boolean(body.token),
           mode: body.auto === true ? 'auto' : 'manual',
         });
+        store.setConfig('authRequest', null);   // 推送已到：清掉同步请求标志
         log.log('[auth] 凭据/翻译器配置已更新');
         send(200, { ok: true, workers: Array.isArray(body.workers) ? body.workers.length : undefined });
         return;
@@ -425,8 +493,8 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
       if (req.method === 'POST' && url.pathname === '/run') {
         const body = await readBody();
         if (!body.bookKey) { send(400, { ok: false, error: '缺少 bookKey' }); return; }
-        const job = ['glossary', 'check', 'translate', 'lg-import'].includes(body.job) ? body.job : 'translate';
-        const runner = { glossary: glossaryPipeline, check: checkPipeline, translate: pipeline, 'lg-import': lgImportRunner }[job];
+        const job = ['glossary', 'check', 'translate', 'lg-import', 'lg-readback'].includes(body.job) ? body.job : 'translate';
+        const runner = { glossary: glossaryPipeline, check: checkPipeline, translate: pipeline, 'lg-import': lgImportRunner, 'lg-readback': lgReadbackRunner }[job];
         if (!runner) { send(400, { ok: false, error: `${job} 管线未装配` }); return; }
         const options = { ...(body.options || {}) };
         if (job === 'translate' && body.level) options.level = body.level;
@@ -434,6 +502,11 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           options.txtPath = resolveLgPath(options.txtPath);
           options.manifestPath = resolveLgPath(options.manifestPath);
           if (!options.txtPath || !options.manifestPath) { send(400, { ok: false, error: 'lg-import 的 txtPath/manifestPath 必须位于 exports/ 或 uploads/ 下' }); return; }
+        }
+        if (job === 'lg-readback') {
+          options.txtPath = resolveLgPath(options.txtPath);
+          options.manifestPath = options.manifestPath ? resolveLgPath(options.manifestPath) : '';
+          if (!options.txtPath) { send(400, { ok: false, error: 'lg-readback 的 txtPath 必须位于 exports/ 或 uploads/ 下' }); return; }
         }
         const { id } = jobQueue.enqueue({ bookKey: body.bookKey, job, options });
         send(202, { ok: true, accepted: true, queued: true, id, bookKey: body.bookKey, job });
@@ -478,17 +551,26 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
           const lines = splitResultLines(fs.readFileSync(txtPath, 'utf8'));
           const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
           const client = makeClient(book);
-          const report = await verifyImport({
-            resultLines: lines,
-            manifest,
-            getChapter: (chapterId, volumeId) => client.getChapterTask(book, chapterId, 'gpt', volumeId),
-          });
+          // 站点「下载原文」经 LG 翻译的 txt 是另一种格式：行数不符且像站点导出时自动抓原文对齐
+          const aligned = await alignLgResult({ client, book, manifest, resultLines: lines, log: (m) => log.log(m) });
+          const report = aligned.fatal
+            ? { globalError: aligned.fatal, okCount: 0, total: 0, untranslated: 0, chapters: [] }
+            : await verifyImport({
+              resultLines: aligned.lines,
+              manifest,
+              getChapter: (chapterId, volumeId) => client.getChapterTask(book, chapterId, 'gpt', volumeId),
+            });
           send(200, {
             ok: true,
             globalError: report.globalError,
+            converted: aligned.converted,
+            convertMode: aligned.convertMode || '',
+            convertNote: aligned.note || '',
+            convertError: aligned.alignError || '',
             okCount: report.okCount,
             total: report.total,
             untranslated: report.untranslated,
+            needAuth: !!report.needAuth,
             linesIn: lines.length,
             linesTotal: manifest.linesTotal || 0,
             chapters: report.chapters.map((c) => ({ chapterId: c.chapterId, title: c.title || '', count: c.count, start: c.start, ok: c.ok, reason: c.reason || '' })),
@@ -499,12 +581,25 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         }
         return;
       }
+      // 断点续跑状态（lg-import）：已提交章数 + 最近更新（GUI 显示「断点：已提交 N 章」）
+      if (req.method === 'GET' && url.pathname === '/lg/import-state') {
+        const key = url.searchParams.get('book') || '';
+        const book = store.getBook(key);
+        if (!book) { send(400, { ok: false, error: 'book 不存在' }); return; }
+        const st = readImportState(store, key);
+        send(200, { ok: true, bookKey: key, doneCount: Object.keys(st.done).length, manifestId: st.manifestId, updatedAt: st.updatedAt });
+        return;
+      }
       // ---- Agent（本地助手） ----
       if (req.method === 'GET' && url.pathname === '/agent/config') {
         const cfg = store.getConfig('agent') || {};
+        const live = (agentLoop && agentLoop.options) || {};
         send(200, {
           ok: true,
           approvalMode: cfg.approvalMode === 'auto' ? 'auto' : 'manual',
+          // 追问超时策略：优先回读循环层现值（保存即生效），未装配时回退配置/默认
+          questionDefaultFirst: live.questionDefaultFirst !== undefined ? live.questionDefaultFirst === true : cfg.questionDefaultFirst !== false,
+          decisionTimeoutMs: Math.max(5000, Number(live.decisionTimeoutMs) || Number(cfg.decisionTimeoutMs) || 300000),
           tools: agentLoop ? [...agentLoop.registry.keys()] : [],
           sessions: store.listAgentSessions(100).map((x) => ({ id: x.id, bookKey: x.bookKey, title: x.title, state: x.state, updatedAt: x.updatedAt, running: agentLoop ? agentLoop.running(x.id) : false })),
         });
@@ -521,7 +616,103 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
       }
       if (req.method === 'GET' && url.pathname === '/agent/skills') {
         if (!agentLoop || !agentLoop.skills) { send(400, { ok: false, error: '技能目录未装配' }); return; }
-        send(200, { ok: true, skills: agentLoop.skills.list().map((s) => ({ name: s.name, description: s.description, files: s.files.length })) });
+        try { agentLoop.skills.refresh?.(); } catch { /* 沿用上次快照 */ }
+        send(200, {
+          ok: true,
+          skills: agentLoop.skills.list().map((s) => ({
+            name: s.name, description: s.description, files: s.files,
+            hidden: s.disableModelInvocation === true,
+            source: s.source === 'user' ? 'user' : 'builtin',
+            writable: s.source === 'user',
+          })),
+        });
+        return;
+      }
+      // 技能面板读单文件：read() 自带防逃逸（拒绝 .. / 绝对路径 / 越界），端点只做封装与截断
+      if (req.method === 'GET' && url.pathname === '/agent/skill/file') {
+        if (!agentLoop || !agentLoop.skills) { send(400, { ok: false, error: '技能目录未装配' }); return; }
+        try { agentLoop.skills.refresh?.(); } catch { /* 沿用上次快照 */ }
+        const name = url.searchParams.get('name') || '';
+        const relPath = url.searchParams.get('path') || 'SKILL.md';
+        try {
+          const r = agentLoop.skills.read(name, relPath);
+          const content = String(r.content || '');
+          send(200, { ok: true, name: r.skill, path: r.path, content: content.slice(0, 100000), truncated: content.length > 100000 });
+        } catch (e) {
+          const code = (e && e.code) || '';
+          send(code === 'skill_not_found' || code === 'file_not_found' ? 404 : 400, { ok: false, error: (e && e.message) || String(e) });
+        }
+        return;
+      }
+      // ---- 技能写端点（面板/人工用；agent 生成技能走沙箱写 daemon/skills-user）----
+      // 写守卫对称于 read()：仅 user 根、拒绝 .. / 绝对路径 / 越界；保存 tmp+rename 原子写
+      if (req.method === 'POST' && url.pathname === '/agent/skill/save') {
+        if (!agentLoop || !agentLoop.skills) { send(400, { ok: false, error: '技能目录未装配' }); return; }
+        const body = await readBody();
+        try { agentLoop.skills.refresh?.(); } catch { /* ignore */ }
+        const skill = agentLoop.skills.get(String(body.name || ''));
+        if (!skill) { send(404, { ok: false, error: `技能不存在：${body.name}` }); return; }
+        if (skill.source !== 'user') { send(403, { ok: false, error: '内置技能只读（保存到用户技能目录可覆盖同名内置）' }); return; }
+        const rel = String(body.path || 'SKILL.md').replace(/\\/g, '/');
+        if (rel === '' || rel.startsWith('/') || rel.split('/').includes('..')) { send(400, { ok: false, error: `非法路径：${body.path}` }); return; }
+        const full = path.resolve(skill.dir, rel);
+        if (full !== skill.dir && !full.startsWith(skill.dir + path.sep)) { send(400, { ok: false, error: `路径越界：${body.path}` }); return; }
+        const content = String(body.content == null ? '' : body.content);
+        if (Buffer.byteLength(content, 'utf8') > 2 * 1024 * 1024) { send(400, { ok: false, error: '内容超过 2MB 上限' }); return; }
+        if (!fs.existsSync(path.dirname(full))) fs.mkdirSync(path.dirname(full), { recursive: true });
+        const tmp = full + '.tmp-' + Date.now();
+        fs.writeFileSync(tmp, content, 'utf8');
+        fs.renameSync(tmp, full);
+        log.log(`[skills] 保存 ${skill.name}/${rel}（${Buffer.byteLength(content, 'utf8')}B）`);
+        send(200, { ok: true, name: skill.name, path: rel });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/agent/skill/create') {
+        if (!agentLoop || !agentLoop.skills) { send(400, { ok: false, error: '技能目录未装配' }); return; }
+        const body = await readBody();
+        const userRoot = agentLoop.skills.roots.find((r) => r.source === 'user');
+        if (!userRoot) { send(400, { ok: false, error: '未装配用户技能根' }); return; }
+        const name = String(body.name || '').trim();
+        if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name) || name.length > 64) {
+          send(400, { ok: false, error: '技能名只允许小写字母/数字/中划线（如 my-skill），≤64 字符' }); return;
+        }
+        if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(name) || /[. ]$/.test(name)) { send(400, { ok: false, error: '该名称是 Windows 保留名或以点/空格结尾' }); return; }
+        const dir = path.join(userRoot.dir, name);
+        if (fs.existsSync(path.join(dir, 'SKILL.md'))) { send(409, { ok: false, error: `技能已存在：${name}` }); return; }
+        const description = String(body.description == null ? '' : body.description).trim().replace(/[\r\n]+/g, ' ').slice(0, 200);
+        const content = `---\nname: ${name}\ndescription: ${description || '（一句话描述这个技能什么时候用）'}\n---\n\n（在这里写技能正文：步骤、判据、注意事项…）\n`;
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'SKILL.md'), content, 'utf8');
+        log.log(`[skills] 新建用户技能 ${name}`);
+        send(200, { ok: true, name });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/agent/skill/delete') {
+        if (!agentLoop || !agentLoop.skills) { send(400, { ok: false, error: '技能目录未装配' }); return; }
+        const body = await readBody();
+        try { agentLoop.skills.refresh?.(); } catch { /* ignore */ }
+        const skill = agentLoop.skills.get(String(body.name || ''));
+        if (!skill) { send(404, { ok: false, error: `技能不存在：${body.name}` }); return; }
+        if (skill.source !== 'user') { send(403, { ok: false, error: '内置技能只读，不可删除' }); return; }
+        const rel = String(body.path || '').replace(/\\/g, '/');
+        if (rel === '') {
+          // 删整包：解析后必须仍在用户根内（双保险；目录来自 catalog 本身，正常不会越界）
+          const resolved = path.resolve(skill.dir);
+          const userRoot = agentLoop.skills.roots.find((r) => r.source === 'user');
+          if (!resolved.startsWith(path.resolve(userRoot.dir) + path.sep)) { send(400, { ok: false, error: '目录越界' }); return; }
+          fs.rmSync(resolved, { recursive: true, force: true });
+          log.log(`[skills] 删除用户技能 ${skill.name}`);
+          send(200, { ok: true, deleted: 'skill', name: skill.name });
+          return;
+        }
+        if (rel === 'SKILL.md') { send(400, { ok: false, error: 'SKILL.md 是技能包边界，不能单独删除（要删请删整个技能）' }); return; }
+        if (rel.startsWith('/') || rel.split('/').includes('..')) { send(400, { ok: false, error: `非法路径：${body.path}` }); return; }
+        const full = path.resolve(skill.dir, rel);
+        if (!full.startsWith(path.resolve(skill.dir) + path.sep)) { send(400, { ok: false, error: `路径越界：${body.path}` }); return; }
+        if (!fs.existsSync(full)) { send(404, { ok: false, error: `文件不存在：${rel}` }); return; }
+        fs.rmSync(full, { force: true });
+        log.log(`[skills] 删除文件 ${skill.name}/${rel}`);
+        send(200, { ok: true, deleted: 'file', name: skill.name, path: rel });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/agent/personality') {
@@ -538,8 +729,33 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
       }
       if (req.method === 'POST' && url.pathname === '/agent/session') {
         const body = await readBody();
-        const id = store.createAgentSession({ bookKey: String(body.bookKey || ''), title: String(body.title || 'agent') });
-        send(200, { ok: true, sessionId: id });
+        const sid = store.createAgentSession({ bookKey: String(body.bookKey || ''), title: String(body.title || 'agent').slice(0, 60) });
+        send(200, { ok: true, sessionId: sid });
+        return;
+      }
+      // 会话重命名（写 title 走 touchAgentSession，无独立 store 方法）
+      if (req.method === 'POST' && url.pathname === '/agent/session/rename') {
+        const body = await readBody();
+        const sid = String(body.session || '');
+        if (!sid || !store.getAgentSession(sid)) { send(404, { ok: false, error: '会话不存在' }); return; }
+        const title = String(body.title == null ? '' : body.title).trim().slice(0, 60);
+        if (title === '') { send(400, { ok: false, error: '标题不能为空' }); return; }
+        store.touchAgentSession(sid, { title });
+        send(200, { ok: true, title });
+        return;
+      }
+      // 删除会话：连带消息/决定；正在跑一轮则拒绝；挂起的决定先按拒绝收尾
+      if (req.method === 'POST' && url.pathname === '/agent/session/delete') {
+        const body = await readBody();
+        const sid = String(body.session || '');
+        if (!sid || !store.getAgentSession(sid)) { send(404, { ok: false, error: '会话不存在' }); return; }
+        if (agentLoop && agentLoop.running(sid)) { send(409, { ok: false, error: '该会话正在跑一轮（先停止再删除）' }); return; }
+        const pending = store.getPendingAgentDecision(sid);
+        if (pending) store.resolveAgentDecision(pending.id, 'rejected', { via: 'session_delete' });
+        if (agentEvents && agentEvents.forget) agentEvents.forget(sid);
+        store.deleteAgentSession(sid);
+        log.log(`[agent] 已删除会话 ${sid.slice(0, 8)}`);
+        send(200, { ok: true });
         return;
       }
       if (req.method === 'GET' && url.pathname === '/agent/snapshot') {
@@ -566,15 +782,9 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         if (!sessionId) sessionId = store.createAgentSession({ bookKey: String(body.bookKey || ''), title: text.slice(0, 40) });
         if (!store.getAgentSession(sessionId)) { send(404, { ok: false, error: '会话不存在' }); return; }
         if (agentLoop.running(sessionId)) { send(409, { ok: false, error: '该会话上一轮还在进行（可先停止）' }); return; }
-        let pinnedSkills = [];
-        if (text.includes('@') && agentLoop.skills) {
-          const m = agentLoop.skills.mentions(text);
-          pinnedSkills = m.skills;
-          if (m.unknown.length > 0) {
-            send(400, { ok: false, error: `未知技能：${m.unknown.join('、')}`, knownSkills: agentLoop.skills.list().map((x) => x.name) });
-            return;
-          }
-        }
+        const m = agentMentions(text);
+        if (m.error) { send(400, { ok: false, error: m.error, knownSkills: m.knownSkills }); return; }
+        const pinnedSkills = m.skills;
         const onEvent = (ev) => { if (agentEvents) agentEvents.publish(sessionId, ev); };
         agentLoop.runTurn(sessionId, text, {
           onEvent,
@@ -583,6 +793,61 @@ export function startServer({ store, pipeline, glossaryPipeline, checkPipeline, 
         }).then((result) => onEvent({ type: 'turn_end', ok: result.ok, error: result.error || '', steps: result.steps || 0 }))
           .catch((e) => onEvent({ type: 'turn_end', ok: false, error: String((e && e.message) || e) }));
         send(202, { ok: true, accepted: true, sessionId });
+        return;
+      }
+      // 重新生成：回退到最后一条用户消息处截断，删掉该轮全部消息后以原文重跑（不落重复的用户消息）
+      if (req.method === 'POST' && url.pathname === '/agent/message/regenerate') {
+        if (!agentLoop) { send(400, { ok: false, error: 'agent 未装配' }); return; }
+        const body = await readBody();
+        const sid = String(body.session || '');
+        if (!store.getAgentSession(sid)) { send(404, { ok: false, error: '会话不存在' }); return; }
+        if (agentLoop.running(sid)) { send(409, { ok: false, error: '该会话上一轮还在进行（可先停止）' }); return; }
+        const rows = store.listAgentMessages(sid);
+        let anchor = -1;
+        for (let i = rows.length - 1; i >= 0; i -= 1) { if (rows[i].role === 'user') { anchor = i; break; } }
+        if (anchor < 0) { send(400, { ok: false, error: '没有可重跑的轮次（会话里没有用户消息）' }); return; }
+        const text = String(rows[anchor].content || '');
+        // 保留这条用户消息本身，只丢弃它之后的助手/工具消息（否则界面上会"只有答案没有问题"）
+        const fromSeq = (Number(rows[anchor].seq) || 0) + 1;
+        const m = agentMentions(text);
+        if (m.error) { send(400, { ok: false, error: m.error, knownSkills: m.knownSkills }); return; }
+        resetSummaryIfBeyond(store, sid, fromSeq);
+        const dropped = store.deleteAgentMessagesFrom(sid, fromSeq);
+        const onEvent = (ev) => { if (agentEvents) agentEvents.publish(sid, ev); };
+        agentLoop.runTurn(sid, text, { onEvent, appendUserMessage: false, pinnedSkills: m.skills })
+          .then((result) => onEvent({ type: 'turn_end', ok: result.ok, error: result.error || '', steps: result.steps || 0 }))
+          .catch((e) => onEvent({ type: 'turn_end', ok: false, error: String((e && e.message) || e) }));
+        log.log(`[agent] 重新生成：丢弃 seq ≥ ${fromSeq} 的 ${dropped} 条消息`);
+        send(202, { ok: true, accepted: true, sessionId: sid, dropped });
+        return;
+      }
+      // 编辑某条用户消息后重发：截断到该条（含）并用新文本重跑
+      if (req.method === 'POST' && url.pathname === '/agent/message/edit') {
+        if (!agentLoop) { send(400, { ok: false, error: 'agent 未装配' }); return; }
+        const body = await readBody();
+        const sid = String(body.session || '');
+        if (!store.getAgentSession(sid)) { send(404, { ok: false, error: '会话不存在' }); return; }
+        if (agentLoop.running(sid)) { send(409, { ok: false, error: '该会话上一轮还在进行（可先停止）' }); return; }
+        const text = String(body.message == null ? '' : body.message).trim();
+        if (text === '') { send(400, { ok: false, error: '缺少 message' }); return; }
+        const seq = Number(body.seq);
+        if (!Number.isInteger(seq) || seq <= 0) { send(400, { ok: false, error: 'seq 非法（需为正整数）' }); return; }
+        const row = store.listAgentMessages(sid).find((x) => Number(x.seq) === seq);
+        if (!row) { send(400, { ok: false, error: `消息不存在：seq=${seq}` }); return; }
+        if (row.role !== 'user') { send(400, { ok: false, error: '只能编辑用户消息' }); return; }
+        const m = agentMentions(text);
+        if (m.error) { send(400, { ok: false, error: m.error, knownSkills: m.knownSkills }); return; }
+        resetSummaryIfBeyond(store, sid, seq);
+        const dropped = store.deleteAgentMessagesFrom(sid, seq);
+        const onEvent = (ev) => { if (agentEvents) agentEvents.publish(sid, ev); };
+        agentLoop.runTurn(sid, text, {
+          onEvent,
+          pinnedSkills: m.skills,
+          approvalMode: body.approvalMode === 'auto' || body.approvalMode === 'manual' ? body.approvalMode : undefined,
+        }).then((result) => onEvent({ type: 'turn_end', ok: result.ok, error: result.error || '', steps: result.steps || 0 }))
+          .catch((e) => onEvent({ type: 'turn_end', ok: false, error: String((e && e.message) || e) }));
+        log.log(`[agent] 编辑重发：seq ${seq} 起丢弃 ${dropped} 条消息`);
+        send(202, { ok: true, accepted: true, sessionId: sid, dropped });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/agent/decision') {

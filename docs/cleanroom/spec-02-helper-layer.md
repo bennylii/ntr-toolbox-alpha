@@ -1,7 +1,7 @@
 # spec-02：helper 层（设置工厂 / 白名单 / SettingUtils / TaskUtils / StorageUtils）
 
 重构对象：上游四个工具类 + 顶层设置工厂与白名单函数（约 400 行）。
-等价验证：`.e2e-auto-retry.js`、`.e2e-storage-utils.js`、`.e2e-panel-basics.js`、`.e2e-translator-mgmt.js`、`.e2e-collect-tasks.js` + 全套 e2e。
+等价验证：`.e2e-auto-retry.js`、`.e2e-storage-utils.js`、`.e2e-panel-basics.js`、`.e2e-translator-mgmt.js`、`.e2e-collect-tasks.js` + 全套 e2e；`keysForPath` 的 pipeline 双仓分写由 `.e2e-workspace-backup.js` B0 段定格（含 `history.pushState` 切页后 `update()` 双仓分写、`addGPTWorker` 默认落到 pipeline 仓）。
 公共 API 名全部保留（模块定义与面板直接调用）：`new*Setting`、`getModuleSetting`、`isModuleEnabledByWhitelist`、`SettingUtils`、`TaskUtils`、`StorageUtils`。
 
 ## 1. 设置工厂与读取
@@ -37,16 +37,44 @@
 - `clickButtons(name='')`：页面全部 button，`name===''` 或 textContent includes(name) 时派发可冒泡 click。
 
 ## 5. StorageUtils（全部静态；数据键与站点工作区约定对齐）
-- 键名域名分支：`sakura` = hostname 是 n.novelia.cc → `workspace-sakura`，否则 `sakura-workspace`；`gpt` → 恒 `workspace-gpt`。
+- 键名域名分支：`sakura` = hostname 是 n.novelia.cc → `workspace-sakura`，否则 `sakura-workspace`；`gpt` → 恒 `workspace-gpt`（2026-10-20 起只承载共享任务队列/记录）；`gptPipeline` → 恒 `workspace-gpt-pipeline`（GPT 翻译器）。
+- `keysForPath(pathname)`（2026-10-20 按上游 `fd90b2d4` 修订）：按路径返回该页 **worker 仓 / 任务仓** 两个键——`workspace/sakura` 与 `workspace/sakura-pipeline` → `{workers: sakura, jobs: sakura}`；`workspace/gpt-pipeline` 与过渡期 `workspace/gpt`（现在只是重定向）→ `{workers: gptPipeline, jobs: gpt}`；其它路径 → `null`（不改动任何仓）。上游旧 GPT 工作区已删除，`/workspace/gpt` 不再是独立页面；证据见 `docs/upstream-sync.md` ①②。
 - `_getData(key)`：JSON.parse 失败 → console.error + **移除损坏键**；返回结构永远补齐 `{workers:[], jobs:[], uncompletedJobs:[]}` 三个数组字段。
 - `_setData(key, data)`：序列化写回 + 派发合成 `StorageEvent`（带 key/newValue/url/storageArea）——站点页与同页监听者靠它感知变更。
-- `update()`：pathname 含 workspace/sakura → sakura 键、含 workspace/gpt → gpt 键，其他路径 no-op；内容读出再写回（等价于一次归一化 round-trip）。由主循环在 href 变化时调用。
+- `update()`：取 `keysForPath(pathname)`；`null` → no-op；否则**先写 workers 仓**，与 jobs 仓不同时**再写 jobs 仓**（内容读出再写回，等价于一次归一化 round-trip）。由主循环在 href 变化时调用。
 - `addSakuraWorker(id, endpoint, amount=null, prevSegLength=500, segLength=500)`：amount null/-1 → 单个 `id`；否则 `id+1..id+amount` 逐个。worker 形状 `{id, endpoint, prevSegLength, segLength}`；**同 id 覆盖不新增**。
-- `addGPTWorker(id, model, endpoint, key, amount=null)`：同上，worker 形状 `{id, type:'api', model, endpoint, key}`。
+- `addGPTWorker(id, model, endpoint, key, amount=null, storeKey=null)`：同上，worker 形状 `{id, type:'api', model, endpoint, key}`；`storeKey` 缺省时写 **`workspace-gpt-pipeline`**（不再随页面/旧仓变化），显式传入则用传入值。
 - `removeWorker(key, id)`：删单个 id。`removeAllWorkers(key, exclude=[])`：**只保留 id 在 exclude 里的**。
 - `addJob(key, task, description, createAt=now)`：无条件追加 `{task, description, createAt}`。
 - `addJobs(key, jobs=[], createAt=now)`：按 task 与已有任务**去重**后追加（createAt 统一为调用时刻）。
 - `getUncompletedJobs(key)`：返回归一化后的 `uncompletedJobs` 数组。
+
+### 5.1 工作区备份（导出/导入；2026-10-12 追加，本仓库自研）
+站点侧权威定义：auto-novel `web/src/stores/key.ts`（键名）、`web/src/stores/useWorkspaceStore.ts`（形状与加载期迁移）、`web/src/model/Translator.ts`（worker/job 字段）、`web/src/stores/workspaceJob.ts`（同名任务语义）。
+- `WORKSPACE_SECTIONS` / `sectionByName(name)` / `workspaceStoreKey(name)`：分区表（`gpt`→`workspace-gpt`、`gptPipeline`→`workspace-gpt-pipeline`、`sakura`→`workspace-sakura` 且兼容老镜像域名键 `sakura-workspace`）。`workspaceStoreKey` 取「本域已存在的候选」，都不存在时 Sakura 用上面的域名分支常量、其余用第一个候选——导入永远落到本域实际在用的键。
+  - `gpt` 分区自 2026-10-20 起标记 **`jobOnly: true`**：旧 GPT 工作区被上游删除，`workspace-gpt.workers` 不再由任何页面维护，备份只带 `jobs`/`uncompletedJobs`。
+- `readWorkspaceRaw(name)` / `normalizeWorkspace(data)`：读 + 归一化（三个数组必在，与 `_getData` 同容忍策略）。
+- `deepEqual(a, b)`：顺序无关深比较（`JSON.stringify` 比键序，会把「同一份数据、换个写入顺序」误判成覆盖并白写一遍）。
+- `exportWorkspace({sections, includeKeys})`：产出备份 bundle（格式见 §5.2）；`jobOnly` 分区导出时 `workers = []`；`includeKeys=false` 时 worker 的 `key` 置空并置 `keysOmitted: true`。
+- `assertWorkspaceBundle(raw)`：整体校验（kind/version/stores/分区名/三个数组必须是数组），不合法即抛——调用方据此保证「一个字节都不写」。
+- `migrateImportedWorker(section, worker)`：站点加载期迁移的镜像——GPT 分区丢 `type:'web'`，Sakura 分区删 `testContext`、`testSegLength`→`segLength`。
+- `planWorkspaceImport(bundle, {mode})`：纯计算的导入计划（预览与实际写入共用同一份，保证「预览即所得」），含分类计数与提示（跨域键映射、跳过项、保留 key、越界值仅提示等）。`jobOnly` 分区忽略备份 workers、保留本地 workers（replace 模式也一样），并提示「需要迁移请用『合并旧工作区翻译器』」。
+- `importWorkspace(bundle, {mode})`：校验 → 计划 → 逐键 `_getData`（三个数组之外的原样字段保留本地）+ 改写三个数组 + `_setData`（自带合成 StorageEvent）；返回分类计数与 `keysWritten`。
+
+### 5.2 工作区备份文件格式（v1）
+```
+{ kind: 'ntr-workspace-backup', version: 1, exportedAt, origin, hostname,
+  sourceKeys: { gpt, gptPipeline, sakura }, keysOmitted,
+  stores: { gpt: { workers, jobs, uncompletedJobs }, gptPipeline: {…}, sakura: {…} },
+  scriptQueue?: { version, exportedAt, jobs } }
+```
+- 分区名用语义名，实际 localStorage 键名记在 `sourceKeys`（导入按语义名落到**本域**的键 → 跨镜像域迁移天然可用，也不会凭空多建一个键）。
+- `gpt` 分区只承载 `workspace-gpt` 的 `jobs`/`uncompletedJobs`；导出时 `workers` 恒为 `[]`，导入时即使备份里带 `workers` 也忽略（v1 文件格式不变，旧备份仍可导入）。
+- 数组元素**逐字段原样带出**（含 `concurrency`、`profile`、legacy `type`、record 的 `progress`/`finishAt`）；除掩码外不做任何规范化。
+- 队列身份 = `task` 串；合并语义对齐站点：同名且本地未完成 → 跳过，同名已完成 → 覆盖；`uncompletedJobs` 按站点 `addJobRecord` 语义（同 task 覆盖）。
+- 掩码备份导入时：空 key 且本地同 id 有 key → **保留本地 key**（不覆盖成空）。
+- `scriptQueue` = 脚本自身术语队列（IndexedDB）既有 `exportBackup()` 的产物，导入复用 `importBackup()`。
+- 导入只写本机 localStorage，不向站点发任何写请求。
 
 ## 6. 与旧实现的刻意差异
 - 仅结构与命名另起；可观测行为（含 `removeAllWorkers` 只保留排除名单这一反直觉语义、`newNumberSetting` 的 `||0`）逐条保持——都有定格测试钉住。

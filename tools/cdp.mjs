@@ -5,14 +5,16 @@
 //   node tools/cdp.mjs evalf <file>        执行文件内容（async 函数体，可用 await）
 //   node tools/cdp.mjs inject              注入 ntr-toolbox-alpha.user.js（去 UserScript 头）
 //   node tools/cdp.mjs shot <out.png>      截图
+//   node tools/cdp.mjs setfiles <css选择器> <文件...>   给 <input type=file> 设置真实文件（DOM.setFileInputFiles）
 //   node tools/cdp.mjs logs [n]            打印最近的 console/日志（默认 30 条）
 //   node tools/cdp.mjs targets             列出页面目标
-// 环境: CDP_PORT 默认 9333
+// 环境: CDP_PORT 默认 9333；CDP_TIMEOUT_MS 覆盖单条 CDP 命令超时（默认 300000，真机长阶段可放宽）
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PORT = process.env.CDP_PORT || 9333;
+const CDP_TIMEOUT_MS = Math.max(1000, Number(process.env.CDP_TIMEOUT_MS) || 300000);
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 const httpJson = (url) => new Promise((resolve, reject) => {
@@ -70,7 +72,7 @@ class Client {
           this.pending.delete(id);
           reject(new Error('CDP timeout: ' + method));
         }
-      }, 300000);
+      }, CDP_TIMEOUT_MS);
     });
   }
 }
@@ -174,6 +176,26 @@ const main = async () => {
       const params = process.argv[4] ? JSON.parse(process.argv[4]) : {};
       const r = await client.send(cmd === 'cdp' ? arg : cmd, params);
       console.log(JSON.stringify(r, null, 2));
+      break;
+    }
+    case 'setfiles': {
+      // setfiles <css选择器> <文件...> —— 取元素 objectId 后交给 DOM.setFileInputFiles（文件走磁盘，不经过页面字符串）
+      const files = process.argv.slice(4).map((f) => path.resolve(f));
+      if (!arg || files.length === 0) { console.log('用法: setfiles <css选择器> <文件...>'); break; }
+      await client.send('DOM.enable').catch(() => { });
+      const r = await client.send('Runtime.evaluate', {
+        expression: `(() => { const el = document.querySelector(${JSON.stringify(arg)}); return el && el.tagName === 'INPUT' && el.type === 'file' ? el : null; })()`,
+        returnByValue: false,
+      });
+      const objectId = r.result && r.result.objectId;
+      if (!objectId) { console.log('not-found: ' + arg + '（需是 <input type=file>，且先把它渲染出来）'); break; }
+      await client.send('DOM.setFileInputFiles', { files, objectId });
+      const info = await client.send('Runtime.callFunctionOn', {
+        objectId,
+        functionDeclaration: 'function () { return { n: this.files.length, names: [...this.files].map((f) => f.name + " (" + f.size + "B)") }; }',
+        returnByValue: true,
+      });
+      console.log('setfiles ok:', JSON.stringify(info.result.value));
       break;
     }
     case 'logs': {
