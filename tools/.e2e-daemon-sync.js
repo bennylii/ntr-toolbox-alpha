@@ -24,8 +24,20 @@ try {
 
   const origAuth = localStorage.getItem('auth-v2');
   const origAddr = mod ? (mod.settings.find((s) => s.name === 'Daemon 地址') || {}).value : '';
+  const origGpt = localStorage.getItem('workspace-gpt');
+  const origPipe = localStorage.getItem('workspace-gpt-pipeline');
   localStorage.setItem('auth-v2', JSON.stringify({ token: 'e2e-token-123' }));
   setSetting(mod, 'Daemon 地址', 'http://127.0.0.1:7343');
+
+  // 0) 推送只带新工作区（workspace-gpt-pipeline）：旧仓 workers 已退役
+  localStorage.setItem('workspace-gpt-pipeline', JSON.stringify({ workers: [{ id: 'pipe-only', endpoint: 'http://127.0.0.1:8788/v1', model: 'm' }], jobs: [], uncompletedJobs: [] }));
+  localStorage.setItem('workspace-gpt', JSON.stringify({ workers: [{ id: 'legacy-only', endpoint: 'http://127.0.0.1:8788/v1', model: 'm' }], jobs: [], uncompletedJobs: [] }));
+  await mod.run(mod);
+  await sleep(500);
+  const seedPush = await fetch('http://127.0.0.1:7343/last').then((r) => r.json()).catch(() => null);
+  const pushedIds = (seedPush && seedPush.workers || []).map((w) => w && w.id);
+  check('推送只含 pipeline 翻译器，旧仓 workers 不上行',
+    pushedIds.includes('pipe-only') && !pushedIds.includes('legacy-only'), pushedIds);
 
   // 1) 成功路径：ping → 推送 → 状态行更新
   await mod.run(mod);
@@ -136,11 +148,13 @@ try {
   // 还原种子数据
   localStorage.removeItem('ntr-daemon-auth-fp');
   if (origAuth === null) localStorage.removeItem('auth-v2'); else localStorage.setItem('auth-v2', origAuth);
+  if (origGpt === null) localStorage.removeItem('workspace-gpt'); else localStorage.setItem('workspace-gpt', origGpt);
+  if (origPipe === null) localStorage.removeItem('workspace-gpt-pipeline'); else localStorage.setItem('workspace-gpt-pipeline', origPipe);
   if (mod) setSetting(mod, 'Daemon 地址', origAddr);
 } catch (e) {
   out.errors.push(String((e && e.stack) || e));
 } finally {
   mo.disconnect();
-  out.notes.push('cleanup: 会话键（web-kit:session:v1 / auth-v2 / auth）与 Daemon 地址已还原');
+  out.notes.push('cleanup: 会话键（web-kit:session:v1 / auth-v2 / auth）、工作区键与 Daemon 地址已还原');
 }
 return JSON.stringify(out, null, 1);

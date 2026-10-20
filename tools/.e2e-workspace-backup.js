@@ -1,6 +1,6 @@
 // 工作区备份（导出/导入站点工作区的翻译器与队列 + 可选术语队列）的 e2e 定格：
-// 文件格式 / 忠实性 / 掩码与 key 保留 / 合并与替换语义 / 站点加载期迁移镜像 / 跨域键映射 /
-// StorageEvent 派发 / 异常不写数据 / 面板可开且按钮通。
+// 文件格式 / 忠实性 / 掩码与 key 保留 / 合并与替换语义 / jobOnly（旧 GPT 仓只备份队列）/
+// 站点加载期迁移镜像 / 跨域键映射 / StorageEvent 派发 / 异常不写数据 / 面板可开且按钮通。
 // 语义直接打 _NTRGlossaryDev.StorageUtils（同一份实现，避免 DOM 驱动语义断言）；
 // 面板部分用 runModule('工作区备份') + 稳定 id（#wb-*）驱动，只验「能开、能导出、能预览、能应用」。
 // 跑法：node tools/.run-suite.mjs tools/.e2e-workspace-backup.js "http://127.0.0.1:8788/wenku/mock-src"
@@ -41,39 +41,44 @@ try {
         && S.workspaceStoreKey('gptPipeline') === 'workspace-gpt-pipeline'
         && S.workspaceStoreKey('sakura') === 'sakura-workspace');
 
-    // ---------- B0. 页面 → 键的归属（BETA 的 worker 与任务队列分属两个键）----------
-    // 上游 auto-novel @c11cdbfe：GptPipelineWorkspace.vue 里 workerStore=gpt-pipeline、jobStore=translatorId('gpt')
+    // ---------- B0. 页面 → 键的归属（新 GPT 工作区 worker 与任务队列分属两个键）----------
+    // 上游 auto-novel @fd90b2d4：旧 GptWorkspace 已删除，/workspace/gpt 重定向到 gpt-pipeline；
+    // GptPipelineWorkspace.vue 里 workerStore=gpt-pipeline、jobStore=translatorId('gpt')
     const kfp = (p) => S.keysForPath(p);
-    check('键归属：/workspace/gpt → worker/jobs 都是 workspace-gpt',
-        kfp('/workspace/gpt').workers === 'workspace-gpt' && kfp('/workspace/gpt').jobs === 'workspace-gpt', kfp('/workspace/gpt'));
-    check('键归属：BETA 页 worker 在 workspace-gpt-pipeline、jobs 仍在 workspace-gpt',
+    check('键归属：/workspace/gpt（重定向）→ worker=pipeline、jobs=workspace-gpt',
+        kfp('/workspace/gpt').workers === 'workspace-gpt-pipeline' && kfp('/workspace/gpt').jobs === 'workspace-gpt', kfp('/workspace/gpt'));
+    check('键归属：/workspace/gpt-pipeline worker 在 workspace-gpt-pipeline、jobs 仍在 workspace-gpt',
         kfp('/workspace/gpt-pipeline').workers === 'workspace-gpt-pipeline' && kfp('/workspace/gpt-pipeline').jobs === 'workspace-gpt', kfp('/workspace/gpt-pipeline'));
-    check('键归属：/workspace/sakura 两者同仓', kfp('/workspace/sakura').workers === S.sakura && kfp('/workspace/sakura').jobs === S.sakura, kfp('/workspace/sakura'));
+    check('键归属：/workspace/sakura 与 /workspace/sakura-pipeline 两者同仓',
+        kfp('/workspace/sakura').workers === S.sakura && kfp('/workspace/sakura').jobs === S.sakura
+        && kfp('/workspace/sakura-pipeline').workers === S.sakura && kfp('/workspace/sakura-pipeline').jobs === S.sakura,
+        { sakura: kfp('/workspace/sakura'), pipeline: kfp('/workspace/sakura-pipeline') });
     check('键归属：非工作区页返回 null', kfp('/novel/syosetu/n1') === null, kfp('/novel/syosetu/n1'));
 
-    // BETA 页的 update()：两个仓都补齐数组，worker 只在 BETA 仓、jobs 只在老仓
+    // pipeline 页的 update()：两个仓都补齐数组，worker 只在 pipeline 仓、jobs 只在共享仓
     const origPath = location.pathname;
-    setKey('workspace-gpt', { jobs: [{ task: 't1', description: 'd', createAt: 1 }] });
+    setKey('workspace-gpt', { workers: [{ id: '旧仓残留' }], jobs: [{ task: 't1', description: 'd', createAt: 1 }] });
     setKey('workspace-gpt-pipeline', { workers: [{ id: 'w-b', endpoint: 'http://x' }] });
     history.pushState({}, '', '/workspace/gpt-pipeline');
     await S.update();
     const betaAfter = readKey('workspace-gpt-pipeline');
     const legacyAfter = readKey('workspace-gpt');
-    check('BETA 页 update()：BETA 仓 workers 保持不变且数组补齐',
+    check('pipeline 页 update()：pipeline 仓 workers 保持不变且数组补齐',
         Array.isArray(betaAfter.workers) && betaAfter.workers.length === 1 && betaAfter.workers[0].id === 'w-b'
         && Array.isArray(betaAfter.jobs) && Array.isArray(betaAfter.uncompletedJobs), betaAfter);
-    check('BETA 页 update()：老仓 jobs 不被清空（队列与老工作区共用）',
-        Array.isArray(legacyAfter.jobs) && legacyAfter.jobs.length === 1 && legacyAfter.jobs[0].task === 't1', legacyAfter);
+    check('pipeline 页 update()：共享仓 jobs 不被清空、旧 workers 原样保留',
+        Array.isArray(legacyAfter.jobs) && legacyAfter.jobs.length === 1 && legacyAfter.jobs[0].task === 't1'
+        && legacyAfter.workers.length === 1 && legacyAfter.workers[0].id === '旧仓残留', legacyAfter);
     history.pushState({}, '', origPath);
 
-    // addGPTWorker 的落库目标：显式 storeKey（BETA）vs 默认（老工作区）
+    // addGPTWorker 的落库目标：显式 storeKey 与缺省都进新 pipeline 仓，绝不写旧仓 workers
     await S.addGPTWorker('ntr-beta-w', 'm', 'http://e', 'k', null, S.gptPipeline);
+    await S.addGPTWorker('ntr-default-w', 'm', 'http://e', 'k');
     const betaW = readKey('workspace-gpt-pipeline').workers.map((w) => w.id);
-    await S.addGPTWorker('ntr-legacy-w', 'm', 'http://e', 'k');
     const legacyW = readKey('workspace-gpt').workers.map((w) => w.id);
-    check('addGPTWorker 写 BETA 仓时只进 workspace-gpt-pipeline',
-        betaW.includes('ntr-beta-w') && !legacyW.includes('ntr-beta-w'), { betaW, legacyW });
-    check('addGPTWorker 不给 storeKey 时仍进老工作区', legacyW.includes('ntr-legacy-w'), legacyW);
+    check('addGPTWorker：显式 pipeline 与缺省都写 workspace-gpt-pipeline',
+        betaW.includes('ntr-beta-w') && betaW.includes('ntr-default-w') && !legacyW.includes('ntr-beta-w') && !legacyW.includes('ntr-default-w'), { betaW, legacyW });
+    check('addGPTWorker：旧仓 workers 不会被动到', JSON.stringify(legacyW) === JSON.stringify(['旧仓残留']), legacyW);
 
     // ---------- A. 导出结构与忠实性 ----------
     const gptStore = {
@@ -108,43 +113,50 @@ try {
         && bundle.sourceKeys.gptPipeline === 'workspace-gpt-pipeline'
         && bundle.sourceKeys.sakura === 'sakura-workspace', bundle.sourceKeys);
     check('导出：keysOmitted=false（含 key 导出）', bundle.keysOmitted === false);
-    check('导出：GPT 分区逐字段忠实（含 legacy type/concurrency）',
-        JSON.stringify(bundle.stores.gpt) === JSON.stringify(gptStore), bundle.stores.gpt);
-    check('导出：BETA 分区逐字段忠实（含 profile/concurrency）',
+    check('导出：旧 GPT 分区 workers 恒为空（jobOnly），队列/记录逐字段忠实',
+        Array.isArray(bundle.stores.gpt.workers) && bundle.stores.gpt.workers.length === 0
+        && JSON.stringify(bundle.stores.gpt.jobs) === JSON.stringify(gptStore.jobs)
+        && JSON.stringify(bundle.stores.gpt.uncompletedJobs) === JSON.stringify(gptStore.uncompletedJobs), bundle.stores.gpt);
+    check('导出：pipeline 分区逐字段忠实（含 profile/concurrency）',
         JSON.stringify(bundle.stores.gptPipeline) === JSON.stringify(betaStore), bundle.stores.gptPipeline);
     check('导出：Sakura 分区逐字段忠实（含 segLength/prevSegLength）',
         JSON.stringify(bundle.stores.sakura) === JSON.stringify(sakuraStore), bundle.stores.sakura);
 
-    // 分区勾选：只导 gpt
+    // 分区勾选：只导 gpt（jobOnly 且无 workers → keysOmitted 保持 false）
     const onlyGpt = await S.exportWorkspace({ sections: ['gpt'], includeKeys: true });
-    check('导出：只含被勾选分区', Object.keys(onlyGpt.stores).length === 1 && Object.keys(onlyGpt.stores)[0] === 'gpt', Object.keys(onlyGpt.stores));
+    check('导出：只含被勾选分区，且 jobOnly 分区不带 workers',
+        Object.keys(onlyGpt.stores).length === 1 && Object.keys(onlyGpt.stores)[0] === 'gpt'
+        && onlyGpt.stores.gpt.workers.length === 0 && onlyGpt.keysOmitted === false, onlyGpt.stores);
 
     // 掩码导出
     const masked = await S.exportWorkspace({ sections: ['gpt', 'gptPipeline'], includeKeys: false });
-    check('掩码导出：keysOmitted=true 且 key 置空、其余字段不变',
+    check('掩码导出：pipeline key 置空、其余字段不变；gpt 仍无 workers',
         masked.keysOmitted === true
-        && masked.stores.gpt.workers.every((w) => w.key === '')
-        && masked.stores.gpt.workers[0].endpoint === 'http://127.0.0.1:8788/v1'
-        && masked.stores.gptPipeline.workers[0].key === '', masked.stores.gpt.workers);
+        && masked.stores.gpt.workers.length === 0
+        && masked.stores.gptPipeline.workers[0].key === ''
+        && masked.stores.gptPipeline.workers[0].endpoint === 'http://127.0.0.1:8788/v1', masked.stores.gptPipeline.workers);
 
-    // ---------- B. 合并导入 + 掩码不吃 key ----------
-    const mergeBundle = {
+    // ---------- B. 合并导入：gpt 只进队列、pipeline 走完整 worker 语义 ----------
+    const storageEvents = [];
+    const onStorage = (e) => storageEvents.push(e);
+    window.addEventListener('storage', onStorage);
+    const mergeGptBundle = {
         kind: 'ntr-workspace-backup', version: 1, exportedAt: Date.now(),
         origin: location.origin, hostname: location.hostname,
         sourceKeys: { gpt: 'workspace-gpt' }, keysOmitted: true,
         stores: {
             gpt: {
                 workers: [
-                    { id: '甲1', type: 'api', endpoint: 'http://127.0.0.1:8788/v1', model: 'deepseek-chat', key: '' },  // 同 id 同内容 + 空 key → 保留本地 key（不变）
-                    { id: '甲2', endpoint: 'http://127.0.0.1:8788/v1', model: 'm2-changed', key: '' },                 // 同 id 有变化 → 覆盖，key 保留
-                    { id: '丙1', endpoint: 'http://127.0.0.1:8788/v1', model: 'm9', key: '' },                         // 新增 + 本地无 key
-                    { id: '丁1', type: 'web', model: 'legacy', endpoint: 'https://chat.openai.com' },                  // 旧 web → 跳过
-                    { endpoint: 'http://no-id.example' },                                                              // 无 id → 跳过
+                    { id: '甲1', type: 'api', endpoint: 'http://127.0.0.1:8788/v1', model: 'deepseek-chat', key: '' },
+                    { id: '甲2', endpoint: 'http://127.0.0.1:8788/v1', model: 'm2-changed', key: '' },
+                    { id: '丙1', endpoint: 'http://127.0.0.1:8788/v1', model: 'm9', key: '' },
+                    { id: '丁1', type: 'web', model: 'legacy', endpoint: 'https://chat.openai.com' },
+                    { endpoint: 'http://no-id.example' },
                 ],
                 jobs: [
-                    { task: gptStore.jobs[0].task, description: '同名未完成', createAt: 333 },                          // 同名未完成 → 跳过
-                    { task: 'web/mock/tb-2?level=all', description: '新任务', createAt: 444 },                          // 新增
-                    { task: gptStore.jobs[1].task, description: '同名已完成改名', createAt: 555 },                      // 本地已完成 → 覆盖
+                    { task: gptStore.jobs[0].task, description: '同名未完成', createAt: 333 },
+                    { task: 'web/mock/tb-2?level=all', description: '新任务', createAt: 444 },
+                    { task: gptStore.jobs[1].task, description: '同名已完成改名', createAt: 555 },
                 ],
                 uncompletedJobs: [
                     { task: gptStore.uncompletedJobs[0].task, description: '记录覆盖', createAt: 666, progress: { finished: 1, error: 1, total: 2 } },
@@ -153,38 +165,66 @@ try {
             },
         },
     };
-    const storageEvents = [];
-    const onStorage = (e) => storageEvents.push(e);
-    window.addEventListener('storage', onStorage);
-    const mergeResult = await S.importWorkspace(mergeBundle, { mode: 'merge' });
-    window.removeEventListener('storage', onStorage);
+    const mergeResult = await S.importWorkspace(mergeGptBundle, { mode: 'merge' });
     const afterMerge = readKey('workspace-gpt');
-    check('合并导入：计数 = 新增1/覆盖1/不变1/跳过web1/无id1/保留key2',
-        mergeResult.workersAdded === 1 && mergeResult.workersUpdated === 1 && mergeResult.workersSame === 1
-        && mergeResult.workersSkippedWeb === 1 && mergeResult.workersInvalid === 1 && mergeResult.keysKept === 2, mergeResult);
-    check('合并导入：写入 1 个键且派发 StorageEvent',
+    check('gpt 合并：备份里的 5 个旧翻译器全被忽略（计数 0，提示忽略）',
+        mergeResult.workersAdded === 0 && mergeResult.workersUpdated === 0 && mergeResult.workersSame === 0
+        && mergeResult.workersSkippedWeb === 0 && mergeResult.workersInvalid === 0 && mergeResult.keysKept === 0
+        && mergeResult.plan.notes.some((n) => n.includes('5 个旧 GPT 翻译器已忽略')), { result: mergeResult, notes: mergeResult.plan.notes });
+    check('gpt 合并：本地旧 workers 原样保留（不删不改）',
+        JSON.stringify(afterMerge.workers) === JSON.stringify(gptStore.workers), afterMerge.workers.map((w) => w.id));
+    check('gpt 合并：计数 = 队列新增1/跳过1/覆盖1、记录覆盖1/新增1',
+        mergeResult.jobsSkipped === 1 && mergeResult.jobsAdded === 1 && mergeResult.jobsReplaced === 1
+        && mergeResult.recordsReplaced === 1 && mergeResult.recordsAdded === 1, mergeResult);
+    check('gpt 合并：写入 1 个键且派发 StorageEvent',
         mergeResult.keysWritten === 1 && storageEvents.some((e) => e.key === 'workspace-gpt'),
         { keysWritten: mergeResult.keysWritten, events: storageEvents.map((e) => e.key) });
-    check('合并导入：同 id 空 key 不吃掉本地凭据',
-        afterMerge.workers[0].key === 'sk-fake-1' && afterMerge.workers[1].key === 'sk-fake-2', afterMerge.workers.map((w) => w.id + ':' + w.key));
-    check('合并导入：覆盖带变化字段（model=m2-changed）', afterMerge.workers[1].model === 'm2-changed');
-    check('合并导入：新条目按空 key 导入（keysMissing 计数）',
-        afterMerge.workers.length === 3 && mergeResult.keysMissing === 1 && afterMerge.workers.some((w) => w.id === '丙1' && w.key === ''),
-        { workers: afterMerge.workers.map((w) => w.id), keysMissing: mergeResult.keysMissing });
-    check('合并导入：旧 web 条目未写入', !afterMerge.workers.some((w) => w.id === '丁1'));
-    check('合并导入：队列同名未完成跳过、新任务追加、已完成被覆盖',
-        mergeResult.jobsSkipped === 1 && mergeResult.jobsAdded === 1 && mergeResult.jobsReplaced === 1
-        && afterMerge.jobs.length === 3
+    check('gpt 合并：队列同名未完成跳过、新任务追加、已完成被覆盖',
+        afterMerge.jobs.length === 3
         && afterMerge.jobs[0].description === '测试书一'
         && afterMerge.jobs[1].description === '同名已完成改名'
-        && afterMerge.jobs[2].task === 'web/mock/tb-2?level=all', mergeResult);
-    check('合并导入：已完成记录同 task 覆盖 + 新记录追加（progress 保留）',
-        mergeResult.recordsReplaced === 1 && mergeResult.recordsAdded === 1
-        && afterMerge.uncompletedJobs.length === 2
+        && afterMerge.jobs[2].task === 'web/mock/tb-2?level=all', afterMerge.jobs);
+    check('gpt 合并：已完成记录同 task 覆盖 + 新记录追加（progress 保留）',
+        afterMerge.uncompletedJobs.length === 2
         && afterMerge.uncompletedJobs[0].description === '记录覆盖'
         && afterMerge.uncompletedJobs[0].progress.error === 1, afterMerge.uncompletedJobs);
-    check('合并导入：BETA 分区未在备份里 → 原样不动',
+    check('gpt 合并：pipeline 分区未在备份里 → 原样不动',
         JSON.stringify(readKey('workspace-gpt-pipeline')) === JSON.stringify(betaStore));
+
+    // pipeline：空 key 不吃本地凭据、旧 web/无 id 跳过、新条目缺失 key 计数
+    storageEvents.length = 0;
+    const mergePipeBundle = {
+        kind: 'ntr-workspace-backup', version: 1, exportedAt: Date.now(),
+        sourceKeys: { gptPipeline: 'workspace-gpt-pipeline' }, keysOmitted: true,
+        stores: {
+            gptPipeline: {
+                workers: [
+                    { id: 'B1', endpoint: 'http://127.0.0.1:8788/v1', model: 'm3-changed', key: '' },
+                    { id: 'B2', endpoint: 'http://127.0.0.1:8788/v1', model: 'm4', key: '' },
+                    { id: 'web1', type: 'web', endpoint: 'https://chat.openai.com' },
+                    { endpoint: 'http://no-id.example' },
+                ],
+                jobs: [{ task: 'web/mock/beta?level=all', description: 'pipeline 任务', createAt: 8 }],
+                uncompletedJobs: [],
+            },
+        },
+    };
+    const pipeMerge = await S.importWorkspace(mergePipeBundle, { mode: 'merge' });
+    const afterPipe = readKey('workspace-gpt-pipeline');
+    check('pipeline 合并：计数 = 覆盖1/新增1/保留key1/缺key1/跳过web1/无id1',
+        pipeMerge.workersUpdated === 1 && pipeMerge.workersAdded === 1 && pipeMerge.keysKept === 1
+        && pipeMerge.keysMissing === 1 && pipeMerge.workersSkippedWeb === 1 && pipeMerge.workersInvalid === 1, pipeMerge);
+    check('pipeline 合并：同 id 空 key 不吃掉本地凭据，变化字段生效',
+        afterPipe.workers.find((w) => w.id === 'B1').key === 'sk-beta'
+        && afterPipe.workers.find((w) => w.id === 'B1').model === 'm3-changed', afterPipe.workers);
+    check('pipeline 合并：新条目按空 key 导入、旧 web 未写入',
+        afterPipe.workers.some((w) => w.id === 'B2' && w.key === '')
+        && !afterPipe.workers.some((w) => w.id === 'web1'), afterPipe.workers.map((w) => w.id));
+    check('pipeline 合并：写入 pipeline 键且派发 StorageEvent',
+        pipeMerge.keysWritten === 1 && storageEvents.some((e) => e.key === 'workspace-gpt-pipeline'), storageEvents.map((e) => e.key));
+    check('pipeline 合并：不碰旧 GPT 仓',
+        JSON.stringify(readKey('workspace-gpt').workers) === JSON.stringify(afterMerge.workers));
+    window.removeEventListener('storage', onStorage);
 
     // ---------- C. 站点迁移镜像 + Sakura 提示 ----------
     const migBundle = {
@@ -218,18 +258,30 @@ try {
         && readKey('sakura-workspace').workers.some((w) => w.id === '丙2' && w.segLength === 400),
         { keysWritten: migResult.keysWritten, hasSakuraKey: localStorage.getItem('workspace-sakura') !== null });
 
-    // ---------- D. 整表替换 ----------
+    // ---------- D. 整表替换（pipeline）+ jobOnly 替换仍保留本地旧 workers ----------
+    setKey('workspace-gpt-pipeline', {
+        workers: [{ id: 'w1' }, { id: 'w2' }, { id: 'w3' }],
+        jobs: [{ task: 'a' }, { task: 'b' }, { task: 'c' }],
+        uncompletedJobs: [{ task: 'r1' }, { task: 'r2' }],
+    });
     const replaceBundle = {
         kind: 'ntr-workspace-backup', version: 1, exportedAt: Date.now(),
-        sourceKeys: { gpt: 'workspace-gpt' },
-        stores: { gpt: { workers: [{ id: '独苗', endpoint: 'http://x', model: 'm', key: 'k' }], jobs: [{ task: 'web/mock/only?level=all', description: '唯一', createAt: 1 }], uncompletedJobs: [] } },
+        sourceKeys: { gptPipeline: 'workspace-gpt-pipeline' },
+        stores: { gptPipeline: { workers: [{ id: '独苗', endpoint: 'http://x', model: 'm', key: 'k' }], jobs: [{ task: 'web/mock/only?level=all', description: '唯一', createAt: 1 }], uncompletedJobs: [] } },
     };
     const replaceResult = await S.importWorkspace(replaceBundle, { mode: 'replace' });
-    const afterReplace = readKey('workspace-gpt');
+    const afterReplace = readKey('workspace-gpt-pipeline');
     check('整表替换：条目集合等于备份（含删除计数 3 翻译器 / 3 队列 / 2 记录）',
         replaceResult.workersRemoved === 3 && replaceResult.jobsRemoved === 3 && replaceResult.recordsRemoved === 2
         && afterReplace.workers.length === 1 && afterReplace.workers[0].id === '独苗'
         && afterReplace.jobs.length === 1 && afterReplace.uncompletedJobs.length === 0, replaceResult);
+    const jobOnlyReplace = S.planWorkspaceImport({
+        kind: 'ntr-workspace-backup', version: 1,
+        stores: { gpt: { workers: [{ id: '备份旧翻译器', endpoint: 'http://x' }], jobs: [], uncompletedJobs: [] } },
+    }, { mode: 'replace' });
+    check('jobOnly 整表替换：workers 保持本地值、提示忽略旧翻译器',
+        JSON.stringify(jobOnlyReplace.sections[0].nextWorkers) === JSON.stringify(afterMerge.workers)
+        && jobOnlyReplace.notes.some((n) => n.includes('已忽略')), jobOnlyReplace.sections[0].nextWorkers);
 
     // ---------- E. 异常：报错且一个字节都不写 ----------
     const beforeBad = KEYS.map((k) => localStorage.getItem(k));
@@ -258,9 +310,11 @@ try {
     const ov = document.getElementById('ntr-workspace-backup-overlay');
     check('面板：runModule 打开覆盖层', !!ov);
     const summaryReady = await waitFor(() => ov.querySelectorAll('#wb-summary tbody tr').length === 4, 4000);
+    const summaryRows = [...ov.querySelectorAll('#wb-summary tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent));
+    const gptRow = summaryRows.find((cells) => cells[0].includes('GPT 共享任务队列'));
     check('面板：概览 3 个工作区行 + 脚本队列行',
-        summaryReady && ov.querySelectorAll('#wb-summary tbody tr').length === 4,
-        ov.querySelectorAll('#wb-summary tbody tr').length);
+        summaryReady && summaryRows.length === 4, summaryRows);
+    check('面板：旧 GPT 分区翻译器列显示「—（不备份）」', gptRow && gptRow[2].includes('—'), gptRow);
     check('面板：分区勾选与按钮齐备',
         !!ov && ['wb-sec-gpt', 'wb-sec-gptPipeline', 'wb-sec-sakura', 'wb-sec-queue', 'wb-keys', 'wb-export-file', 'wb-copy', 'wb-pick', 'wb-preview', 'wb-apply', 'wb-mode', 'wb-import-json'].every((id) => !!ov.querySelector('#' + id)));
     check('面板：应用按钮初始禁用', ov && ov.querySelector('#wb-apply').disabled === true);
@@ -272,32 +326,37 @@ try {
     const exportedText = ov.querySelector('#wb-export-json').value;
     let exportedObj = null;
     try { exportedObj = JSON.parse(exportedText); } catch (e) { }
-    check('面板：导出为文件 → textarea 里是合法备份（含 gpt、不含被取消勾选分区）',
+    check('面板：导出为文件 → textarea 里是合法备份（含 gpt、不含被取消勾选分区、gpt 无 workers）',
         exportedObj && exportedObj.kind === 'ntr-workspace-backup'
         && !!exportedObj.stores.gpt && !exportedObj.stores.gptPipeline
+        && exportedObj.stores.gpt.workers.length === 0
         && Boolean(exportedObj.scriptQueue === undefined || Array.isArray((exportedObj.scriptQueue || {}).jobs)),
         exportedObj && Object.keys(exportedObj.stores));
 
-    // 导入预览 + 应用
+    // 导入预览 + 应用：pipeline 写翻译器、gpt 写共享队列
     const panelBundle = {
         kind: 'ntr-workspace-backup', version: 1, exportedAt: Date.now(),
-        sourceKeys: { gpt: 'workspace-gpt' },
-        stores: { gpt: { workers: [{ id: '面板新增', endpoint: 'http://127.0.0.1:8788/v1', model: 'mm', key: 'kk' }], jobs: [{ task: 'web/mock/panel?level=expire', description: '面板任务', createAt: 9 }], uncompletedJobs: [] } },
+        sourceKeys: { gpt: 'workspace-gpt', gptPipeline: 'workspace-gpt-pipeline' },
+        stores: {
+            gpt: { workers: [], jobs: [{ task: 'web/mock/panel?level=expire', description: '面板任务', createAt: 9 }], uncompletedJobs: [] },
+            gptPipeline: { workers: [{ id: '面板新增', endpoint: 'http://127.0.0.1:8788/v1', model: 'mm', key: 'kk' }], jobs: [], uncompletedJobs: [] },
+        },
     };
     ov.querySelector('#wb-import-json').value = JSON.stringify(panelBundle);
     ov.querySelector('#wb-preview').click();
     await waitFor(() => (ov.querySelector('#wb-apply') || {}).disabled === false, 4000);
     const previewText = ov.querySelector('#wb-preview-box').textContent;
-    check('面板：预览显示计数与明细', previewText.includes('新增 1') && previewText.includes('面板新增') && previewText.includes('面板任务'), previewText.slice(0, 200));
+    check('面板：预览显示计数与明细', previewText.includes('新增 1') && previewText.includes('面板新增') && previewText.includes('面板任务'), previewText.slice(0, 240));
     check('面板：预览里任务带书链接（web/mock/panel → /novel/mock/panel）',
         !!ov.querySelector('#wb-preview-box a[href="/novel/mock/panel"]'), ov.querySelector('#wb-preview-box').innerHTML.slice(0, 300));
     const mark = toasts.length;
     ov.querySelector('#wb-apply').click();
-    await waitFor(() => (readKey('workspace-gpt').workers || []).some((w) => w.id === '面板新增'), 4000);
-    const afterPanel = readKey('workspace-gpt');
-    check('面板：应用后条目写入 + 成功提示',
+    await waitFor(() => ((readKey('workspace-gpt-pipeline') || {}).workers || []).some((w) => w.id === '面板新增'), 4000);
+    const afterPanel = readKey('workspace-gpt-pipeline');
+    const afterPanelGpt = readKey('workspace-gpt');
+    check('面板：应用后翻译器写入 pipeline、任务写入共享仓 + 成功提示',
         afterPanel.workers.some((w) => w.id === '面板新增' && w.key === 'kk')
-        && afterPanel.jobs.some((j) => j.task === 'web/mock/panel?level=expire')
+        && afterPanelGpt.jobs.some((j) => j.task === 'web/mock/panel?level=expire')
         && toasts.slice(mark).some((t) => t.includes('导入完成')), toasts.slice(mark));
     check('面板：应用后预览清空、按钮复位',
         ov.querySelector('#wb-preview-box').textContent === '' && ov.querySelector('#wb-apply').disabled === true);

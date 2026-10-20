@@ -52,27 +52,24 @@
         return setting ? setting.value : undefined;
     }
 
-    // 站点工作区里配置的 GPT 翻译器：老工作区存 workspace-gpt，
-    // 新版「GPT工作区BETA」(/workspace/gpt-pipeline) 另存一份 workspace-gpt-pipeline —— 两处都要读，否则新工作区里加的翻译器在设置里看不到
-    const WORKSPACE_GPT_KEYS = ['workspace-gpt-pipeline', 'workspace-gpt'];
+    // 站点工作区里配置的 GPT 翻译器：2026-10-20 上游删除了旧 GPT 工作区（/workspace/gpt 重定向到
+    // /workspace/gpt-pipeline），pipeline 是唯一活跃的翻译器仓；旧 workspace-gpt 只剩共享任务队列。
+    // 旧仓里的 workers 只在「合并旧工作区翻译器」模块里按需读取，普通链路不再合并。
+    const WORKSPACE_GPT_KEY = 'workspace-gpt-pipeline';
     const readWorkspaceGptWorkers = () => {
+        let workers = [];
+        try {
+            const raw = localStorage.getItem(WORKSPACE_GPT_KEY);
+            workers = raw ? ((JSON.parse(raw) || {}).workers || []) : [];
+        } catch (e) { workers = []; }
         const seen = new Set();
-        const out = [];
-        for (const key of WORKSPACE_GPT_KEYS) {
-            let workers = [];
-            try {
-                const raw = localStorage.getItem(key);
-                workers = raw ? ((JSON.parse(raw) || {}).workers || []) : [];
-            } catch (e) { workers = []; }
-            for (const w of workers) {
-                if (!w || !w.id || !w.endpoint) continue;
-                const sig = `${w.id}|${w.endpoint}|${w.model || ''}`;
-                if (seen.has(sig)) continue;
-                seen.add(sig);
-                out.push(w);
-            }
-        }
-        return out;
+        return workers.filter((w) => {
+            if (!w || !w.id || !w.endpoint) return false;
+            const id = String(w.id);
+            if (seen.has(id)) return false;
+            seen.add(id);
+            return true;
+        });
     };
 
     // 站点会话 token 的存放位置（按新→旧回落）：
@@ -193,7 +190,7 @@
             newStringSetting('bind', 'none'),
         ],
         run: async function (cfg) {
-            // 工作区键按当前页面判定（BETA 页的 worker 在 workspace-gpt-pipeline）；都不是就无事可做
+            // 工作区键按当前页面判定（gpt-pipeline 的 worker 在 workspace-gpt-pipeline）；都不是就无事可做
             const key = (StorageUtils.keysForPath(location.pathname) || {}).workers;
             if (!key) return;
 
@@ -708,7 +705,7 @@
             newBooleanSetting('仅清空已完成', false),
         ],
         run: async function (cfg) {
-            // 队列键：sakura 仓自用；GPT 两个页面（老工作区与 BETA）共用 workspace-gpt 的 jobs
+            // 队列键：sakura 仓自用；GPT 工作区（gpt-pipeline）与旧工作区共用 workspace-gpt 的 jobs
             const key = (StorageUtils.keysForPath(window.location.pathname) || {}).jobs;
             if (!key) {
                 NotificationUtils.showError('无法确定工作区类型');
@@ -2066,10 +2063,11 @@
         },
     };
 
-    // 站点新版「GPT工作区BETA」(/workspace/gpt-pipeline) 用的是另一个存储键 workspace-gpt-pipeline，
-    // 翻译器不会自动搬过去 —— 这个模块就是把老工作区的 GPT 翻译器一键复制过去（任务队列不搬）
-    const moduleCopyWorkersToBeta = {
-        name: '复制翻译器到BETA工作区',
+    // 一次性迁移：上游 2026-10-20 删除旧 GPT 工作区后，旧 workspace-gpt 里的翻译器站点已不再展示。
+    // 普通读取只看 workspace-gpt-pipeline；这个模块是唯一按需读取旧 workers 的入口。
+    // 只合并 worker，不动旧仓数据，也不动新仓的 jobs/uncompletedJobs。
+    const moduleMergeLegacyWorkers = {
+        name: '合并旧工作区翻译器',
         type: 'onclick',
         whitelist: ['/workspace', '/novel', '/wenku', '/favorite'],
         settings: [
@@ -2084,40 +2082,44 @@
                     return raw ? (JSON.parse(raw) || {}) : {};
                 } catch (e) { return {}; }
             };
-            const BETA_KEY = 'workspace-gpt-pipeline';
-            // 'web' 类型是老工作区里被站点自己淘汰的（chat.openai.com 那套），不搬
-            const src = (readStore('workspace-gpt').workers || []).filter((w) => w && w.id && w.endpoint && w.type !== 'web');
+            const legacy = readStore('workspace-gpt');
+            const rawWorkers = Array.isArray(legacy.workers) ? legacy.workers : [];
+            const invalid = rawWorkers.filter((w) => !w || !w.id || !w.endpoint).length;
+            const src = rawWorkers.filter((w) => w && w.id && w.endpoint);
             if (src.length === 0) {
-                NotificationUtils.showWarning('老「GPT工作区」里没有可复制的翻译器');
+                NotificationUtils.showWarning(`旧工作区（workspace-gpt）里没有可合并的翻译器${invalid ? `（跳过无效 ${invalid} 个）` : ''}`);
                 return;
             }
-            const betaRaw = readStore(BETA_KEY);
-            const beta = {
-                workers: Array.isArray(betaRaw.workers) ? betaRaw.workers : [],
-                jobs: Array.isArray(betaRaw.jobs) ? betaRaw.jobs : [],
-                uncompletedJobs: Array.isArray(betaRaw.uncompletedJobs) ? betaRaw.uncompletedJobs : [],
-            };
-            let added = 0, updated = 0, skipped = 0;
+            const target = await StorageUtils._getData(WORKSPACE_GPT_KEY);
+            let added = 0, updated = 0, skipped = 0, web = 0;
             src.forEach((w) => {
-                const i = beta.workers.findIndex((x) => x && x.id === w.id);
-                if (i < 0) { beta.workers.push(Object.assign({}, w)); added++; }
-                else if (overwrite) { beta.workers[i] = Object.assign({}, w); updated++; }
+                // 'web' 类型是站点早已淘汰的 chat.openai.com 模式，不迁移
+                if (w.type === 'web') { web++; return; }
+                const i = target.workers.findIndex((x) => x && x.id === w.id);
+                if (i < 0) { target.workers.push(Object.assign({}, w)); added++; }
+                else if (overwrite) { target.workers[i] = Object.assign({}, w); updated++; }
                 else skipped++;
             });
+            const tail = [
+                added ? `新增 ${added}` : '',
+                updated ? `覆盖 ${updated}` : '',
+                skipped ? `跳过同名 ${skipped}` : '',
+                web ? `跳过旧 web ${web}` : '',
+                invalid ? `跳过无效 ${invalid}` : '',
+            ].filter(Boolean).join('，');
             if (added + updated === 0) {
-                NotificationUtils.showWarning(`BETA 工作区里已有同名翻译器（${skipped} 个），勾选「覆盖同名翻译器」可更新`);
+                const reason = skipped > 0 ? `新工作区已有同名翻译器（${skipped} 个）` : '没有可迁移的翻译器';
+                NotificationUtils.showWarning(`${reason}${tail ? `（${tail}）` : ''}${skipped > 0 ? '；勾选「覆盖同名翻译器」可更新' : ''}`);
                 return;
             }
-            const text = JSON.stringify(beta);
-            localStorage.setItem(BETA_KEY, text);
-            // 通知页面上已经打开的 BETA 工作区（VueUse 的 useLocalStorage 监听 storage 事件），避免它下一次保存把我们的写入顶掉
-            window.dispatchEvent(new StorageEvent('storage', { key: BETA_KEY, newValue: text, url: location.href, storageArea: localStorage }));
-            NotificationUtils.showSuccess(`已复制 ${added} 个翻译器到 BETA 工作区${updated ? `，更新 ${updated} 个` : ''}${skipped ? `，跳过同名 ${skipped} 个` : ''}`);
+            await StorageUtils._setData(WORKSPACE_GPT_KEY, target);
+            NotificationUtils.showSuccess(`已合并 ${added + updated} 个旧工作区翻译器到新工作区（${tail}）`);
         },
     };
 
     // 站点工作区（翻译器 + 任务队列）的备份/恢复：导出/导入本机 localStorage 的
-    // workspace-gpt / workspace-gpt-pipeline / workspace-sakura（「GPT工作区BETA」的任务队列也存在 workspace-gpt 里），
+    // workspace-gpt-pipeline / workspace-gpt / workspace-sakura（gpt-pipeline 的任务队列存在 workspace-gpt；
+    // 旧 GPT 工作区已删除，workspace-gpt 只备份队列与完成记录），
     // 可选打包脚本自己的术语队列（IndexedDB）。契约与文件格式：docs/cleanroom/spec-02-helper-layer.md §5
     const moduleWorkspaceBackup = {
         name: '工作区备份',
@@ -2132,162 +2134,9 @@
         },
     };
 
-    // 把老工作区 workspace-gpt 与「GPT工作区BETA」workspace-gpt-pipeline 的翻译器当成同一份配置（按 id 映射），
-    // 三路合并后写回两边：base = 上次同步的结果（存在我们自己的 ntr-workspace-sync，站点键不碰）。
-    //   · 只在一边出现的翻译器 → 复制到另一边
-    //   · 上次同步后从一边消失的 → 另一边也删掉（删除能生效，不会"复活"）
-    //   · 同一条的某个字段两边都改了 → 按「当前所在的工作区」取值（不在工作区页面时按老工作区）
-    // 任务队列（jobs/uncompletedJobs）各自保留不动；老式 type:'web' 翻译器不参与（站点自己已淘汰）。
-    const WORKSPACE_SYNC_STATE = 'ntr-workspace-sync';
-    const WORKSPACE_PAIR = { legacy: 'workspace-gpt', beta: 'workspace-gpt-pipeline' };
-
-    const readWorkspaceStoreFull = (key) => {
-        let obj = {};
-        try {
-            const raw = localStorage.getItem(key);
-            obj = raw ? (JSON.parse(raw) || {}) : {};
-        } catch (e) { obj = {}; }
-        return {
-            workers: Array.isArray(obj.workers) ? obj.workers : [],
-            jobs: Array.isArray(obj.jobs) ? obj.jobs : [],
-            uncompletedJobs: Array.isArray(obj.uncompletedJobs) ? obj.uncompletedJobs : [],
-        };
-    };
-    const syncableWorker = (w) => !!w && !!w.id && w.type !== 'web';
-    const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-    const workerSig = (w) => JSON.stringify([w.endpoint, w.model, w.key]);
-
-    const mergeWorkerFields = (a, b, baseW, preferSide) => {
-        const out = {};
-        const keys = new Set([...Object.keys(a || {}), ...Object.keys(b || {}), ...Object.keys(baseW || {})]);
-        keys.forEach((k) => {
-            const av = a ? a[k] : undefined;
-            const bv = b ? b[k] : undefined;
-            const baseV = baseW ? baseW[k] : undefined;
-            if (sameJson(av, bv)) { if (av !== undefined) out[k] = av; return; }
-            if (sameJson(av, baseV)) { if (bv !== undefined) out[k] = bv; return; }   // 只有 BETA 改过
-            if (sameJson(bv, baseV)) { if (av !== undefined) out[k] = av; return; }   // 只有老工作区改过
-            const pick = preferSide === 'beta' ? bv : av;
-            if (pick !== undefined) out[k] = pick;
-        });
-        return out;
-    };
-
-    const currentWorkspaceSide = () => {
-        if (location.pathname.includes('/workspace/gpt-pipeline')) return 'beta';
-        if (location.pathname.includes('/workspace/gpt')) return 'legacy';
-        return null;
-    };
-
-    const syncWorkspaceTranslators = (preferSide) => {
-        const L = readWorkspaceStoreFull(WORKSPACE_PAIR.legacy);
-        const B = readWorkspaceStoreFull(WORKSPACE_PAIR.beta);
-        let base = {};
-        let hasBase = false;
-        try {
-            const raw = localStorage.getItem(WORKSPACE_SYNC_STATE);
-            if (raw) { base = (JSON.parse(raw) || {}).workers || {}; hasBase = true; }
-        } catch (e) { base = {}; }
-
-        const toMap = (workers) => {
-            const m = new Map();
-            workers.filter(syncableWorker).forEach((w) => m.set(String(w.id), w));
-            return m;
-        };
-        const lMap = toMap(L.workers);
-        const bMap = toMap(B.workers);
-
-        // 内容一样但 id 不同（老工作区用自定义名字、BETA 弹窗拿模型名当 id）→ 视为同一条，统一用老工作区的 id
-        const bTwin = new Map();
-        bMap.forEach((w, id) => { const s = workerSig(w); if (!bTwin.has(s)) bTwin.set(s, id); });
-        lMap.forEach((w, id) => {
-            if (bMap.has(id)) return;
-            const twin = bTwin.get(workerSig(w));
-            if (twin && !lMap.has(twin)) {
-                bMap.set(id, bMap.get(twin));
-                bMap.delete(twin);
-                bTwin.delete(workerSig(w));
-            }
-        });
-
-        const beforeIds = new Set([...lMap.keys(), ...bMap.keys()]);
-        const merged = new Map();
-        let added = 0, updated = 0, removed = 0;
-        [...new Set([...beforeIds, ...Object.keys(base)])].forEach((id) => {
-            const a = lMap.get(id), b = bMap.get(id);
-            const baseW = base[id];
-            if (baseW && !a && !b) { removed++; return; }        // 两边都删了
-            if (baseW && a && !b) { removed++; return; }         // BETA 删了 → 老工作区跟着删（删除优先）
-            if (baseW && !a && b) { removed++; return; }         // 老工作区删了 → BETA 跟着删
-            if (!a && !b) return;
-            if (!baseW && a && !b) { merged.set(id, Object.assign({}, a, { id })); added++; return; }
-            if (!baseW && !a && b) { merged.set(id, Object.assign({}, b, { id })); added++; return; }
-            const m = mergeWorkerFields(a, b, baseW || {}, preferSide);
-            m.id = id;
-            if (!sameJson(m, a) || !sameJson(m, b)) updated++;
-            merged.set(id, m);
-        });
-
-        const orderedIds = [];
-        const seenId = new Set();
-        [lMap, bMap].forEach((map) => map.forEach((_, id) => {
-            if (!merged.has(id) || seenId.has(id)) return;
-            seenId.add(id);
-            orderedIds.push(id);
-        }));
-        const mergedWorkers = orderedIds.map((id) => merged.get(id));
-
-        // 不参与同步的条目（web 类型等）原样留在各自存储里
-        let wrote = 0;
-        const apply = (key, store, keepTail) => {
-            const next = mergedWorkers.concat(keepTail);
-            if (sameJson(store.workers, next)) return;
-            const text = JSON.stringify({ workers: next, jobs: store.jobs, uncompletedJobs: store.uncompletedJobs });
-            localStorage.setItem(key, text);
-            // 让页面上已打开的工作区（VueUse 的 useLocalStorage 监听 storage）同步，避免它下次保存把写入顶掉
-            window.dispatchEvent(new StorageEvent('storage', { key, newValue: text, url: location.href, storageArea: localStorage }));
-            wrote++;
-        };
-        apply(WORKSPACE_PAIR.legacy, L, L.workers.filter((w) => !syncableWorker(w)));
-        apply(WORKSPACE_PAIR.beta, B, B.workers.filter((w) => !syncableWorker(w)));
-
-        if (added + updated + removed > 0 || !hasBase) {
-            localStorage.setItem(WORKSPACE_SYNC_STATE, JSON.stringify({ at: Date.now(), workers: Object.fromEntries(merged) }));
-        }
-        return { added, updated, removed, wrote, total: mergedWorkers.length };
-    };
-
-    // 离开任一工作区页面后仍在跑（keep 模块在被启动后跨页面持续轮询），所以"切出时同步"是靠下一次轮询落地的
-    const moduleWorkspaceSync = {
-        name: '工作区翻译器自动同步',
-        type: 'keep',
-        whitelist: ['/novel', '/wenku', '/favorite', '/workspace'],
-        settings: [
-            newBooleanSetting('自动同步', true),
-            newStringSetting('bind', 'none'),
-        ],
-        _lastRun: 0,
-        _interval: 3000,
-        _wasActive: false,
-        run: async function (cfg) {
-            if (getModuleSetting(cfg, '自动同步') === false) return;
-            const now = Date.now();
-            if (!this._wasActive) {
-                this._wasActive = true;
-                NotificationUtils.showSuccess('工作区翻译器自动同步已开启（老工作区 ⇄ BETA 工作区）');
-            }
-            if (now - this._lastRun < this._interval) return;
-            this._lastRun = now;
-            try {
-                const r = syncWorkspaceTranslators(currentWorkspaceSide());
-                if (r.added + r.updated + r.removed > 0) {
-                    NotificationUtils.showSuccess(`工作区翻译器已同步：新增 ${r.added} · 更新 ${r.updated} · 删除 ${r.removed}`);
-                }
-            } catch (e) {
-                console.error('工作区翻译器自动同步失败', e);
-            }
-        },
-    };
+    // 旧「工作区翻译器自动同步」已随上游删除旧 GPT 工作区一并退役：
+    // 旧 workspace-gpt 不再有站点 UI，pipeline 是唯一活跃的翻译器仓；需要迁移旧数据时用「合并旧工作区翻译器」。
+    // 历史快照键 ntr-workspace-sync 不再读写（保留原值，可手动清理）。
 
     const defaultModules = [
         moduleAddSakuraTranslator,
@@ -2307,10 +2156,9 @@
         moduleSentenceFix,
         moduleGlossaryRollback,
         moduleGlossaryQueue,
-        moduleCopyWorkersToBeta,
+        moduleMergeLegacyWorkers,
         moduleWorkspaceBackup,
         moduleDaemonSync,
-        moduleWorkspaceSync,
         moduleSyncStorage,
     ];
 
@@ -2580,12 +2428,12 @@
                 },
             },
             {
-                id: 'workspace-gpt', name: '工作区翻译器存储', site: true,
+                id: 'workspace-gpt-pipeline', name: 'GPT 工作区翻译器存储', site: true,
                 run: () => {
                     const ws = readWorkspaceGptWorkers() || [];
                     return ws.length
                         ? { status: 'ok', detail: `${ws.length} 个：${ws.map((w) => w.id).slice(0, 4).join('、')}${ws.length > 4 ? '…' : ''}` }
-                        : { status: 'info', detail: '没有找到工作区翻译器（workspace-gpt / workspace-gpt-pipeline 都空）：术语表需要用「临时端点」' };
+                        : { status: 'info', detail: '没有找到 GPT 工作区翻译器（workspace-gpt-pipeline 为空）：术语表需要用「临时端点」' };
                 },
             },
             {
@@ -7538,7 +7386,7 @@
     // -----------------------------------
     // Storage Utils
     // -----------------------------------
-    // 站点工作区数据（workspace-sakura / workspace-gpt）的读写层（clean-room 重写，契约：docs/cleanroom/spec-02-helper-layer.md §5）
+    // 站点工作区数据（workspace-sakura / workspace-gpt-pipeline / workspace-gpt）的读写层（clean-room 重写，契约：docs/cleanroom/spec-02-helper-layer.md §5）
     // 注意：这是「上游工作区」的 localStorage，不是分叉术语队列的 IndexedDB 库（ntr-glossary）
     class StorageUtils {
         // n.novelia.cc 与老镜像域的工作区键名不同；gpt 两域同名
@@ -7547,13 +7395,15 @@
         static gptPipeline = 'workspace-gpt-pipeline';
 
         // 当前页面该读写哪两个键：worker 列表与任务队列在上游不一定同仓
-        // BETA 页 /workspace/gpt-pipeline 的 worker 在 workspace-gpt-pipeline，
-        // 任务队列却仍与老工作区共用 workspace-gpt（上游 GptPipelineWorkspace.vue:41-45）
+        // 2026-10-20 上游：/workspace 默认重定向到 /workspace/sakura-pipeline；
+        // /workspace/gpt 重定向到 /workspace/gpt-pipeline（旧 GPT 工作区已删除）。
+        // pipeline 的 worker 在 workspace-gpt-pipeline，任务队列仍与旧工作区共用 workspace-gpt。
         static keysForPath(pathname) {
             const p = String(pathname || '');
             if (p.includes('workspace/sakura')) return { workers: this.sakura, jobs: this.sakura };
             if (p.includes('workspace/gpt-pipeline')) return { workers: this.gptPipeline, jobs: this.gpt };
-            if (p.includes('workspace/gpt')) return { workers: this.gpt, jobs: this.gpt };
+            // /workspace/gpt 现在只是重定向；仍按重定向后的新工作区处理，避免过渡期写回已死的旧 worker 仓
+            if (/^\/workspace\/gpt\/?$/.test(p)) return { workers: this.gptPipeline, jobs: this.gpt };
             return null;
         }
 
@@ -7562,7 +7412,7 @@
             const keys = this.keysForPath(window.location.pathname);
             if (!keys) return;
             await this._setData(keys.workers, await this._getData(keys.workers));
-            // BETA 页两个仓各归各：BETA 仓此前从没被我们碰过，站点侧的 worker 变更我们看不到
+            // pipeline 的两个仓各归各：pipeline 仓是当前 worker 仓，老仓只留共享任务队列
             if (keys.jobs !== keys.workers) {
                 await this._setData(keys.jobs, await this._getData(keys.jobs));
             }
@@ -7625,8 +7475,8 @@
         }
 
         static async addGPTWorker(id, model, endpoint, key, amount = null, storeKey = null) {
-            // BETA 页加的翻译器要进 BETA 的 worker 仓；其它页面沿用老工作区
-            const target = storeKey || this.gpt;
+            // 旧 GPT 工作区已退役：缺省写当前活跃的 pipeline 仓
+            const target = storeKey || this.gptPipeline;
             const data = await this._getData(target);
             const total = amount ?? -1;
             const ids = (total === -1) ? [id] : Array.from({ length: total }, (_, i) => `${id}${i + 1}`);
@@ -7676,8 +7526,9 @@
         // worker/job 字段 web/src/model/Translator.ts；同名任务语义 web/src/stores/workspaceJob.ts
         // -----------------------------------
         static WORKSPACE_SECTIONS = [
-            { name: 'gpt', label: 'GPT 工作区', keys: ['workspace-gpt'] },
-            { name: 'gptPipeline', label: 'GPT BETA 工作区', keys: ['workspace-gpt-pipeline'] },
+            // 旧 GPT 工作区已被上游删除：workspace-gpt 只剩与 pipeline 共用的任务队列/记录，备份不再带旧 workers
+            { name: 'gpt', label: 'GPT 共享任务队列（workspace-gpt）', keys: ['workspace-gpt'], jobOnly: true },
+            { name: 'gptPipeline', label: 'GPT 工作区（workspace-gpt-pipeline）', keys: ['workspace-gpt-pipeline'] },
             // 老镜像域的 Sakura 键名是 sakura-workspace（本站点为 workspace-sakura）：两者都认，导入落到本域实际的键
             { name: 'sakura', label: 'Sakura 工作区', keys: ['workspace-sakura', 'sakura-workspace'] },
         ];
@@ -7726,7 +7577,10 @@
             let keysOmitted = false;
             for (const name of picked) {
                 sourceKeys[name] = this.workspaceStoreKey(name);
+                const def = this.sectionByName(name);
                 const store = this.normalizeWorkspace(this.readWorkspaceRaw(name));
+                // 旧 GPT 工作区的翻译器已退役：只备份它的共享队列与完成记录
+                if (def && def.jobOnly) store.workers = [];
                 if (!includeKeys) {
                     store.workers = store.workers.map((w) => {
                         if (w && typeof w === 'object' && Object.prototype.hasOwnProperty.call(w, 'key')) {
@@ -7817,12 +7671,19 @@
                 const def = this.sectionByName(name);
                 if (!def) continue;
                 const key = this.workspaceStoreKey(name);
+                const jobOnly = def.jobOnly === true;
                 const local = this.normalizeWorkspace(this.readWorkspaceRaw(name));
                 const incoming = this.normalizeWorkspace(rawStore);
 
                 const workers = { added: [], updated: [], same: [], removed: [], skippedWeb: [], invalid: [], keysKept: [], missingKey: [], migrated: 0 };
                 let nextWorkers;
-                if (replace) {
+                if (jobOnly) {
+                    // 旧 GPT 工作区只备份任务队列：旧 workers 一律不导入，保留本机现有值
+                    nextWorkers = local.workers.slice();
+                    if (incoming.workers.length > 0) {
+                        notes.push(`${def.label}：备份里的 ${incoming.workers.length} 个旧 GPT 翻译器已忽略；需要迁移请用「合并旧工作区翻译器」模块`);
+                    }
+                } else if (replace) {
                     nextWorkers = [];
                     for (const raw of incoming.workers) {
                         const m = this.migrateImportedWorker(name, raw);
@@ -7925,13 +7786,15 @@
                 if (name === 'sakura' && !nextWorkers.some((w) => w && w.id === '共享')) {
                     notes.push('Sakura：导入结果里没有「共享」条目 —— 站点下次加载会按默认值补回（useWorkspaceStore 的 migrate）');
                 }
-                const outOfRange = [];
-                for (const w of nextWorkers) {
-                    const concurrency = Number(w && w.concurrency);
-                    if (Number.isFinite(concurrency) && (concurrency < 1 || concurrency > 100)) outOfRange.push(`${w.id}.concurrency=${w.concurrency}`);
-                    if (w && w.segLength !== undefined && Number(w.segLength) < 100) outOfRange.push(`${w.id}.segLength=${w.segLength}`);
+                if (!jobOnly) {
+                    const outOfRange = [];
+                    for (const w of nextWorkers) {
+                        const concurrency = Number(w && w.concurrency);
+                        if (Number.isFinite(concurrency) && (concurrency < 1 || concurrency > 100)) outOfRange.push(`${w.id}.concurrency=${w.concurrency}`);
+                        if (w && w.segLength !== undefined && Number(w.segLength) < 100) outOfRange.push(`${w.id}.segLength=${w.segLength}`);
+                    }
+                    if (outOfRange.length > 0) notes.push(`值超出站点界面范围（仅提示，仍原样导入）：${outOfRange.slice(0, 6).join('、')}${outOfRange.length > 6 ? ` …共 ${outOfRange.length} 处` : ''}`);
                 }
-                if (outOfRange.length > 0) notes.push(`值超出站点界面范围（仅提示，仍原样导入）：${outOfRange.slice(0, 6).join('、')}${outOfRange.length > 6 ? ` …共 ${outOfRange.length} 处` : ''}`);
 
                 sections.push({ name, label: def.label, key, writes, nextWorkers, nextJobs, nextRecords, workers, jobs, records });
             }
@@ -8012,7 +7875,7 @@
         const tbody = el('tbody');
         table.appendChild(tbody);
         overview.appendChild(table);
-        overview.appendChild(hint('「GPT工作区BETA」的翻译器在 workspace-gpt-pipeline，但它的任务队列与老工作区共用 workspace-gpt；Sakura 工作区两者都在 workspace-sakura。'));
+        overview.appendChild(hint('新版 GPT 工作区（/workspace/gpt-pipeline）的翻译器在 workspace-gpt-pipeline，任务队列与 workspace-gpt 共用；旧 GPT 工作区已删除，旧 workspace-gpt 的翻译器只会在「合并旧工作区翻译器」里按需读取。Sakura 工作区（/workspace/sakura-pipeline 与旧 /workspace/sakura）两者都在 workspace-sakura。'));
         body.appendChild(overview);
 
         // ---- 导出 ----
@@ -8051,7 +7914,7 @@
         exportTa.readOnly = true;
         exportTa.style.cssText = TEXTAREA_CSS;
         exportBox.appendChild(exportTa);
-        exportBox.appendChild(hint('备份文件只应留在本机：里面是站点工作区的翻译器（含端点，默认含 key）与任务队列。'));
+        exportBox.appendChild(hint('备份文件只应留在本机：里面是站点工作区的翻译器（含端点，默认含 key）与任务队列。旧 GPT 工作区的翻译器不会进入备份。'));
         body.appendChild(exportBox);
 
         // ---- 导入 ----
@@ -8135,7 +7998,8 @@
                 const tr = el('tr');
                 tr.appendChild(el('td', null, s.label));
                 tr.appendChild(el('td', null, key));
-                tr.appendChild(el('td', null, exists ? String(data.workers.length) : '（本域无该键）'));
+                const workerCell = exists ? (s.jobOnly ? '—（不备份）' : String(data.workers.length)) : '（本域无该键）';
+                tr.appendChild(el('td', null, workerCell));
                 tr.appendChild(el('td', null, String(data.jobs.length)));
                 tr.appendChild(el('td', null, String(data.uncompletedJobs.length)));
                 tbody.appendChild(tr);
@@ -8149,7 +8013,7 @@
             tr.appendChild(el('td', null, ''));
             tr.appendChild(el('td', null, ''));
             tbody.appendChild(tr);
-            statsEl.textContent = `${location.hostname} · 站点工作区备份（翻译器 + 队列）`;
+            statsEl.textContent = `${location.hostname} · 工作区备份（GPT 翻译器 + 共享队列 + Sakura）`;
             footHint.textContent = '导入只动本机 localStorage；「合并」不会删条目，「整表替换」才会。';
         };
 
@@ -9435,7 +9299,7 @@
         writeGlossaryMerged,
         parseGlossaryText,
         parseGlossaryEntries,
-        syncWorkspaceTranslators,
+        readWorkspaceGptWorkers,
         GlossaryReport,
         GlossaryFix,
         loadGlossaryParallelText,
